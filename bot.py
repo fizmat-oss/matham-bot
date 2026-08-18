@@ -5,27 +5,105 @@ import json
 import asyncio
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
+
+# Чтение списка админов (через запятую)
+ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
+ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit()]
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 DB_FILE = "database.json"
 
+# --- СТРУКТУРА БАЗЫ ДАННЫХ (3 уровня вложенности + файлы) ---
 DEFAULT_DATABASE = {
-    "combinatorics": {"description": "✅ Материалы по комбинаторике:", "files": []},
-    "algebra": {"description": "✅ Материалы по алгебре:", "files": []},
-    "geometry": {"description": "✅ Материалы по геометрии:", "files": []},
-    "number_theory": {"description": "✅ Материалы по теории чисел:", "files": []},
-    "inequalities": {"description": "✅ Материалы по неравенствам:", "files": []},
-    "olympiads": {"description": "✅ Олимпиадные задачи:", "files": []}
+    "geometry": {
+        "title": "📐 Геометрия",
+        "blocks": {
+            "transformations": {
+                "title": "🔄 Преобразования плоскости",
+                "topics": {
+                    "inversion": {"title": "Инверсия", "files": []},
+                    "homothety": {"title": "Гомотетия и поворот", "files": []},
+                    "symmetry": {"title": "Симметрия", "files": []}
+                }
+            },
+            "analytic": {
+                "title": "📊 Аналитические методы",
+                "topics": {
+                    "complex": {"title": "Комплексные числа", "files": []},
+                    "barycentric": {"title": "Барицентрические координаты", "files": []},
+                    "vectors": {"title": "Векторный метод", "files": []}
+                }
+            }
+        }
+    },
+    "algebra": {
+        "title": "🧮 Алгебра",
+        "blocks": {
+            "polynomials": {
+                "title": "📐 Многочлены",
+                "topics": {
+                    "roots": {"title": "Теорема Виета и корни", "files": []},
+                    "divisibility": {"title": "Деление и теорема Безу", "files": []}
+                }
+            },
+            "functional_eq": {
+                "title": "⚙️ Функциональные уравнения",
+                "topics": {
+                    "substitution": {"title": "Метод подстановок", "files": []},
+                    "cauchy_eq": {"title": "Уравнение Коши", "files": []}
+                }
+            }
+        }
+    },
+    "number_theory": {
+        "title": "🔢 Теория чисел",
+        "blocks": {
+            "divisibility": {
+                "title": "🔍 Делимость и сравнения",
+                "topics": {
+                    "congruences": {"title": "Сравнения по модулю", "files": []},
+                    "euler_fermat": {"title": "Теоремы Эйлера и Ферма", "files": []}
+                }
+            },
+            "advanced_nt": {
+                "title": "🚀 Продвинутые методы",
+                "topics": {
+                    "lte": {"title": "LTE (Lifting The Exponent)", "files": []},
+                    "diophantine": {"title": "Диофантовы уравнения", "files": []}
+                }
+            }
+        }
+    },
+    "inequalities": {
+        "title": "⚖️ Неравенства",
+        "blocks": {
+            "classical": {
+                "title": "📐 Классические",
+                "topics": {
+                    "am_gm": {"title": "AM-GM (Коши о средних)", "files": []},
+                    "cauchy_schwarz": {"title": "Коши-Буняковский-Шварц", "files": []}
+                }
+            },
+            "advanced_ineq": {
+                "title": "🔥 Продвинутые",
+                "topics": {
+                    "jensen": {"title": "Йенсен и выпуклые функции", "files": []},
+                    "uvw": {"title": "Метод uvw", "files": []}
+                }
+            }
+        }
+    }
 }
 
 def load_db():
@@ -43,91 +121,229 @@ def save_db(db_data):
 
 DATABASE = load_db()
 
+# --- FSM ДЛЯ АДМИНОВ ---
+class FileUpload(StatesGroup):
+    selecting_path = State()
+
+def get_main_menu_keyboard():
+    builder = []
+    for cat_key, cat_data in DATABASE.items():
+        builder.append([InlineKeyboardButton(text=cat_data["title"], callback_data=f"cat:{cat_key}")])
+    return InlineKeyboardMarkup(inline_keyboard=builder)
+
+# ==========================================
+#        АДМИН: ИНТЕРАКТИВНОЕ ДОБАВЛЕНИЕ
+# ==========================================
 @dp.message(F.document)
-async def admin_add_file_handler(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return await message.answer("ℹ️ Отправка файлов доступна только администратору.")
-
-    caption = message.caption
-    if not caption or "|" not in caption:
-        return await message.answer(
-            "⚠️ **Формат добавления файла:**\n"
-            "Отправь PDF и напиши в подписи:\n"
-            "`категория | Название файла`\n\n"
-            "**Доступные категории:** `combinatorics`, `algebra`, `geometry`, `number_theory`, `inequalities`, `olympiads`\n\n"
-            "*Пример:* `algebra | Базовая алгебра лекция 1`"
-        )
-
-    category, file_name = map(str.strip, caption.split("|", 1))
-    category = category.lower()
-
-    if category not in DATABASE:
-        return await message.answer(f"❌ Категории `{category}` не существует!")
+async def admin_doc_received(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.answer("ℹ️ Отправка файлов доступна только администраторам.")
 
     doc = message.document
-    new_file = {
-        "file_id": doc.file_id,
-        "caption": file_name
-    }
+    file_id = doc.file_id
+    file_name = message.caption if message.caption else doc.file_name
 
-    DATABASE[category]["files"].append(new_file)
+    await state.update_data(file_id=file_id, file_name=file_name)
+    await state.set_state(FileUpload.selecting_path)
+
+    builder = []
+    for cat_key, cat_data in DATABASE.items():
+        builder.append([InlineKeyboardButton(text=cat_data["title"], callback_data=f"a_cat:{cat_key}")])
+    builder.append([InlineKeyboardButton(text="❌ Отмена", callback_data="a_cancel")])
+    
+    await message.answer(
+        f"📥 **Получен файл:** `{file_name}`\n\nВыбери **Категорию** для сохранения:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
+    )
+
+@dp.callback_query(FileUpload.selecting_path, F.data == "a_cancel")
+async def admin_cancel_upload(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("❌ Загрузка файла отменена.")
+    await callback.answer()
+
+@dp.callback_query(FileUpload.selecting_path, F.data.startswith("a_cat:"))
+async def admin_select_cat(callback: types.CallbackQuery):
+    cat_key = callback.data.split(":")[1]
+    cat_data = DATABASE[cat_key]
+
+    builder = []
+    for b_key, b_data in cat_data["blocks"].items():
+        builder.append([InlineKeyboardButton(text=b_data["title"], callback_data=f"a_blk:{cat_key}:{b_key}")])
+    builder.append([InlineKeyboardButton(text="❌ Отмена", callback_data="a_cancel")])
+
+    await callback.message.edit_text(f"📁 **{cat_data['title']}**\nВыбери **Блок**:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
+    await callback.answer()
+
+@dp.callback_query(FileUpload.selecting_path, F.data.startswith("a_blk:"))
+async def admin_select_blk(callback: types.CallbackQuery):
+    _, cat_key, b_key = callback.data.split(":")
+    block_data = DATABASE[cat_key]["blocks"][b_key]
+
+    builder = []
+    for t_key, t_data in block_data["topics"].items():
+        builder.append([InlineKeyboardButton(text=f"• {t_data['title']}", callback_data=f"a_top:{cat_key}:{b_key}:{t_key}")])
+    builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"a_cat:{cat_key}")])
+
+    await callback.message.edit_text(f"📁 **{block_data['title']}**\nВыбери **Тему**:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
+    await callback.answer()
+
+@dp.callback_query(FileUpload.selecting_path, F.data.startswith("a_top:"))
+async def admin_select_top(callback: types.CallbackQuery, state: FSMContext):
+    _, cat_key, b_key, t_key = callback.data.split(":")
+    
+    data = await state.get_data()
+    file_id, file_name = data.get("file_id"), data.get("file_name")
+
+    new_file = {"file_id": file_id, "caption": file_name}
+    DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]["files"].append(new_file)
     save_db(DATABASE)
 
-    await message.answer(
-        f"✅ **Файл успешно добавлен!**\n\n"
-        f"📁 **Категория:** `{category}`\n"
-        f"📄 **Название:** {file_name}\n"
-        f"🔑 **file_id:** `{doc.file_id}`"
+    topic_title = DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]["title"]
+    await callback.message.edit_text(
+        f"✅ **Файл сохранен!**\n\n"
+        f"📁 `{DATABASE[cat_key]['title']}` ➔ `{DATABASE[cat_key]['blocks'][b_key]['title']}` ➔ `{topic_title}`\n"
+        f"📄 `{file_name}`"
     )
+    await state.clear()
+    await callback.answer()
 
+# ==========================================
+#   ПОЛЬЗОВАТЕЛЬ: 4-УРОВНЕВАЯ НАВИГАЦИЯ
+# ==========================================
+
+# 1. Показ блоков выбранной категории
+@dp.callback_query(F.data.startswith("cat:"))
+async def process_category_click(callback: types.CallbackQuery):
+    cat_key = callback.data.split(":")[1]
+    cat_data = DATABASE.get(cat_key)
+
+    builder = [[InlineKeyboardButton(text=b_data["title"], callback_data=f"blk:{cat_key}:{b_key}")] 
+               for b_key, b_data in cat_data["blocks"].items()]
+    builder.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")])
+    
+    await callback.message.edit_text(f"Раздел **{cat_data['title']}**.\nВыбери блок:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
+    await callback.answer()
+
+# 2. Показ тем выбранного блока
+@dp.callback_query(F.data.startswith("blk:"))
+async def process_block_click(callback: types.CallbackQuery):
+    _, cat_key, b_key = callback.data.split(":")
+    block_data = DATABASE[cat_key]["blocks"][b_key]
+
+    builder = [[InlineKeyboardButton(text=f"• {t_data['title']}", callback_data=f"top:{cat_key}:{b_key}:{t_key}")] 
+               for t_key, t_data in block_data["topics"].items()]
+    builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cat:{cat_key}")])
+
+    await callback.message.edit_text(f"Блок **{block_data['title']}**.\nВыбери тему:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
+    await callback.answer()
+
+# 3. ПОКАЗ ФАЙЛОВ (4-й УРОВЕНЬ НАВИГАЦИИ)
+@dp.callback_query(F.data.startswith("top:"))
+async def process_topic_click(callback: types.CallbackQuery):
+    _, cat_key, b_key, t_key = callback.data.split(":")
+    topic_data = DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]
+
+    if not topic_data["files"]:
+        return await callback.answer("📁 В этой теме пока нет файлов.", show_alert=True)
+
+    builder = []
+    for idx, item in enumerate(topic_data["files"]):
+        # Обрезаем название, если оно слишком длинное (Telegram лимит для кнопок)
+        btn_text = f"📄 {item['caption'][:30]}" + ("..." if len(item['caption']) > 30 else "")
+        builder.append([InlineKeyboardButton(text=btn_text, callback_data=f"file:{cat_key}:{b_key}:{t_key}:{idx}")])
+    
+    builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"blk:{cat_key}:{b_key}")])
+
+    await callback.message.edit_text(
+        f"Тема: **{topic_data['title']}**\n⬇️ Выбери файл для скачивания:", 
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
+    )
+    await callback.answer()
+
+# 4. ОТПРАВКА ВЫБРАННОГО ФАЙЛА
+@dp.callback_query(F.data.startswith("file:"))
+async def process_file_click(callback: types.CallbackQuery):
+    _, cat_key, b_key, t_key, file_idx = callback.data.split(":")
+    file_idx = int(file_idx)
+    
+    topic_data = DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]
+    
+    if file_idx >= len(topic_data["files"]):
+        return await callback.answer("❌ Файл больше не доступен.", show_alert=True)
+        
+    file_item = topic_data["files"][file_idx]
+    
+    await callback.answer("Отправляю файл... ⏳")
+    # Отправляем документ отдельным сообщением, оставляя меню открытым!
+    await callback.message.answer_document(document=file_item["file_id"], caption=f"📄 {file_item['caption']}")
+
+@dp.callback_query(F.data == "menu:main")
+async def process_back_to_main(callback: types.CallbackQuery):
+    await callback.message.edit_text("📂 **Каталог файлов**\nВыбери раздел:", reply_markup=get_main_menu_keyboard())
+    await callback.answer()
+
+# ==========================================
+#     КОМАНДЫ И ГЛОБАЛЬНЫЙ ПОИСК
+# ==========================================
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
     await message.answer(
-        "Здарова! ✌️\nЯ бот канала matham.\n"
-        "Доступные разделы: `combinatorics`, `algebra`, `geometry`, `number_theory`, `inequalities`, `olympiads`.\n\n"
-        "Просто напиши ключевое слово или жми **«Удиви меня»**! 🎲"
+        "Здарова! ✌️\nЯ бот канала matham.\n\n"
+        "🔎 **Поиск:** Просто напиши название темы или файла.\n"
+        "📂 **Каталог:** Выбери раздел из меню ниже:",
+        reply_markup=get_main_menu_keyboard()
     )
-
-@dp.message(Command("help"))
-async def cmd_help(message: types.Message):
-    await message.answer("Отправь ключевое слово (например, `algebra`), чтобы получить файлы.")
-
-async def send_task_files(message: types.Message, task):
-    if not task["files"]:
-        return await message.answer("📁 В этом разделе пока нет файлов.")
-
-    await message.answer(task["description"])
-    for item in task["files"]:
-        try:
-            await message.answer_document(document=item["file_id"], caption=f"📄 {item['caption']}")
-        except Exception as e:
-            logger.error(f"Ошибка отправки file_id: {e}")
 
 @dp.message(Command("surprise"))
 async def cmd_surprise(message: types.Message):
-    random_key = random.choice(list(DATABASE.keys()))
-    await message.answer(f"🎲 Тема: **{random_key.upper()}**!")
-    await send_task_files(message, DATABASE[random_key])
+    all_files = []
+    for c_data in DATABASE.values():
+        for b_data in c_data["blocks"].values():
+            for t_data in b_data["topics"].values():
+                for f in t_data["files"]:
+                    all_files.append((f, t_data["title"]))
+    
+    if not all_files:
+        return await message.answer("📁 В базе пока нет файлов.")
+
+    selected_file, topic_name = random.choice(all_files)
+    await message.answer(f"🎲 Случайный файл из темы: **{topic_name}**")
+    await message.answer_document(document=selected_file["file_id"], caption=f"📄 {selected_file['caption']}")
 
 @dp.message(F.text & ~F.text.startswith("/"))
-async def find_file(message: types.Message):
+async def global_search_handler(message: types.Message):
     query = message.text.strip().lower()
     if query in ["удиви меня", "surprise", "рандом"]:
         return await cmd_surprise(message)
-    
-    task = DATABASE.get(query)
-    if task:
-        await send_task_files(message, task)
-    else:
-        await message.answer("❌ Такого слова не нашлось. Попробуй /help")
 
+    found_files = []
+    for cat_data in DATABASE.values():
+        for block_data in cat_data["blocks"].values():
+            for topic_data in block_data["topics"].values():
+                for f in topic_data["files"]:
+                    if query in topic_data["title"].lower() or query in f["caption"].lower():
+                        found_files.append((f, topic_data["title"]))
+
+    if not found_files:
+        return await message.answer("🔍 Ничего не найдено. Попробуй меню:", reply_markup=get_main_menu_keyboard())
+
+    await message.answer(f"🔍 Найдено файлов: **{len(found_files)}**")
+    for file_info, topic_name in found_files[:10]:
+        await message.answer_document(
+            document=file_info["file_id"],
+            caption=f"📄 **{file_info['caption']}**\n📌 Тема: _{topic_name}_"
+        )
+
+# ==========================================
+#        ЗАПУСК СЕРВЕРА И БОТА
+# ==========================================
 async def set_main_menu(bot: Bot):
-    main_menu_commands = [
-        BotCommand(command="start", description="Запустить бота 🚀"),
-        BotCommand(command="help", description="Как пользоваться? ℹ️"),
-        BotCommand(command="surprise", description="Удиви меня 🎲")
-    ]
-    await bot.set_my_commands(main_menu_commands)
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Главное меню 🚀"),
+        BotCommand(command="surprise", description="Случайный файл 🎲")
+    ])
 
 async def run_web_server():
     app = web.Application()
@@ -137,16 +353,13 @@ async def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"🌐 Веб-сервер успешно запущен на порту {port}")
+    logger.info(f"🌐 Веб-сервер запущен на порту {port}")
 
 async def main():
-    # 1. Сначала мгновенно открываем веб-сервер, чтобы Render спас сканирование порта
     await run_web_server()
-    
-    # 2. Подключаемся к Telegram API
     await bot.delete_webhook(drop_pending_updates=True)
     await set_main_menu(bot)
-    logger.info("🚀 Бот запущен и готов к работе!")
+    logger.info("🚀 Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
