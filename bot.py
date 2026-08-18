@@ -41,8 +41,8 @@ DATABASE = {
         "description": "✅ Теория чисел для прокачки мозга!",
         "files": [
             {"path": "files/number_theory.pdf", "caption": "Основы теории чисел"},
-            {"path": "files/diofantequation.pdf", "caption": "Диофантовы уравнения"},
-            {"path": "files/LTELemma.pdf", "caption": "Lifting The Exponent (LTE)"}
+            {"path": "files/diofant.pdf", "caption": "Диофантовы уравнения"},
+            {"path": "files/LTElemma.pdf", "caption": "Lifting The Exponent (LTE)"}
         ]
     },
     "inequalities": {
