@@ -135,7 +135,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
 
     app = web.Application()
-    app.router.add_get("/", handle_root)
+    app.router.app.add_get("/", handle_root) if hasattr(app.router, "app") else app.router.add_get("/", handle_root)
 
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
