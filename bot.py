@@ -7,11 +7,9 @@ from aiogram.filters import Command
 from aiogram.types import FSInputFile, BotCommand
 from aiohttp import web
 
-# Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Токен берем из переменных окружения
 TOKEN = os.environ.get("BOT_TOKEN")
 
 bot = Bot(token=TOKEN)
@@ -98,7 +96,8 @@ async def cmd_surprise(message: types.Message):
     await message.answer(f"🎲 Тема: **{random_key.upper()}**!")
     await send_task_files(message, DATABASE[random_key])
 
-@dp.message(F.text)
+# Обрабатываем только обычный текст, пропуская команды бота (начинающиеся с /)
+@dp.message(F.text & ~F.text.startswith("/"))
 async def find_file(message: types.Message):
     query = message.text.strip().lower()
     if query in ["удиви меня", "surprise", "рандом"]:
@@ -132,7 +131,7 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await run_web_server()
     await set_main_menu(bot)
-    logger.info("🚀 Бот успешно запущен в режиме Polling!")
+    logger.info("🚀 Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
