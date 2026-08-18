@@ -20,27 +20,46 @@ dp = Dispatcher()
 DATABASE = {
     "combinatorics": {
         "description": "✅ Держи материалы по комбинаторике",
-        "files": [{"path": "files/combStefanWalzer.pdf", "caption": "Конспект лекций (KIT)"}]
+        "files": [
+            {"path": "files/combStefanWalzer.pdf", "caption": "Конспект лекций (KIT)"},
+            {"path": "files/invariants.pdf", "caption": "Инварианты и полуинварианты"}
+        ]
     },
     "algebra": {
         "description": "✅ Лови материалы по алгебре!",
-        "files": [{"path": "files/algebra.pdf", "caption": "Базовая алгебра"}]
+        "files": [
+            {"path": "files/algebra.pdf", "caption": "Базовая алгебра"},
+            {"path": "files/functional.pdf", "caption": "Функциональные уравнения"}
+        ]
     },
     "geometry": {
         "description": "✅ Геометрия подъехала!",
-        "files": [{"path": "files/geometry_555.pdf", "caption": "Планиметрия и стереометрия"}]
+        "files": [
+            {"path": "files/geometry_555.pdf", "caption": "Планиметрия и стереометрия"},
+            {"path": "files/complexnumbergeometry.pdf", "caption": "Комплексные числа в геометрии"}
+        ]
     },
     "number_theory": {
         "description": "✅ Теория чисел для прокачки мозга!",
-        "files": [{"path": "files/number_theory.pdf", "caption": "Основы теории чисел"}]
+        "files": [
+            {"path": "files/number_theory.pdf", "caption": "Основы теории чисел"},
+            {"path": "files/diofantequation.pdf", "caption": "Диофантовы уравнения"},
+            {"path": "files/LTELemma.pdf", "caption": "Lifting The Exponent (LTE)"}
+        ]
     },
     "inequalities": {
         "description": "✅ Неравенства — это сила!",
-        "files": [{"path": "files/inequality.pdf", "caption": "Методы решения неравенств"}]
+        "files": [
+            {"path": "files/inequality.pdf", "caption": "Методы решения неравенств"},
+            {"path": "files/inequality1.pdf", "caption": "Дополнительные задачи по неравенствам"}
+        ]
     },
     "olympiads": {
         "description": "✅ Олимпиадные задачи высшей пробы!",
-        "files": [{"path": "files/olympiad.tasks.pdf", "caption": "Избранные олимпиадные задачи"}]
+        "files": [
+            {"path": "files/olympiad.tasks.pdf", "caption": "Избранные олимпиадные задачи"},
+            {"path": "files/chinaolimpiadproblems.pdf", "caption": "Китайские олимпиадные задачи"}
+        ]
     }
 }
 
