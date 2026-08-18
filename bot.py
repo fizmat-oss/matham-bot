@@ -4,7 +4,7 @@ import os
 import asyncio
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import FSInputFile, BotCommand
+from aiogram.types import BotCommand
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
@@ -15,51 +15,61 @@ TOKEN = os.environ.get("BOT_TOKEN")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# --- БАЗА ДАННЫХ C FILE_ID ВМЕСТО ПУТЕЙ К ФАЙЛАМ ---
 DATABASE = {
     "combinatorics": {
         "description": "✅ Держи материалы по комбинаторике",
         "files": [
-            {"path": "files/combStefanWalzer.pdf", "caption": "Конспект лекций (KIT)"},
-            {"path": "files/invariants.pdf", "caption": "Инварианты и полуинварианты"}
+            {"file_id": "СУДА_ВСТАВЛЯЙ_FILE_ID_1", "caption": "Конспект лекций (KIT)"},
+            {"file_id": "СУДА_ВСТАВЛЯЙ_FILE_ID_2", "caption": "Инварианты и полуинварианты"}
         ]
     },
     "algebra": {
         "description": "✅ Лови материалы по алгебре!",
         "files": [
-            {"path": "files/algebra.pdf", "caption": "Базовая алгебра"},
-            {"path": "files/functional.pdf", "caption": "Функциональные уравнения"}
+            {"file_id": "СУДА_ВСТАВЛЯЙ_FILE_ID_3", "caption": "Базовая алгебра"},
+            {"file_id": "СУДА_ВСТАВЛЯЙ_FILE_ID_4", "caption": "Функциональные уравнения"}
         ]
     },
     "geometry": {
         "description": "✅ Геометрия подъехала!",
         "files": [
-            {"path": "files/geometry_555.pdf", "caption": "Планиметрия и стереометрия"},
-            {"path": "files/complexnumbergeometry.pdf", "caption": "Комплексные числа в геометрии"}
+            {"file_id": "СУДА_ВСТАВЛЯЙ_FILE_ID_5", "caption": "Планиметрия и стереометрия"},
+            {"file_id": "СУДА_ВСТАВЛЯЙ_FILE_ID_6", "caption": "Комплексные числа в геометрии"}
         ]
     },
     "number_theory": {
         "description": "✅ Теория чисел для прокачки мозга!",
         "files": [
-            {"path": "files/number_theory.pdf", "caption": "Основы теории чисел"},
-            {"path": "files/diofant.pdf", "caption": "Диофантовы уравнения"},
-            {"path": "files/LTElemma.pdf", "caption": "Lifting The Exponent (LTE)"}
+            {"file_id": "СУДА_ВСТАВЛЯЙ_FILE_ID_7", "caption": "Основы теории чисел"},
+            {"file_id": "СУДА_ВСТАВЛЯЙ_FILE_ID_8", "caption": "Диофантовы уравнения"},
+            {"file_id": "СУДА_ВСТАВЛЯЙ_FILE_ID_9", "caption": "Lifting The Exponent (LTE)"}
         ]
     },
     "inequalities": {
         "description": "✅ Неравенства — это сила!",
         "files": [
-            {"path": "files/inequality.pdf", "caption": "Методы решения неравенств"},
-            {"path": "files/inequality1.pdf", "caption": "Дополнительные задачи по неравенствам"}
+            {"file_id": "СУДА_ВСТАВЛЯЙ_FILE_ID_10", "caption": "Методы решения неравенств"},
+            {"file_id": "СУДА_ВСТАВЛЯЙ_FILE_ID_11", "caption": "Дополнительные задачи по неравенствам"}
         ]
     },
     "olympiads": {
         "description": "✅ Олимпиадные задачи высшей пробы!",
         "files": [
-            {"path": "files/olympiad.tasks.pdf", "caption": "Избранные олимпиадные задачи"},
-            {"path": "files/chinaolimpiadproblems.pdf", "caption": "Китайские олимпиадные задачи"}
+            {"file_id": "СУДА_ВСТАВЛЯЙ_FILE_ID_12", "caption": "Избранные олимпиадные задачи"},
+            {"file_id": "СУДА_ВСТАВЛЯЙ_FILE_ID_13", "caption": "Китайские олимпиадные задачи"}
         ]
     }
 }
+
+# --- ПОМОЩНИК: Выдает file_id при отправке любого файла боту ---
+@dp.message(F.document)
+async def get_file_id_handler(message: types.Message):
+    doc = message.document
+    await message.answer(
+        f"📄 **Файл:** `{doc.file_name}`\n"
+        f"🔑 **file_id:** (нажми, чтобы скопировать)\n`{doc.file_id}`"
+    )
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -76,18 +86,18 @@ async def cmd_help(message: types.Message):
 async def send_task_files(message: types.Message, task):
     await message.answer(task["description"])
     for item in task["files"]:
-        file_path = item["path"]
+        file_id = item["file_id"]
         
-        if not os.path.exists(file_path):
-            logger.error(f"Файл не найден на сервере: {file_path}")
-            await message.answer(f"⚠️ Файл '{item['caption']}' отсутствует на сервере!")
+        # Защита от заглушек
+        if "СУДА_ВСТАВЛЯЙ" in file_id:
+            await message.answer(f"⚠️ Файл '{item['caption']}' ещё не настроен администратором.")
             continue
 
         try:
-            file = FSInputFile(file_path)
-            await message.answer_document(document=file, caption=f"📄 {item['caption']}")
+            # Отправка файла напрямую по file_id из серверов Telegram
+            await message.answer_document(document=file_id, caption=f"📄 {item['caption']}")
         except Exception as e:
-            logger.error(f"Ошибка при отправке {file_path}: {e}")
+            logger.error(f"Ошибка отправки file_id {file_id}: {e}")
             await message.answer(f"⚠️ Ошибка при отправке файла '{item['caption']}'.")
 
 @dp.message(Command("surprise"))
@@ -96,7 +106,6 @@ async def cmd_surprise(message: types.Message):
     await message.answer(f"🎲 Тема: **{random_key.upper()}**!")
     await send_task_files(message, DATABASE[random_key])
 
-# Обрабатываем только обычный текст, пропуская команды бота (начинающиеся с /)
 @dp.message(F.text & ~F.text.startswith("/"))
 async def find_file(message: types.Message):
     query = message.text.strip().lower()
@@ -125,7 +134,6 @@ async def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"🌐 Веб-сервер слушает порт {port}")
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
