@@ -5,14 +5,13 @@ import json
 import asyncio
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import BotCommand, FSInputFile
+from aiogram.types import BotCommand
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN")
-# Укажи свой Telegram ID (узнать можно у бота @userinfobot)
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 
 bot = Bot(token=TOKEN)
@@ -20,7 +19,6 @@ dp = Dispatcher()
 
 DB_FILE = "database.json"
 
-# Начальная база данных
 DEFAULT_DATABASE = {
     "combinatorics": {"description": "✅ Материалы по комбинаторике:", "files": []},
     "algebra": {"description": "✅ Материалы по алгебре:", "files": []},
@@ -30,7 +28,6 @@ DEFAULT_DATABASE = {
     "olympiads": {"description": "✅ Олимпиадные задачи:", "files": []}
 }
 
-# Функция загрузки базы из JSON
 def load_db():
     if os.path.exists(DB_FILE):
         try:
@@ -40,17 +37,14 @@ def load_db():
             logger.error(f"Ошибка чтения {DB_FILE}: {e}")
     return DEFAULT_DATABASE
 
-# Функция сохранения базы в JSON
 def save_db(db_data):
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(db_data, f, ensure_ascii=False, indent=4)
 
 DATABASE = load_db()
 
-# --- АВТОМАТИЧЕСКОЕ ДОБАВЛЕНИЕ ФАЙЛОВ АДМИНОМ ---
 @dp.message(F.document)
 async def admin_add_file_handler(message: types.Message):
-    # Проверка, что пишет именно администратор
     if message.from_user.id != ADMIN_ID:
         return await message.answer("ℹ️ Отправка файлов доступна только администратору.")
 
@@ -143,12 +137,16 @@ async def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    logger.info(f"🌐 Веб-сервер успешно запущен на порту {port}")
 
 async def main():
-    await bot.delete_webhook(drop_pending_updates=True)
+    # 1. Сначала мгновенно открываем веб-сервер, чтобы Render спас сканирование порта
     await run_web_server()
+    
+    # 2. Подключаемся к Telegram API
+    await bot.delete_webhook(drop_pending_updates=True)
     await set_main_menu(bot)
-    logger.info("🚀 Бот запущен!")
+    logger.info("🚀 Бот запущен и готов к работе!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
