@@ -9,8 +9,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 
 # --- Конфиг: токен и URL берём из переменных окружения Render ---
-TOKEN = os.environ[8913891668:AAHvrcI511gul51lmt3mfI19W7jYy1CxJoE]
-BASE_WEBHOOK_URL = os.environ[https://matham-bot.onrender.com]  # например https://matham-bot.onrender.com (без / на конце)
+TOKEN = os.environ["BOT_TOKEN"]
+BASE_WEBHOOK_URL = os.environ["WEBHOOK_URL"]  # например https://matham-bot.onrender.com (без / на конце)
 WEBHOOK_PATH = "/webhook"
 PORT = int(os.environ.get("PORT", 10000))
 
