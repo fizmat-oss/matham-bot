@@ -1,83 +1,90 @@
 import logging
 import random
 import os
+import json
 import asyncio
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import FSInputFile, BotCommand
+from aiogram.types import BotCommand, FSInputFile
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN")
+# Укажи свой Telegram ID (узнать можно у бота @userinfobot)
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- БАЗА ДАННЫХ: ПО 5 ФАЙЛОВ НА КАЖДУЮ ТЕМУ (ЛОКАЛЬНЫЕ ПУТИ) ---
-DATABASE = {
-    "combinatorics": {
-        "description": "✅ Держи материалы по комбинаторике:",
-        "files": [
-            {"path": "files/comb1.pdf", "caption": "Конспект лекций (KIT)"},
-            {"path": "files/comb2.pdf", "caption": "Инварианты и полуинварианты"},
-            {"path": "files/comb3.pdf", "caption": "Графы и их приложения"},
-            {"path": "files/comb4.pdf", "caption": "Принцип Дирихле и раскраски"},
-            {"path": "files/comb5.pdf", "caption": "Рекуррентные соотношения"}
-        ]
-    },
-    "algebra": {
-        "description": "✅ Лови материалы по алгебре:",
-        "files": [
-            {"path": "files/alg1.pdf", "caption": "Базовая алгебра"},
-            {"path": "files/alg2.pdf", "caption": "Функциональные уравнения"},
-            {"path": "files/alg3.pdf", "caption": "Многочлены и их корни"},
-            {"path": "files/alg4.pdf", "caption": "Системы уравнений"},
-            {"path": "files/alg5.pdf", "caption": "Линейная алгебра для олимпиад"}
-        ]
-    },
-    "geometry": {
-        "description": "✅ Геометрия подъехала:",
-        "files": [
-            {"path": "files/geom1.pdf", "caption": "Планиметрия и стереометрия"},
-            {"path": "files/geom2.pdf", "caption": "Комплексные числа в геометрии"},
-            {"path": "files/geom3.pdf", "caption": "Вписанные и описанные окружности"},
-            {"path": "files/geom4.pdf", "caption": "Векторный метод в геометрии"},
-            {"path": "files/geom5.pdf", "caption": "Проективная геометрия"}
-        ]
-    },
-    "number_theory": {
-        "description": "✅ Теория чисел для прокачки мозга:",
-        "files": [
-            {"path": "files/nt1.pdf", "caption": "Основы теории чисел"},
-            {"path": "files/nt2.pdf", "caption": "Диофантовы уравнения"},
-            {"path": "files/nt3.pdf", "caption": "Lifting The Exponent (LTE)"},
-            {"path": "files/nt4.pdf", "caption": "Сравнения по модулю и Малая теорема Ферма"},
-            {"path": "files/nt5.pdf", "caption": "Первообразные корни и квадратичные вычеты"}
-        ]
-    },
-    "inequalities": {
-        "description": "✅ Неравенства — это сила:",
-        "files": [
-            {"file_path": "files/ineq1.pdf", "path": "files/ineq1.pdf", "caption": "Методы решения неравенств"},
-            {"path": "files/ineq2.pdf", "caption": "Дополнительные задачи по неравенствам"},
-            {"path": "files/ineq3.pdf", "caption": "Неравенство Коши-Буняковского-Шварца"},
-            {"path": "files/ineq4.pdf", "caption": "Метод штурма и симметричные неравенства"},
-            {"path": "files/ineq5.pdf", "caption": "Неравенство Йенсена и выпуклость"}
-        ]
-    },
-    "olympiads": {
-        "description": "✅ Олимпиадные задачи высшей пробы:",
-        "files": [
-            {"path": "files/olymp1.pdf", "caption": "Избранные олимпиадные задачи"},
-            {"path": "files/olymp2.pdf", "caption": "Китайские олимпиадные задачи"},
-            {"path": "files/olymp3.pdf", "caption": "Задачи Международной олимпиады (IMO)"},
-            {"path": "files/olymp4.pdf", "caption": "Всероссийская олимпиада школьников"},
-            {"path": "files/olymp5.pdf", "caption": "Шортлисты IMO прошлых лет"}
-        ]
-    }
+DB_FILE = "database.json"
+
+# Начальная база данных
+DEFAULT_DATABASE = {
+    "combinatorics": {"description": "✅ Материалы по комбинаторике:", "files": []},
+    "algebra": {"description": "✅ Материалы по алгебре:", "files": []},
+    "geometry": {"description": "✅ Материалы по геометрии:", "files": []},
+    "number_theory": {"description": "✅ Материалы по теории чисел:", "files": []},
+    "inequalities": {"description": "✅ Материалы по неравенствам:", "files": []},
+    "olympiads": {"description": "✅ Олимпиадные задачи:", "files": []}
 }
+
+# Функция загрузки базы из JSON
+def load_db():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Ошибка чтения {DB_FILE}: {e}")
+    return DEFAULT_DATABASE
+
+# Функция сохранения базы в JSON
+def save_db(db_data):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(db_data, f, ensure_ascii=False, indent=4)
+
+DATABASE = load_db()
+
+# --- АВТОМАТИЧЕСКОЕ ДОБАВЛЕНИЕ ФАЙЛОВ АДМИНОМ ---
+@dp.message(F.document)
+async def admin_add_file_handler(message: types.Message):
+    # Проверка, что пишет именно администратор
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("ℹ️ Отправка файлов доступна только администратору.")
+
+    caption = message.caption
+    if not caption or "|" not in caption:
+        return await message.answer(
+            "⚠️ **Формат добавления файла:**\n"
+            "Отправь PDF и напиши в подписи:\n"
+            "`категория | Название файла`\n\n"
+            "**Доступные категории:** `combinatorics`, `algebra`, `geometry`, `number_theory`, `inequalities`, `olympiads`\n\n"
+            "*Пример:* `algebra | Базовая алгебра лекция 1`"
+        )
+
+    category, file_name = map(str.strip, caption.split("|", 1))
+    category = category.lower()
+
+    if category not in DATABASE:
+        return await message.answer(f"❌ Категории `{category}` не существует!")
+
+    doc = message.document
+    new_file = {
+        "file_id": doc.file_id,
+        "caption": file_name
+    }
+
+    DATABASE[category]["files"].append(new_file)
+    save_db(DATABASE)
+
+    await message.answer(
+        f"✅ **Файл успешно добавлен!**\n\n"
+        f"📁 **Категория:** `{category}`\n"
+        f"📄 **Название:** {file_name}\n"
+        f"🔑 **file_id:** `{doc.file_id}`"
+    )
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -92,23 +99,15 @@ async def cmd_help(message: types.Message):
     await message.answer("Отправь ключевое слово (например, `algebra`), чтобы получить файлы.")
 
 async def send_task_files(message: types.Message, task):
+    if not task["files"]:
+        return await message.answer("📁 В этом разделе пока нет файлов.")
+
     await message.answer(task["description"])
     for item in task["files"]:
-        file_path = item["path"]
-        
-        # Проверка 1: Если файла нет на сервере, бот не падает, а просто сообщает об этом
-        if not os.path.exists(file_path):
-            logger.warning(f"Файл не найден: {file_path}")
-            await message.answer(f"⚠️ Файл '{item['caption']}' временно недоступен.")
-            continue
-
-        # Проверка 2: Безопасная отправка
         try:
-            file = FSInputFile(file_path)
-            await message.answer_document(document=file, caption=f"📄 {item['caption']}")
+            await message.answer_document(document=item["file_id"], caption=f"📄 {item['caption']}")
         except Exception as e:
-            logger.error(f"Ошибка при отправке файла {file_path}: {e}")
-            await message.answer(f"⚠️ Ошибка при отправке файла '{item['caption']}'.")
+            logger.error(f"Ошибка отправки file_id: {e}")
 
 @dp.message(Command("surprise"))
 async def cmd_surprise(message: types.Message):
