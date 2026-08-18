@@ -6,7 +6,7 @@ from aiogram.filters import Command
 from aiogram.types import FSInputFile, BotCommand
 
 # Твой токен
-TOKEN = "8913891668:AAGojK0nbhDjnNg5v1_5wcvbniI1PH7zV7c"
+TOKEN = "8913891668:AAGhjDC6HjBpDeJdzKFpGkU6Pgq08_Blljs"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
