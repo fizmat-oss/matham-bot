@@ -1,7 +1,7 @@
 import logging
 import random
 import os
-import json
+import copy
 import asyncio
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -9,6 +9,7 @@ from aiogram.types import BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiohttp import web
+from motor.motor_asyncio import AsyncIOMotorClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,12 +20,18 @@ TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit()]
 
+# --- MongoDB ---
+MONGO_URI = os.environ["MONGO_URI"]
+MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "matham_bot")
+mongo_client = AsyncIOMotorClient(MONGO_URI)
+mongo_db = mongo_client[MONGO_DB_NAME]
+db_collection = mongo_db["catalog"]
+DB_DOC_ID = "catalog_main"  # фиксированный _id — вся база хранится одним документом
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-DB_FILE = "database.json"
-
-# --- СТРУКТУРА БАЗЫ ДАННЫХ ---
+# --- СТРУКТУРА БАЗЫ ДАННЫХ ПО УМОЛЧАНИЮ (используется только при первом запуске) ---
 DEFAULT_DATABASE = {
     "geometry": {
         "title": "📐 Геометрия",
@@ -167,31 +174,47 @@ DEFAULT_DATABASE = {
     }
 }
 
-def load_db():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Ошибка чтения {DB_FILE}: {e}")
-    return DEFAULT_DATABASE
+# Глобальный кэш в памяти — читаем из Mongo один раз при старте,
+# при каждом изменении пишем и в кэш, и в Mongo.
+DATABASE = {}
 
-def save_db(db_data):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(db_data, f, ensure_ascii=False, indent=4)
 
-DATABASE = load_db()
+async def load_db():
+    """Читает базу из MongoDB. Если документа ещё нет — создаёт его из DEFAULT_DATABASE."""
+    doc = await db_collection.find_one({"_id": DB_DOC_ID})
+    if doc is None:
+        logger.info("В MongoDB нет каталога — создаю из DEFAULT_DATABASE")
+        data = copy.deepcopy(DEFAULT_DATABASE)
+        await db_collection.update_one(
+            {"_id": DB_DOC_ID},
+            {"$set": {"data": data}},
+            upsert=True
+        )
+        return data
+    return doc["data"]
+
+
+async def save_db(db_data):
+    """Полностью перезаписывает документ каталога в MongoDB."""
+    await db_collection.update_one(
+        {"_id": DB_DOC_ID},
+        {"$set": {"data": db_data}},
+        upsert=True
+    )
+
 
 # --- FSM ДЛЯ АДМИНОВ ---
 class FileUpload(StatesGroup):
     selecting_path = State()
     waiting_for_caption = State()
 
+
 def get_main_menu_keyboard():
     builder = []
     for cat_key, cat_data in DATABASE.items():
         builder.append([InlineKeyboardButton(text=cat_data["title"], callback_data=f"cat:{cat_key}")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
+
 
 # ==========================================
 #        АДМИН: ИНТЕРАКТИВНОЕ ДОБАВЛЕНИЕ
@@ -212,11 +235,12 @@ async def admin_doc_received(message: types.Message, state: FSMContext):
     for cat_key, cat_data in DATABASE.items():
         builder.append([InlineKeyboardButton(text=cat_data["title"], callback_data=f"a_cat:{cat_key}")])
     builder.append([InlineKeyboardButton(text="❌ Отмена", callback_data="a_cancel")])
-    
+
     await message.answer(
         f"📥 **Получен файл:** `{default_name}`\n\nВыбери **Категорию** для сохранения:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
     )
+
 
 @dp.callback_query(FileUpload.selecting_path, F.data == "a_cancel")
 @dp.callback_query(FileUpload.waiting_for_caption, F.data == "a_cancel")
@@ -224,6 +248,7 @@ async def admin_cancel_upload(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("❌ Загрузка файла отменена.")
     await callback.answer()
+
 
 @dp.callback_query(FileUpload.selecting_path, F.data.startswith("a_cat:"))
 async def admin_select_cat(callback: types.CallbackQuery):
@@ -238,6 +263,7 @@ async def admin_select_cat(callback: types.CallbackQuery):
     await callback.message.edit_text(f"📁 **{cat_data['title']}**\nВыбери **Блок**:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
+
 @dp.callback_query(FileUpload.selecting_path, F.data.startswith("a_blk:"))
 async def admin_select_blk(callback: types.CallbackQuery):
     _, cat_key, b_key = callback.data.split(":")
@@ -251,10 +277,11 @@ async def admin_select_blk(callback: types.CallbackQuery):
     await callback.message.edit_text(f"📁 **{block_data['title']}**\nВыбери **Тему**:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
+
 @dp.callback_query(FileUpload.selecting_path, F.data.startswith("a_top:"))
 async def admin_select_top(callback: types.CallbackQuery, state: FSMContext):
     _, cat_key, b_key, t_key = callback.data.split(":")
-    
+
     await state.update_data(cat_key=cat_key, b_key=b_key, t_key=t_key)
     await state.set_state(FileUpload.waiting_for_caption)
 
@@ -274,6 +301,7 @@ async def admin_select_top(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
 @dp.callback_query(FileUpload.waiting_for_caption, F.data == "a_skip_caption")
 async def admin_skip_caption(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -282,7 +310,7 @@ async def admin_skip_caption(callback: types.CallbackQuery, state: FSMContext):
 
     new_file = {"file_id": file_id, "caption": default_name}
     DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]["files"].append(new_file)
-    save_db(DATABASE)
+    await save_db(DATABASE)
 
     topic_title = DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]["title"]
     await callback.message.edit_text(
@@ -293,17 +321,18 @@ async def admin_skip_caption(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
 
+
 @dp.message(FileUpload.waiting_for_caption, F.text)
 async def admin_save_custom_caption(message: types.Message, state: FSMContext):
     custom_caption = message.text.strip()
     data = await state.get_data()
-    
+
     file_id = data.get("file_id")
     cat_key, b_key, t_key = data.get("cat_key"), data.get("b_key"), data.get("t_key")
 
     new_file = {"file_id": file_id, "caption": custom_caption}
     DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]["files"].append(new_file)
-    save_db(DATABASE)
+    await save_db(DATABASE)
 
     topic_title = DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]["title"]
     await message.answer(
@@ -313,37 +342,37 @@ async def admin_save_custom_caption(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
+
 # ==========================================
 #   ПОЛЬЗОВАТЕЛЬ: 4-УРОВНЕВАЯ НАВИГАЦИЯ
 # ==========================================
 
-# 1. Показ блоков выбранной категории
 @dp.callback_query(F.data.startswith("cat:"))
 async def process_category_click(callback: types.CallbackQuery):
     cat_key = callback.data.split(":")[1]
     cat_data = DATABASE.get(cat_key)
 
-    builder = [[InlineKeyboardButton(text=b_data["title"], callback_data=f"blk:{cat_key}:{b_key}")] 
+    builder = [[InlineKeyboardButton(text=b_data["title"], callback_data=f"blk:{cat_key}:{b_key}")]
                for b_key, b_data in cat_data["blocks"].items()]
     builder.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")])
-    
+
     await callback.message.edit_text(f"Раздел **{cat_data['title']}**.\nВыбери блок:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
-# 2. Показ тем выбранного блока
+
 @dp.callback_query(F.data.startswith("blk:"))
 async def process_block_click(callback: types.CallbackQuery):
     _, cat_key, b_key = callback.data.split(":")
     block_data = DATABASE[cat_key]["blocks"][b_key]
 
-    builder = [[InlineKeyboardButton(text=f"• {t_data['title']}", callback_data=f"top:{cat_key}:{b_key}:{t_key}")] 
+    builder = [[InlineKeyboardButton(text=f"• {t_data['title']}", callback_data=f"top:{cat_key}:{b_key}:{t_key}")]
                for t_key, t_data in block_data["topics"].items()]
     builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cat:{cat_key}")])
 
     await callback.message.edit_text(f"Блок **{block_data['title']}**.\nВыбери тему:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
-# 3. ПОКАЗ ФАЙЛОВ
+
 @dp.callback_query(F.data.startswith("top:"))
 async def process_topic_click(callback: types.CallbackQuery):
     _, cat_key, b_key, t_key = callback.data.split(":")
@@ -356,35 +385,37 @@ async def process_topic_click(callback: types.CallbackQuery):
     for idx, item in enumerate(topic_data["files"]):
         btn_text = f"📄 {item['caption'][:30]}" + ("..." if len(item['caption']) > 30 else "")
         builder.append([InlineKeyboardButton(text=btn_text, callback_data=f"file:{cat_key}:{b_key}:{t_key}:{idx}")])
-    
+
     builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"blk:{cat_key}:{b_key}")])
 
     await callback.message.edit_text(
-        f"Тема: **{topic_data['title']}**\n⬇️ Выбери файл для скачивания:", 
+        f"Тема: **{topic_data['title']}**\n⬇️ Выбери файл для скачивания:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
     )
     await callback.answer()
 
-# 4. ОТПРАВКА ВЫБРАННОГО ФАЙЛА
+
 @dp.callback_query(F.data.startswith("file:"))
 async def process_file_click(callback: types.CallbackQuery):
     _, cat_key, b_key, t_key, file_idx = callback.data.split(":")
     file_idx = int(file_idx)
-    
+
     topic_data = DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]
-    
+
     if file_idx >= len(topic_data["files"]):
         return await callback.answer("❌ Файл больше не доступен.", show_alert=True)
-        
+
     file_item = topic_data["files"][file_idx]
-    
+
     await callback.answer("Отправляю файл... ⏳")
     await callback.message.answer_document(document=file_item["file_id"], caption=f"📄 {file_item['caption']}")
+
 
 @dp.callback_query(F.data == "menu:main")
 async def process_back_to_main(callback: types.CallbackQuery):
     await callback.message.edit_text("📂 **Каталог файлов**\nВыбери раздел:", reply_markup=get_main_menu_keyboard())
     await callback.answer()
+
 
 # ==========================================
 #     КОМАНДЫ И ГЛОБАЛЬНЫЙ ПОИСК
@@ -399,6 +430,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         reply_markup=get_main_menu_keyboard()
     )
 
+
 @dp.message(Command("surprise"))
 async def cmd_surprise(message: types.Message):
     all_files = []
@@ -407,7 +439,7 @@ async def cmd_surprise(message: types.Message):
             for t_data in b_data["topics"].values():
                 for f in t_data["files"]:
                     all_files.append((f, t_data["title"]))
-    
+
     if not all_files:
         return await message.answer("📁 В базе пока нет файлов.")
 
@@ -415,7 +447,7 @@ async def cmd_surprise(message: types.Message):
     await message.answer(f"🎲 Случайный файл из темы: **{topic_name}**")
     await message.answer_document(document=selected_file["file_id"], caption=f"📄 {selected_file['caption']}")
 
-# ПОИСК ПО КЛЮЧЕВЫМ СЛОВАМ
+
 @dp.message(F.text & ~F.text.startswith("/"))
 async def global_search_handler(message: types.Message):
     query = message.text.strip().lower()
@@ -440,6 +472,7 @@ async def global_search_handler(message: types.Message):
             caption=f"📄 **{file_info['caption']}**\n📌 Тема: _{topic_name}_"
         )
 
+
 # ==========================================
 #        ЗАПУСК СЕРВЕРА И БОТА
 # ==========================================
@@ -448,6 +481,7 @@ async def set_main_menu(bot: Bot):
         BotCommand(command="start", description="Главное меню 🚀"),
         BotCommand(command="surprise", description="Случайный файл 🎲")
     ])
+
 
 async def run_web_server():
     app = web.Application()
@@ -459,12 +493,25 @@ async def run_web_server():
     await site.start()
     logger.info(f"🌐 Веб-сервер запущен на порту {port}")
 
+
 async def main():
+    global DATABASE
+
     await run_web_server()
+
+    # Проверяем подключение к MongoDB сразу, чтобы упасть с понятной ошибкой,
+    # если MONGO_URI неверный, а не тихо использовать пустую базу
+    await mongo_client.admin.command("ping")
+    logger.info("✅ Подключение к MongoDB установлено")
+
+    DATABASE = await load_db()
+    logger.info(f"📦 Каталог загружен из MongoDB ({len(DATABASE)} категорий)")
+
     await bot.delete_webhook(drop_pending_updates=True)
     await set_main_menu(bot)
     logger.info("🚀 Бот запущен!")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
