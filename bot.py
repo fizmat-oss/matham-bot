@@ -44,6 +44,13 @@ DEFAULT_DATABASE = {
                     "barycentric": {"title": "Барицентрические координаты", "files": []},
                     "vectors": {"title": "Векторный метод", "files": []}
                 }
+            },
+            "books_geo": {
+                "title": "📚 Книги и сборники",
+                "topics": {
+                    "classics": {"title": "Классические учебники", "files": []},
+                    "problembooks": {"title": "Задачники и сборники", "files": []}
+                }
             }
         }
     },
@@ -62,6 +69,13 @@ DEFAULT_DATABASE = {
                 "topics": {
                     "substitution": {"title": "Метод подстановок", "files": []},
                     "cauchy_eq": {"title": "Уравнение Коши", "files": []}
+                }
+            },
+            "books_alg": {
+                "title": "📚 Книги и сборники",
+                "topics": {
+                    "classics": {"title": "Классическая алгебра", "files": []},
+                    "problembooks": {"title": "Задачники", "files": []}
                 }
             }
         }
@@ -82,6 +96,13 @@ DEFAULT_DATABASE = {
                     "lte": {"title": "LTE (Lifting The Exponent)", "files": []},
                     "diophantine": {"title": "Диофантовы уравнения", "files": []}
                 }
+            },
+            "books_nt": {
+                "title": "📚 Книги и сборники",
+                "topics": {
+                    "classics": {"title": "Учебники по ТЧ", "files": []},
+                    "olympiad": {"title": "Олимпиадная теория чисел", "files": []}
+                }
             }
         }
     },
@@ -100,6 +121,46 @@ DEFAULT_DATABASE = {
                 "topics": {
                     "jensen": {"title": "Йенсен и выпуклые функции", "files": []},
                     "uvw": {"title": "Метод uvw", "files": []}
+                }
+            },
+            "books_ineq": {
+                "title": "📚 Книги и сборники",
+                "topics": {
+                    "compilations": {"title": "Сборники неравенств", "files": []}
+                }
+            }
+        }
+    },
+    "higher_math": {
+        "title": "🎓 Высшая математика / Матанализ",
+        "blocks": {
+            "calculus": {
+                "title": "📈 Математический анализ",
+                "topics": {
+                    "limits": {"title": "Пределы и непрерывность", "files": []},
+                    "derivatives": {"title": "Производная и интеграл", "files": []},
+                    "series": {"title": "Ряды и последовательности", "files": []}
+                }
+            },
+            "linear_algebra": {
+                "title": "🔢 Линейная алгебра",
+                "topics": {
+                    "matrices": {"title": "Матрицы и определители", "files": []},
+                    "vector_spaces": {"title": "Векторные пространства", "files": []}
+                }
+            },
+            "diff_eq": {
+                "title": "🌀 Дифференциальные уравнения",
+                "topics": {
+                    "first_order": {"title": "Уравнения 1-го порядка", "files": []},
+                    "systems": {"title": "Системы ДУ", "files": []}
+                }
+            },
+            "books_hm": {
+                "title": "📚 Книги и фундаментальные труды",
+                "topics": {
+                    "textbooks": {"title": "Учебники ВУЗов", "files": []},
+                    "problembooks": {"title": "Сборники задач (Демидович и др.)", "files": []}
                 }
             }
         }
@@ -249,7 +310,6 @@ async def process_topic_click(callback: types.CallbackQuery):
 
     builder = []
     for idx, item in enumerate(topic_data["files"]):
-        # Обрезаем название, если оно слишком длинное (Telegram лимит для кнопок)
         btn_text = f"📄 {item['caption'][:30]}" + ("..." if len(item['caption']) > 30 else "")
         builder.append([InlineKeyboardButton(text=btn_text, callback_data=f"file:{cat_key}:{b_key}:{t_key}:{idx}")])
     
@@ -275,7 +335,6 @@ async def process_file_click(callback: types.CallbackQuery):
     file_item = topic_data["files"][file_idx]
     
     await callback.answer("Отправляю файл... ⏳")
-    # Отправляем документ отдельным сообщением, оставляя меню открытым!
     await callback.message.answer_document(document=file_item["file_id"], caption=f"📄 {file_item['caption']}")
 
 @dp.callback_query(F.data == "menu:main")
@@ -312,6 +371,7 @@ async def cmd_surprise(message: types.Message):
     await message.answer(f"🎲 Случайный файл из темы: **{topic_name}**")
     await message.answer_document(document=selected_file["file_id"], caption=f"📄 {selected_file['caption']}")
 
+# ПОИСК ПО КЛЮЧЕВЫМ СЛОВАМ
 @dp.message(F.text & ~F.text.startswith("/"))
 async def global_search_handler(message: types.Message):
     query = message.text.strip().lower()
@@ -327,7 +387,7 @@ async def global_search_handler(message: types.Message):
                         found_files.append((f, topic_data["title"]))
 
     if not found_files:
-        return await message.answer("🔍 Ничего не найдено. Попробуй меню:", reply_markup=get_main_menu_keyboard())
+        return await message.answer("🔍 Ничего не найдено. Попробуй изменить запрос или воспользуйся меню:", reply_markup=get_main_menu_keyboard())
 
     await message.answer(f"🔍 Найдено файлов: **{len(found_files)}**")
     for file_info, topic_name in found_files[:10]:
