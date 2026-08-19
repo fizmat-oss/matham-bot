@@ -24,7 +24,7 @@ dp = Dispatcher()
 
 DB_FILE = "database.json"
 
-# --- СТРУКТУРА БАЗЫ ДАННЫХ (3 уровня вложенности + файлы) ---
+# --- СТРУКТУРА БАЗЫ ДАННЫХ ---
 DEFAULT_DATABASE = {
     "geometry": {
         "title": "📐 Геометрия",
@@ -185,6 +185,7 @@ DATABASE = load_db()
 # --- FSM ДЛЯ АДМИНОВ ---
 class FileUpload(StatesGroup):
     selecting_path = State()
+    waiting_for_caption = State()
 
 def get_main_menu_keyboard():
     builder = []
@@ -202,9 +203,9 @@ async def admin_doc_received(message: types.Message, state: FSMContext):
 
     doc = message.document
     file_id = doc.file_id
-    file_name = message.caption if message.caption else doc.file_name
+    default_name = message.caption if message.caption else doc.file_name
 
-    await state.update_data(file_id=file_id, file_name=file_name)
+    await state.update_data(file_id=file_id, default_name=default_name)
     await state.set_state(FileUpload.selecting_path)
 
     builder = []
@@ -213,11 +214,12 @@ async def admin_doc_received(message: types.Message, state: FSMContext):
     builder.append([InlineKeyboardButton(text="❌ Отмена", callback_data="a_cancel")])
     
     await message.answer(
-        f"📥 **Получен файл:** `{file_name}`\n\nВыбери **Категорию** для сохранения:",
+        f"📥 **Получен файл:** `{default_name}`\n\nВыбери **Категорию** для сохранения:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
     )
 
 @dp.callback_query(FileUpload.selecting_path, F.data == "a_cancel")
+@dp.callback_query(FileUpload.waiting_for_caption, F.data == "a_cancel")
 async def admin_cancel_upload(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("❌ Загрузка файла отменена.")
@@ -253,10 +255,32 @@ async def admin_select_blk(callback: types.CallbackQuery):
 async def admin_select_top(callback: types.CallbackQuery, state: FSMContext):
     _, cat_key, b_key, t_key = callback.data.split(":")
     
-    data = await state.get_data()
-    file_id, file_name = data.get("file_id"), data.get("file_name")
+    await state.update_data(cat_key=cat_key, b_key=b_key, t_key=t_key)
+    await state.set_state(FileUpload.waiting_for_caption)
 
-    new_file = {"file_id": file_id, "caption": file_name}
+    data = await state.get_data()
+    default_name = data.get("default_name")
+
+    builder = [
+        [InlineKeyboardButton(text=f"📝 Оставить: {default_name[:20]}...", callback_data="a_skip_caption")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="a_cancel")]
+    ]
+
+    await callback.message.edit_text(
+        f"✍️ **Введите описание для файла:**\n\n"
+        f"Отправьте текстовое сообщение с понятным названием или описанием файла.\n"
+        f"Или нажмите кнопку ниже, чтобы оставить имя файла по умолчанию:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
+    )
+    await callback.answer()
+
+@dp.callback_query(FileUpload.waiting_for_caption, F.data == "a_skip_caption")
+async def admin_skip_caption(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    file_id, default_name = data.get("file_id"), data.get("default_name")
+    cat_key, b_key, t_key = data.get("cat_key"), data.get("b_key"), data.get("t_key")
+
+    new_file = {"file_id": file_id, "caption": default_name}
     DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]["files"].append(new_file)
     save_db(DATABASE)
 
@@ -264,10 +288,30 @@ async def admin_select_top(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"✅ **Файл сохранен!**\n\n"
         f"📁 `{DATABASE[cat_key]['title']}` ➔ `{DATABASE[cat_key]['blocks'][b_key]['title']}` ➔ `{topic_title}`\n"
-        f"📄 `{file_name}`"
+        f"📄 **Описание:** `{default_name}`"
     )
     await state.clear()
     await callback.answer()
+
+@dp.message(FileUpload.waiting_for_caption, F.text)
+async def admin_save_custom_caption(message: types.Message, state: FSMContext):
+    custom_caption = message.text.strip()
+    data = await state.get_data()
+    
+    file_id = data.get("file_id")
+    cat_key, b_key, t_key = data.get("cat_key"), data.get("b_key"), data.get("t_key")
+
+    new_file = {"file_id": file_id, "caption": custom_caption}
+    DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]["files"].append(new_file)
+    save_db(DATABASE)
+
+    topic_title = DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]["title"]
+    await message.answer(
+        f"✅ **Файл успешно сохранен!**\n\n"
+        f"📁 `{DATABASE[cat_key]['title']}` ➔ `{DATABASE[cat_key]['blocks'][b_key]['title']}` ➔ `{topic_title}`\n"
+        f"📄 **Описание:** `{custom_caption}`"
+    )
+    await state.clear()
 
 # ==========================================
 #   ПОЛЬЗОВАТЕЛЬ: 4-УРОВНЕВАЯ НАВИГАЦИЯ
@@ -299,7 +343,7 @@ async def process_block_click(callback: types.CallbackQuery):
     await callback.message.edit_text(f"Блок **{block_data['title']}**.\nВыбери тему:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
-# 3. ПОКАЗ ФАЙЛОВ (4-й УРОВЕНЬ НАВИГАЦИИ)
+# 3. ПОКАЗ ФАЙЛОВ
 @dp.callback_query(F.data.startswith("top:"))
 async def process_topic_click(callback: types.CallbackQuery):
     _, cat_key, b_key, t_key = callback.data.split(":")
