@@ -2,6 +2,7 @@ import logging
 import random
 import os
 import copy
+import uuid
 import asyncio
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -31,210 +32,34 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # ==========================================
-#        НОВАЯ СТРУКТУРА КАТАЛОГА
+#   СТРУКТУРА ПО УМОЛЧАНИЮ (только при первом запуске / после очистки Mongo)
 # ==========================================
-DEFAULT_DATABASE = {
-    "geometry": {
-        "title": "📐 Геометрия",
-        "blocks": {
-            "planimetry_basic": {
-                "title": "Планиметрия: Базовая конфигурация",
-                "topics": {
-                    "notable_points": {"title": "Замечательные точки треугольника", "files": []},
-                    "euler_line": {"title": "Прямая Эйлера и окружность 9 точек", "files": []},
-                    "ceva_menelaus": {"title": "Теоремы Чевы и Менелая", "files": []},
-                    "ptolemy": {"title": "Вписанные/описанные четырёхугольники, теорема Птолемея", "files": []}
-                }
-            },
-            "planimetry_circles": {
-                "title": "Планиметрия: Окружности и степени точек",
-                "topics": {
-                    "power_of_point": {"title": "Степень точки относительно окружности", "files": []},
-                    "radical_axis": {"title": "Радикальная ось и радикальный центр", "files": []},
-                    "excircles": {"title": "Внеписанные окружности, лемма о трезубце", "files": []},
-                    "apollonius": {"title": "Окружности Аполлония и теорема Монжа", "files": []}
-                }
-            },
-            "geo_methods": {
-                "title": "Геометрические методы и преобразования",
-                "topics": {
-                    "inversion": {"title": "Инверсия относительно окружности", "files": []},
-                    "spiral_homothety": {"title": "Поворотная гомотетия и центральная симметрия", "files": []},
-                    "auxiliary_circle": {"title": "Метод вспомогательной окружности", "files": []},
-                    "mass_points": {"title": "Метод масс (барицентрические координаты) и векторы", "files": []}
-                }
-            },
-            "projective": {
-                "title": "Проективная геометрия",
-                "topics": {
-                    "harmonic": {"title": "Гармонические четвёрки и двойное отношение", "files": []},
-                    "pole_polar": {"title": "Полюс и поляра", "files": []},
-                    "pascal_desargues": {"title": "Теоремы Паскаля, Дезарга и Брианшона", "files": []}
-                }
-            },
-            "stereometry": {
-                "title": "Стереометрия",
-                "topics": {
-                    "cross_sections": {"title": "Построение сечений многогранников", "files": []},
-                    "distances_angles": {"title": "Расстояния и углы в пространстве", "files": []},
-                    "spheres": {"title": "Сферы, вписанные и описанные в пирамиды/призмы", "files": []}
-                }
-            }
-        }
+DEFAULT_STATE = {
+    "categories": {
+        "geometry": {"title": "📐 Геометрия", "files": []},
+        "number_theory": {"title": "🔢 Теория чисел", "files": []},
+        "algebra": {"title": "🧮 Алгебра", "files": []},
+        "combinatorics": {"title": "🧩 Комбинаторика", "files": []},
+        "higher_math": {"title": "🎓 Матанализ и высшая математика", "files": []},
+        "titu": {"title": "📘 Titu Andreescu", "files": []}
     },
-    "number_theory": {
-        "title": "🔢 Теория чисел",
-        "blocks": {
-            "divisibility": {
-                "title": "Делимость и остатки",
-                "topics": {
-                    "euclid": {"title": "Алгоритм Евклида и свойства НОД/НОК", "files": []},
-                    "fermat_euler": {"title": "Малая теорема Ферма и теорема Эйлера", "files": []},
-                    "wilson": {"title": "Теорема Вильсона и функция Эйлера φ(n)", "files": []}
-                }
-            },
-            "congruences": {
-                "title": "Сравнения и диофантовы уравнения",
-                "topics": {
-                    "linear_congruences": {"title": "Линейные сравнения и Китайская теорема об остатках", "files": []},
-                    "diophantine": {"title": "Линейные диофантовы уравнения (ax+by=c)", "files": []},
-                    "pell": {"title": "Уравнение Пелля и цепные дроби", "files": []},
-                    "primitive_roots": {"title": "Первообразные корни и показатели", "files": []}
-                }
-            },
-            "quadratic": {
-                "title": "Квадратичные сравнения",
-                "topics": {
-                    "legendre_jacobi": {"title": "Символ Лежандра и символ Якоби", "files": []},
-                    "reciprocity": {"title": "Квадратичный закон взаимности Гаусса", "files": []}
-                }
-            },
-            "special_nt": {
-                "title": "Специальные методы",
-                "topics": {
-                    "p_adic": {"title": "p-адическая оценка (лемма v_p)", "files": []},
-                    "dirichlet_convolution": {"title": "Мультипликативные функции и свёртка Дирихле", "files": []}
-                }
-            }
-        }
-    },
-    "algebra": {
-        "title": "🧮 Алгебра (классическая и олимпиадная)",
-        "blocks": {
-            "polynomials": {
-                "title": "Многочлены",
-                "topics": {
-                    "horner_bezout": {"title": "Схема Горнера и теорема Безу", "files": []},
-                    "vieta_higher": {"title": "Теорема Виета для высших степеней", "files": []},
-                    "symmetric_poly": {"title": "Симметрические многочлены", "files": []},
-                    "eisenstein": {"title": "Критерий Эйзенштейна (неприводимость)", "files": []},
-                    "complex_roots": {"title": "Комплексные числа и корни из единицы", "files": []}
-                }
-            },
-            "inequalities": {
-                "title": "Неравенства",
-                "topics": {
-                    "am_gm": {"title": "AM-GM (среднее арифметическое и геометрическое)", "files": []},
-                    "cauchy_schwarz": {"title": "Коши-Буняковский-Шварц (CBS)", "files": []},
-                    "jensen": {"title": "Неравенство Йенсена и выпуклость", "files": []},
-                    "holder_muirhead": {"title": "Неравенства Гёльдера и Мюрхеда", "files": []},
-                    "sos_abel": {"title": "Методы SOS и подстановка Абеля", "files": []}
-                }
-            },
-            "functional_seq": {
-                "title": "Функциональные уравнения и последовательности",
-                "topics": {
-                    "linear_recurrence": {"title": "Линейные рекуррентные соотношения", "files": []},
-                    "substitution_cauchy": {"title": "Метод подстановки и подстановки Коши", "files": []},
-                    "injective_monotone": {"title": "Инъективность, сюръективность и монотонность", "files": []}
-                }
-            }
-        }
-    },
-    "combinatorics": {
-        "title": "🧩 Комбинаторика",
-        "blocks": {
-            "enumerative": {
-                "title": "Перечислительная комбинаторика",
-                "topics": {
-                    "binomial": {"title": "Биномиальные коэффициенты и треугольник Паскаля", "files": []},
-                    "inclusion_exclusion": {"title": "Принцип включений-исключений (PIE)", "files": []},
-                    "catalan": {"title": "Числа Каталана", "files": []},
-                    "stirling_bell": {"title": "Числа Стирлинга и Белла", "files": []}
-                }
-            },
-            "graph_theory": {
-                "title": "Теория графов",
-                "topics": {
-                    "handshake_euler_ham": {"title": "Лемма о рукопожатиях, эйлеровы и гамильтоновы циклы", "files": []},
-                    "trees_cayley": {"title": "Деревья и формула Кэли", "files": []},
-                    "bipartite_hall": {"title": "Двудольные графы и теорема Холла", "files": []},
-                    "coloring_euler_formula": {"title": "Раскраска графов и формула Эйлера (V-E+F=2)", "files": []}
-                }
-            },
-            "extremal": {
-                "title": "Экстремальная комбинаторика",
-                "topics": {
-                    "pigeonhole": {"title": "Принцип Дирихле и его обобщения", "files": []},
-                    "invariants": {"title": "Инварианты и полуинварианты", "files": []},
-                    "ramsey": {"title": "Теорема Рамсея", "files": []},
-                    "turan_sperner": {"title": "Теоремы Турана и Шпернера", "files": []}
-                }
-            },
-            "generating_functions": {
-                "title": "Производящие функции",
-                "topics": {
-                    "ogf_egf": {"title": "Обыкновенные и экспоненциальные производящие функции", "files": []},
-                    "recurrence_via_gf": {"title": "Решение рекуррент через производящие функции", "files": []}
-                }
-            }
-        }
-    },
-    "higher_math": {
-        "title": "🎓 Матанализ и высшая математика",
-        "blocks": {
-            "calculus": {
-                "title": "Математический анализ",
-                "topics": {
-                    "limits_series": {"title": "Пределы, производные, ряды Тейлора и Фурье", "files": []},
-                    "integrals": {"title": "Неопределённые, определённые и кратные интегралы", "files": []},
-                    "ode": {"title": "Обыкновенные дифференциальные уравнения (ОДУ)", "files": []}
-                }
-            },
-            "linear_abstract_algebra": {
-                "title": "Линейная и абстрактная алгебра",
-                "topics": {
-                    "matrices_slau": {"title": "Матрицы, определители, СЛАУ, векторные пространства", "files": []},
-                    "groups_rings_fields": {"title": "Теория групп, колец и полей", "files": []},
-                    "tensors": {"title": "Тензоры и полилинейная алгебра", "files": []}
-                }
-            },
-            "higher_geo_topology": {
-                "title": "Высшая геометрия и топология",
-                "topics": {
-                    "diff_geometry": {"title": "Дифференциальная геометрия и кривизна", "files": []},
-                    "topology": {"title": "Общая и алгебраическая топология", "files": []}
-                }
-            },
-            "complex_functional": {
-                "title": "Комплексный и функциональный анализ",
-                "topics": {
-                    "tfkp": {"title": "ТФКП (голоморфные функции, интеграл Коши, вычеты)", "files": []},
-                    "banach_hilbert": {"title": "Банаховы и Гильбертовы пространства", "files": []}
-                }
-            }
-        }
+    "links": {
+        "useful_links": {"title": "🔗 Полезные ссылки", "items": []},
+        "useful_videos": {"title": "🎥 Полезные видео и YouTube-каналы", "items": []}
     }
 }
 
-DATABASE = {}
+DATABASE = {}  # заполняется в main() из MongoDB
+
+# заявки пользователей на добавление файла: sub_id -> {...}
+PENDING_SUBMISSIONS = {}
 
 
 async def load_db():
     doc = await db_collection.find_one({"_id": DB_DOC_ID})
     if doc is None:
-        logger.info("В MongoDB нет каталога — создаю из DEFAULT_DATABASE")
-        data = copy.deepcopy(DEFAULT_DATABASE)
+        logger.info("В MongoDB нет каталога — создаю из DEFAULT_STATE")
+        data = copy.deepcopy(DEFAULT_STATE)
         await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {"data": data}}, upsert=True)
         return data
     return doc["data"]
@@ -244,84 +69,106 @@ async def save_db(db_data):
     await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {"data": db_data}}, upsert=True)
 
 
-# --- FSM ДЛЯ АДМИНОВ (множественный выбор тем) ---
-class FileUpload(StatesGroup):
-    selecting_topics = State()
+# ==========================================
+#                FSM СОСТОЯНИЯ
+# ==========================================
+class FileUpload(StatesGroup):        # админ загружает файл напрямую
+    selecting_categories = State()
     waiting_for_caption = State()
 
 
+class UserSubmit(StatesGroup):        # обычный пользователь предлагает файл
+    selecting_categories = State()
+
+
+class AdminReview(StatesGroup):       # админ меняет название чужой заявки
+    editing_title = State()
+
+
+class AddLink(StatesGroup):           # админ добавляет ссылку
+    waiting_for_text = State()
+
+
+# ==========================================
+#                КЛАВИАТУРЫ
+# ==========================================
 def get_main_menu_keyboard():
     builder = [[InlineKeyboardButton(text=cat_data["title"], callback_data=f"cat:{cat_key}")]
-               for cat_key, cat_data in DATABASE.items()]
+               for cat_key, cat_data in DATABASE["categories"].items()]
+    builder.append([InlineKeyboardButton(text="🔗 Полезные материалы", callback_data="links:main")])
+    builder.append([InlineKeyboardButton(text="📤 Предложить файл", callback_data="submit:start")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
-
-
-def _selected_set(data: dict) -> set:
-    return set(data.get("selected", []))
 
 
 def build_admin_categories_kb(selected: set):
     builder = []
-    for cat_key, cat_data in DATABASE.items():
-        builder.append([InlineKeyboardButton(text=cat_data["title"], callback_data=f"a_cat:{cat_key}")])
-    n = len(selected)
-    builder.append([InlineKeyboardButton(text=f"✅ Готово ({n} выбрано)", callback_data="a_done")])
+    for cat_key, cat_data in DATABASE["categories"].items():
+        mark = "☑️" if cat_key in selected else "▫️"
+        builder.append([InlineKeyboardButton(text=f"{mark} {cat_data['title']}", callback_data=f"a_toggle:{cat_key}")])
+    builder.append([InlineKeyboardButton(text=f"✅ Готово ({len(selected)})", callback_data="a_done")])
     builder.append([InlineKeyboardButton(text="❌ Отмена", callback_data="a_cancel")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
 
-def build_admin_blocks_kb(cat_key: str, selected: set):
-    cat_data = DATABASE[cat_key]
+def build_user_categories_kb(selected: set):
     builder = []
-    for b_key, b_data in cat_data["blocks"].items():
-        marked = sum(1 for t_key in b_data["topics"] if f"{cat_key}|{b_key}|{t_key}" in selected)
-        prefix = f"({marked}) " if marked else ""
-        builder.append([InlineKeyboardButton(text=f"{prefix}{b_data['title']}", callback_data=f"a_blk:{cat_key}:{b_key}")])
-    builder.append([InlineKeyboardButton(text="⬅️ К категориям", callback_data="a_backcats")])
-    n = len(selected)
-    builder.append([InlineKeyboardButton(text=f"✅ Готово ({n} выбрано)", callback_data="a_done")])
-    builder.append([InlineKeyboardButton(text="❌ Отмена", callback_data="a_cancel")])
+    for cat_key, cat_data in DATABASE["categories"].items():
+        mark = "☑️" if cat_key in selected else "▫️"
+        builder.append([InlineKeyboardButton(text=f"{mark} {cat_data['title']}", callback_data=f"usub_toggle:{cat_key}")])
+    builder.append([InlineKeyboardButton(text=f"✅ Отправить на проверку ({len(selected)})", callback_data="usub_done")])
+    builder.append([InlineKeyboardButton(text="❌ Отмена", callback_data="usub_cancel")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
 
-def build_admin_topics_kb(cat_key: str, b_key: str, selected: set):
-    block_data = DATABASE[cat_key]["blocks"][b_key]
+def build_submission_categories_kb(sub_id: str):
+    sub = PENDING_SUBMISSIONS[sub_id]
+    selected = set(sub["categories"])
     builder = []
-    for t_key, t_data in block_data["topics"].items():
-        code = f"{cat_key}|{b_key}|{t_key}"
-        mark = "☑️" if code in selected else "▫️"
-        builder.append([InlineKeyboardButton(text=f"{mark} {t_data['title']}", callback_data=f"a_toggle:{cat_key}:{b_key}:{t_key}")])
-    builder.append([InlineKeyboardButton(text="⬅️ К блокам", callback_data=f"a_cat:{cat_key}")])
-    n = len(selected)
-    builder.append([InlineKeyboardButton(text=f"✅ Готово ({n} выбрано)", callback_data="a_done")])
-    builder.append([InlineKeyboardButton(text="❌ Отмена", callback_data="a_cancel")])
+    for cat_key, cat_data in DATABASE["categories"].items():
+        mark = "☑️" if cat_key in selected else "▫️"
+        builder.append([InlineKeyboardButton(text=f"{mark} {cat_data['title']}", callback_data=f"subcat_toggle:{sub_id}:{cat_key}")])
+    builder.append([InlineKeyboardButton(text="✅ Готово", callback_data=f"subcat_done:{sub_id}")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
+
+
+def build_submission_action_kb(sub_id: str):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Одобрить как есть", callback_data=f"sub_approve:{sub_id}")],
+        [InlineKeyboardButton(text="✏️ Изменить разделы", callback_data=f"sub_editcat:{sub_id}")],
+        [InlineKeyboardButton(text="✏️ Изменить название", callback_data=f"sub_edittitle:{sub_id}")],
+        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"sub_reject:{sub_id}")],
+    ])
 
 
 # ==========================================
-#        АДМИН: ЗАГРУЗКА С МУЛЬТИВЫБОРОМ
+#     АДМИН: ПРЯМАЯ ЗАГРУЗКА ФАЙЛА (мультивыбор разделов)
 # ==========================================
-@dp.message(F.document)
+@dp.message(F.document, F.from_user.id.in_(ADMIN_IDS))
 async def admin_doc_received(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return await message.answer("ℹ️ Отправка файлов доступна только администраторам.")
-
     doc = message.document
-    file_id = doc.file_id
     default_name = message.caption if message.caption else doc.file_name
 
-    await state.update_data(file_id=file_id, default_name=default_name, selected=[])
-    await state.set_state(FileUpload.selecting_topics)
+    await state.update_data(file_id=doc.file_id, default_name=default_name, selected=[])
+    await state.set_state(FileUpload.selecting_categories)
 
     await message.answer(
-        f"📥 **Получен файл:** `{default_name}`\n\n"
-        f"Отметь **все разделы**, куда нужно добавить этот файл (можно несколько), "
-        f"потом жми **✅ Готово**:",
+        f"📥 **Получен файл:** `{default_name}`\n\nОтметь разделы (можно несколько):",
         reply_markup=build_admin_categories_kb(set())
     )
 
 
-@dp.callback_query(FileUpload.selecting_topics, F.data == "a_cancel")
+@dp.callback_query(FileUpload.selecting_categories, F.data.startswith("a_toggle:"))
+async def admin_toggle_cat(callback: types.CallbackQuery, state: FSMContext):
+    cat_key = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    selected = set(data.get("selected", []))
+    selected.discard(cat_key) if cat_key in selected else selected.add(cat_key)
+    await state.update_data(selected=list(selected))
+    await callback.message.edit_reply_markup(reply_markup=build_admin_categories_kb(selected))
+    await callback.answer()
+
+
+@dp.callback_query(FileUpload.selecting_categories, F.data == "a_cancel")
 @dp.callback_query(FileUpload.waiting_for_caption, F.data == "a_cancel")
 async def admin_cancel_upload(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
@@ -329,94 +176,33 @@ async def admin_cancel_upload(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@dp.callback_query(FileUpload.selecting_topics, F.data == "a_backcats")
-async def admin_back_to_categories(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(FileUpload.selecting_categories, F.data == "a_done")
+async def admin_categories_done(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    selected = _selected_set(data)
-    await callback.message.edit_text("Выбери **Категорию**:", reply_markup=build_admin_categories_kb(selected))
-    await callback.answer()
-
-
-@dp.callback_query(FileUpload.selecting_topics, F.data.startswith("a_cat:"))
-async def admin_select_cat(callback: types.CallbackQuery, state: FSMContext):
-    cat_key = callback.data.split(":")[1]
-    data = await state.get_data()
-    selected = _selected_set(data)
-    cat_data = DATABASE[cat_key]
-    await callback.message.edit_text(f"📁 **{cat_data['title']}**\nВыбери **Блок**:", reply_markup=build_admin_blocks_kb(cat_key, selected))
-    await callback.answer()
-
-
-@dp.callback_query(FileUpload.selecting_topics, F.data.startswith("a_blk:"))
-async def admin_select_blk(callback: types.CallbackQuery, state: FSMContext):
-    _, cat_key, b_key = callback.data.split(":")
-    data = await state.get_data()
-    selected = _selected_set(data)
-    block_data = DATABASE[cat_key]["blocks"][b_key]
-    await callback.message.edit_text(
-        f"📁 **{block_data['title']}**\nОтметь темы (можно несколько):",
-        reply_markup=build_admin_topics_kb(cat_key, b_key, selected)
-    )
-    await callback.answer()
-
-
-@dp.callback_query(FileUpload.selecting_topics, F.data.startswith("a_toggle:"))
-async def admin_toggle_topic(callback: types.CallbackQuery, state: FSMContext):
-    _, cat_key, b_key, t_key = callback.data.split(":")
-    code = f"{cat_key}|{b_key}|{t_key}"
-
-    data = await state.get_data()
-    selected = _selected_set(data)
-    if code in selected:
-        selected.discard(code)
-    else:
-        selected.add(code)
-    await state.update_data(selected=list(selected))
-
-    await callback.message.edit_reply_markup(reply_markup=build_admin_topics_kb(cat_key, b_key, selected))
-    await callback.answer()
-
-
-@dp.callback_query(FileUpload.selecting_topics, F.data == "a_done")
-async def admin_selection_done(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    selected = _selected_set(data)
-
+    selected = set(data.get("selected", []))
     if not selected:
-        return await callback.answer("⚠️ Сначала отметь хотя бы одну тему.", show_alert=True)
+        return await callback.answer("⚠️ Отметь хотя бы один раздел.", show_alert=True)
 
     await state.set_state(FileUpload.waiting_for_caption)
     default_name = data.get("default_name")
-
-    lines = []
-    for code in sorted(selected):
-        cat_key, b_key, t_key = code.split("|")
-        t_title = DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]["title"]
-        lines.append(f"• {t_title}")
-    summary = "\n".join(lines)
+    cats_text = ", ".join(DATABASE["categories"][c]["title"] for c in selected)
 
     builder = [
         [InlineKeyboardButton(text=f"📝 Оставить: {default_name[:20]}...", callback_data="a_skip_caption")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="a_cancel")]
     ]
-
     await callback.message.edit_text(
-        f"✅ Выбрано разделов: **{len(selected)}**\n{summary}\n\n"
-        f"✍️ Отправь описание файла текстом, или оставь имя по умолчанию:",
+        f"✅ Разделы: {cats_text}\n\n✍️ Введи описание файла, или оставь имя по умолчанию:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
     )
     await callback.answer()
 
 
-async def _save_file_to_selected(state: FSMContext, caption: str):
+async def _admin_save_file(state: FSMContext, caption: str):
     data = await state.get_data()
-    file_id = data.get("file_id")
-    selected = _selected_set(data)
-
-    for code in selected:
-        cat_key, b_key, t_key = code.split("|")
-        DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]["files"].append({"file_id": file_id, "caption": caption})
-
+    selected = data.get("selected", [])
+    for cat_key in selected:
+        DATABASE["categories"][cat_key]["files"].append({"file_id": data["file_id"], "caption": caption})
     await save_db(DATABASE)
     return selected
 
@@ -424,81 +210,287 @@ async def _save_file_to_selected(state: FSMContext, caption: str):
 @dp.callback_query(FileUpload.waiting_for_caption, F.data == "a_skip_caption")
 async def admin_skip_caption(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    default_name = data.get("default_name")
-    selected = await _save_file_to_selected(state, default_name)
-
-    lines = []
-    for code in sorted(selected):
-        cat_key, b_key, t_key = code.split("|")
-        lines.append(f"• {DATABASE[cat_key]['title']} ➔ {DATABASE[cat_key]['blocks'][b_key]['title']} ➔ {DATABASE[cat_key]['blocks'][b_key]['topics'][t_key]['title']}")
-    summary = "\n".join(lines)
-
-    await callback.message.edit_text(f"✅ **Файл сохранён в {len(selected)} раздел(ов)!**\n\n{summary}\n\n📄 **Описание:** `{default_name}`")
+    default_name = data["default_name"]
+    selected = await _admin_save_file(state, default_name)
+    cats_text = ", ".join(DATABASE["categories"][c]["title"] for c in selected)
+    await callback.message.edit_text(f"✅ Файл сохранён в: {cats_text}\n📄 {default_name}")
     await state.clear()
     await callback.answer()
 
 
 @dp.message(FileUpload.waiting_for_caption, F.text)
 async def admin_save_custom_caption(message: types.Message, state: FSMContext):
-    custom_caption = message.text.strip()
-    selected = await _save_file_to_selected(state, custom_caption)
-
-    lines = []
-    for code in sorted(selected):
-        cat_key, b_key, t_key = code.split("|")
-        lines.append(f"• {DATABASE[cat_key]['title']} ➔ {DATABASE[cat_key]['blocks'][b_key]['title']} ➔ {DATABASE[cat_key]['blocks'][b_key]['topics'][t_key]['title']}")
-    summary = "\n".join(lines)
-
-    await message.answer(f"✅ **Файл сохранён в {len(selected)} раздел(ов)!**\n\n{summary}\n\n📄 **Описание:** `{custom_caption}`")
+    caption = message.text.strip()
+    selected = await _admin_save_file(state, caption)
+    cats_text = ", ".join(DATABASE["categories"][c]["title"] for c in selected)
+    await message.answer(f"✅ Файл сохранён в: {cats_text}\n📄 {caption}")
     await state.clear()
 
 
 # ==========================================
-#   ПОЛЬЗОВАТЕЛЬ: 4-УРОВНЕВАЯ НАВИГАЦИЯ
+#   ПОЛЬЗОВАТЕЛЬ: ПРЕДЛОЖИТЬ ФАЙЛ (уходит на проверку админам)
+# ==========================================
+@dp.callback_query(F.data == "submit:start")
+async def submit_start(callback: types.CallbackQuery):
+    await callback.message.answer(
+        "📤 Просто пришли мне сюда файл (PDF и т.п.), который хочешь предложить для базы — "
+        "я передам его админу на проверку."
+    )
+    await callback.answer()
+
+
+@dp.message(F.document)
+async def user_doc_received(message: types.Message, state: FSMContext):
+    doc = message.document
+    default_name = message.caption if message.caption else doc.file_name
+
+    await state.update_data(file_id=doc.file_id, default_name=default_name, selected=[])
+    await state.set_state(UserSubmit.selecting_categories)
+
+    await message.answer(
+        f"📥 Файл получен: `{default_name}`\n\n"
+        f"Можешь подсказать раздел (необязательно — админ сам решит, если не уверен):",
+        reply_markup=build_user_categories_kb(set())
+    )
+
+
+@dp.callback_query(UserSubmit.selecting_categories, F.data.startswith("usub_toggle:"))
+async def usub_toggle(callback: types.CallbackQuery, state: FSMContext):
+    cat_key = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    selected = set(data.get("selected", []))
+    selected.discard(cat_key) if cat_key in selected else selected.add(cat_key)
+    await state.update_data(selected=list(selected))
+    await callback.message.edit_reply_markup(reply_markup=build_user_categories_kb(selected))
+    await callback.answer()
+
+
+@dp.callback_query(UserSubmit.selecting_categories, F.data == "usub_cancel")
+async def usub_cancel(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("❌ Отправка файла отменена.")
+    await callback.answer()
+
+
+@dp.callback_query(UserSubmit.selecting_categories, F.data == "usub_done")
+async def usub_done(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = list(set(data.get("selected", [])))
+
+    sub_id = uuid.uuid4().hex[:8]
+    username = f"@{callback.from_user.username}" if callback.from_user.username else callback.from_user.full_name
+    PENDING_SUBMISSIONS[sub_id] = {
+        "user_id": callback.from_user.id,
+        "username": username,
+        "file_id": data["file_id"],
+        "title": data["default_name"],
+        "categories": selected,
+        "status": "pending",
+    }
+    await state.clear()
+    await callback.message.edit_text("📤 Файл отправлен на проверку админу. Спасибо за помощь! 🙌")
+    await callback.answer()
+    await send_submission_for_review(sub_id)
+
+
+async def send_submission_for_review(sub_id: str):
+    sub = PENDING_SUBMISSIONS[sub_id]
+    cats_text = ", ".join(DATABASE["categories"][c]["title"] for c in sub["categories"]) if sub["categories"] else "не указано"
+    caption = (
+        f"📥 Новый файл на проверку\n"
+        f"👤 От: {sub['username']}\n"
+        f"📄 Название: {sub['title']}\n"
+        f"📁 Разделы: {cats_text}"
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_document(admin_id, document=sub["file_id"], caption=caption, reply_markup=build_submission_action_kb(sub_id))
+        except Exception as e:
+            logger.error(f"Не удалось отправить админу {admin_id}: {e}")
+
+
+# ==========================================
+#   АДМИН: ОБРАБОТКА ЗАЯВОК ПОЛЬЗОВАТЕЛЕЙ
+# ==========================================
+@dp.callback_query(F.data.startswith("sub_approve:"))
+async def sub_approve(callback: types.CallbackQuery):
+    sub_id = callback.data.split(":", 1)[1]
+    sub = PENDING_SUBMISSIONS.get(sub_id)
+    if not sub or sub["status"] != "pending":
+        return await callback.answer("Уже обработано.", show_alert=True)
+    if not sub["categories"]:
+        return await callback.answer("Сначала выбери разделы («Изменить разделы»).", show_alert=True)
+
+    for cat_key in sub["categories"]:
+        DATABASE["categories"][cat_key]["files"].append({"file_id": sub["file_id"], "caption": sub["title"]})
+    await save_db(DATABASE)
+    sub["status"] = "approved"
+
+    try:
+        await callback.message.edit_caption(caption=(callback.message.caption or "") + "\n\n✅ ОДОБРЕНО", reply_markup=None)
+    except Exception:
+        pass
+    await callback.answer("Добавлено ✅")
+    try:
+        await bot.send_message(sub["user_id"], f"✅ Твой файл «{sub['title']}» добавлен в каталог! Спасибо 🙌")
+    except Exception:
+        pass
+
+
+@dp.callback_query(F.data.startswith("sub_reject:"))
+async def sub_reject(callback: types.CallbackQuery):
+    sub_id = callback.data.split(":", 1)[1]
+    sub = PENDING_SUBMISSIONS.get(sub_id)
+    if not sub or sub["status"] != "pending":
+        return await callback.answer("Уже обработано.", show_alert=True)
+
+    sub["status"] = "rejected"
+    try:
+        await callback.message.edit_caption(caption=(callback.message.caption or "") + "\n\n❌ ОТКЛОНЕНО", reply_markup=None)
+    except Exception:
+        pass
+    await callback.answer("Отклонено")
+    try:
+        await bot.send_message(sub["user_id"], "😔 Твой файл не был принят в каталог.")
+    except Exception:
+        pass
+
+
+@dp.callback_query(F.data.startswith("sub_editcat:"))
+async def sub_editcat(callback: types.CallbackQuery):
+    sub_id = callback.data.split(":", 1)[1]
+    if PENDING_SUBMISSIONS.get(sub_id, {}).get("status") != "pending":
+        return await callback.answer("Уже обработано.", show_alert=True)
+    await callback.message.edit_reply_markup(reply_markup=build_submission_categories_kb(sub_id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("subcat_toggle:"))
+async def subcat_toggle(callback: types.CallbackQuery):
+    _, sub_id, cat_key = callback.data.split(":")
+    sub = PENDING_SUBMISSIONS.get(sub_id)
+    if not sub or sub["status"] != "pending":
+        return await callback.answer("Уже обработано.", show_alert=True)
+    selected = set(sub["categories"])
+    selected.discard(cat_key) if cat_key in selected else selected.add(cat_key)
+    sub["categories"] = list(selected)
+    await callback.message.edit_reply_markup(reply_markup=build_submission_categories_kb(sub_id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("subcat_done:"))
+async def subcat_done(callback: types.CallbackQuery):
+    sub_id = callback.data.split(":", 1)[1]
+    if PENDING_SUBMISSIONS.get(sub_id, {}).get("status") != "pending":
+        return await callback.answer("Уже обработано.", show_alert=True)
+    await callback.message.edit_reply_markup(reply_markup=build_submission_action_kb(sub_id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("sub_edittitle:"))
+async def sub_edittitle(callback: types.CallbackQuery, state: FSMContext):
+    sub_id = callback.data.split(":", 1)[1]
+    if PENDING_SUBMISSIONS.get(sub_id, {}).get("status") != "pending":
+        return await callback.answer("Уже обработано.", show_alert=True)
+    await state.set_state(AdminReview.editing_title)
+    await state.update_data(sub_id=sub_id)
+    await callback.message.answer("✍️ Введи новое название файла:")
+    await callback.answer()
+
+
+@dp.message(AdminReview.editing_title, F.text)
+async def admin_retitle_submission(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    sub_id = data.get("sub_id")
+    sub = PENDING_SUBMISSIONS.get(sub_id)
+    await state.clear()
+    if not sub or sub["status"] != "pending":
+        return await message.answer("⚠️ Эта заявка уже обработана.")
+    sub["title"] = message.text.strip()
+    await message.answer(f"✅ Название обновлено: {sub['title']}")
+
+
+# ==========================================
+#           ПОЛЕЗНЫЕ МАТЕРИАЛЫ (ССЫЛКИ)
+# ==========================================
+@dp.callback_query(F.data == "links:main")
+async def links_main(callback: types.CallbackQuery):
+    builder = [[InlineKeyboardButton(text=sec["title"], callback_data=f"links:sec:{key}")]
+               for key, sec in DATABASE["links"].items()]
+    builder.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")])
+    await callback.message.edit_text("🔗 **Полезные материалы**\nВыбери раздел:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("links:sec:"))
+async def links_section(callback: types.CallbackQuery):
+    key = callback.data.split(":", 2)[2]
+    sec = DATABASE["links"][key]
+    builder = [[InlineKeyboardButton(text=item["title"], url=item["url"])] for item in sec["items"]]
+    if callback.from_user.id in ADMIN_IDS:
+        builder.append([InlineKeyboardButton(text="➕ Добавить ссылку", callback_data=f"links:add:{key}")])
+    builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="links:main")])
+    text = f"**{sec['title']}**" + ("" if sec["items"] else "\n\nПока пусто.")
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("links:add:"))
+async def links_add_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Только для админов.", show_alert=True)
+    key = callback.data.split(":", 2)[2]
+    await state.set_state(AddLink.waiting_for_text)
+    await state.update_data(link_key=key)
+    await callback.message.answer(
+        "Отправь в формате:\nНазвание - URL\n\nНапример:\nОфициальный канал - https://t.me/matham"
+    )
+    await callback.answer()
+
+
+@dp.message(AddLink.waiting_for_text, F.text)
+async def links_add_save(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    key = data["link_key"]
+    text = message.text.strip()
+
+    if " - " in text:
+        title, url = text.split(" - ", 1)
+    elif "|" in text:
+        title, url = text.split("|", 1)
+    else:
+        return await message.answer("⚠️ Не понял формат. Пришли так:\nНазвание - URL")
+
+    title, url = title.strip(), url.strip()
+    DATABASE["links"][key]["items"].append({"title": title, "url": url})
+    await save_db(DATABASE)
+    await state.clear()
+    await message.answer(f"✅ Ссылка добавлена: {title}")
+
+
+# ==========================================
+#   ПОЛЬЗОВАТЕЛЬ: КАТАЛОГ (плоский, без подразделов)
 # ==========================================
 @dp.callback_query(F.data.startswith("cat:"))
 async def process_category_click(callback: types.CallbackQuery):
-    cat_key = callback.data.split(":")[1]
-    cat_data = DATABASE.get(cat_key)
+    cat_key = callback.data.split(":", 1)[1]
+    cat_data = DATABASE["categories"][cat_key]
 
-    builder = [[InlineKeyboardButton(text=b_data["title"], callback_data=f"blk:{cat_key}:{b_key}")]
-               for b_key, b_data in cat_data["blocks"].items()]
-    builder.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")])
-
-    await callback.message.edit_text(f"Раздел **{cat_data['title']}**.\nВыбери блок:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("blk:"))
-async def process_block_click(callback: types.CallbackQuery):
-    _, cat_key, b_key = callback.data.split(":")
-    block_data = DATABASE[cat_key]["blocks"][b_key]
-
-    builder = [[InlineKeyboardButton(text=f"• {t_data['title']}", callback_data=f"top:{cat_key}:{b_key}:{t_key}")]
-               for t_key, t_data in block_data["topics"].items()]
-    builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cat:{cat_key}")])
-
-    await callback.message.edit_text(f"Блок **{block_data['title']}**.\nВыбери тему:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("top:"))
-async def process_topic_click(callback: types.CallbackQuery):
-    _, cat_key, b_key, t_key = callback.data.split(":")
-    topic_data = DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]
-
-    if not topic_data["files"]:
-        return await callback.answer("📁 В этой теме пока нет файлов.", show_alert=True)
+    if not cat_data["files"]:
+        builder = [[InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")]]
+        return await callback.message.edit_text(
+            f"**{cat_data['title']}**\n\n📁 Пока нет файлов. Попробуй поиск — просто напиши слово в чат!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
+        )
 
     builder = []
-    for idx, item in enumerate(topic_data["files"]):
-        btn_text = f"📄 {item['caption'][:30]}" + ("..." if len(item['caption']) > 30 else "")
-        builder.append([InlineKeyboardButton(text=btn_text, callback_data=f"file:{cat_key}:{b_key}:{t_key}:{idx}")])
-
-    builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"blk:{cat_key}:{b_key}")])
+    for idx, item in enumerate(cat_data["files"]):
+        btn_text = f"📄 {item['caption'][:35]}" + ("..." if len(item['caption']) > 35 else "")
+        builder.append([InlineKeyboardButton(text=btn_text, callback_data=f"file:{cat_key}:{idx}")])
+    builder.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")])
 
     await callback.message.edit_text(
-        f"Тема: **{topic_data['title']}**\n⬇️ Выбери файл для скачивания:",
+        f"**{cat_data['title']}**\n⬇️ Выбери файл, или напиши ключевое слово для поиска:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
     )
     await callback.answer()
@@ -506,18 +498,16 @@ async def process_topic_click(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("file:"))
 async def process_file_click(callback: types.CallbackQuery):
-    _, cat_key, b_key, t_key, file_idx = callback.data.split(":")
-    file_idx = int(file_idx)
+    _, cat_key, idx = callback.data.split(":")
+    idx = int(idx)
+    files = DATABASE["categories"][cat_key]["files"]
 
-    topic_data = DATABASE[cat_key]["blocks"][b_key]["topics"][t_key]
-
-    if file_idx >= len(topic_data["files"]):
+    if idx >= len(files):
         return await callback.answer("❌ Файл больше не доступен.", show_alert=True)
 
-    file_item = topic_data["files"][file_idx]
-
-    await callback.answer("Отправляю файл... ⏳")
-    await callback.message.answer_document(document=file_item["file_id"], caption=f"📄 {file_item['caption']}")
+    item = files[idx]
+    await callback.answer("Отправляю... ⏳")
+    await callback.message.answer_document(document=item["file_id"], caption=f"📄 {item['caption']}")
 
 
 @dp.callback_query(F.data == "menu:main")
@@ -527,14 +517,14 @@ async def process_back_to_main(callback: types.CallbackQuery):
 
 
 # ==========================================
-#     КОМАНДЫ И ГЛОБАЛЬНЫЙ ПОИСК
+#     КОМАНДЫ И СИЛЬНЫЙ ПОИСК ПО КЛЮЧЕВЫМ СЛОВАМ
 # ==========================================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
         "Здарова! ✌️\nЯ бот канала matham.\n\n"
-        "🔎 **Поиск:** Просто напиши название темы или файла.\n"
+        "🔎 **Поиск:** Просто напиши слово (или несколько) — найду по всем разделам и ссылкам.\n"
         "📂 **Каталог:** Выбери раздел из меню ниже:",
         reply_markup=get_main_menu_keyboard()
     )
@@ -543,17 +533,15 @@ async def cmd_start(message: types.Message, state: FSMContext):
 @dp.message(Command("surprise"))
 async def cmd_surprise(message: types.Message):
     all_files = []
-    for c_data in DATABASE.values():
-        for b_data in c_data["blocks"].values():
-            for t_data in b_data["topics"].values():
-                for f in t_data["files"]:
-                    all_files.append((f, t_data["title"]))
+    for cat_key, cat_data in DATABASE["categories"].items():
+        for f in cat_data["files"]:
+            all_files.append((f, cat_data["title"]))
 
     if not all_files:
         return await message.answer("📁 В базе пока нет файлов.")
 
-    selected_file, topic_name = random.choice(all_files)
-    await message.answer(f"🎲 Случайный файл из темы: **{topic_name}**")
+    selected_file, cat_title = random.choice(all_files)
+    await message.answer(f"🎲 Случайный файл из раздела: **{cat_title}**")
     await message.answer_document(document=selected_file["file_id"], caption=f"📄 {selected_file['caption']}")
 
 
@@ -563,23 +551,41 @@ async def global_search_handler(message: types.Message):
     if query in ["удиви меня", "surprise", "рандом"]:
         return await cmd_surprise(message)
 
+    words = [w for w in query.split() if w]
+    if not words:
+        return
+
     found_files = []
-    for cat_data in DATABASE.values():
-        for block_data in cat_data["blocks"].values():
-            for topic_data in block_data["topics"].values():
-                for f in topic_data["files"]:
-                    if query in topic_data["title"].lower() or query in f["caption"].lower():
-                        found_files.append((f, topic_data["title"]))
+    for cat_data in DATABASE["categories"].values():
+        haystack_cat = cat_data["title"].lower()
+        for f in cat_data["files"]:
+            haystack = f"{haystack_cat} {f['caption'].lower()}"
+            if all(w in haystack for w in words):
+                found_files.append((f, cat_data["title"]))
 
-    if not found_files:
-        return await message.answer("🔍 Ничего не найдено. Попробуй изменить запрос или воспользуйся меню:", reply_markup=get_main_menu_keyboard())
+    found_links = []
+    for sec in DATABASE["links"].values():
+        for item in sec["items"]:
+            if all(w in item["title"].lower() for w in words):
+                found_links.append(item)
 
-    await message.answer(f"🔍 Найдено файлов: **{len(found_files)}**")
-    for file_info, topic_name in found_files[:10]:
-        await message.answer_document(
-            document=file_info["file_id"],
-            caption=f"📄 **{file_info['caption']}**\n📌 Тема: _{topic_name}_"
+    if not found_files and not found_links:
+        return await message.answer(
+            "🔍 Ничего не найдено. Попробуй другое слово или открой меню:",
+            reply_markup=get_main_menu_keyboard()
         )
+
+    if found_files:
+        await message.answer(f"🔍 Найдено файлов: **{len(found_files)}**")
+        for file_info, cat_title in found_files[:10]:
+            await message.answer_document(
+                document=file_info["file_id"],
+                caption=f"📄 **{file_info['caption']}**\n📌 {cat_title}"
+            )
+
+    if found_links:
+        builder = [[InlineKeyboardButton(text=item["title"], url=item["url"])] for item in found_links[:10]]
+        await message.answer(f"🔗 Найдено ссылок: **{len(found_links)}**", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
 
 
 # ==========================================
@@ -612,7 +618,9 @@ async def main():
     logger.info("✅ Подключение к MongoDB установлено")
 
     DATABASE = await load_db()
-    logger.info(f"📦 Каталог загружен из MongoDB ({len(DATABASE)} категорий)")
+    n_files = sum(len(c["files"]) for c in DATABASE["categories"].values())
+    n_links = sum(len(s["items"]) for s in DATABASE["links"].values())
+    logger.info(f"📦 Каталог загружен: {len(DATABASE['categories'])} категорий, {n_files} файлов, {n_links} ссылок")
 
     await bot.delete_webhook(drop_pending_updates=True)
     await set_main_menu(bot)
