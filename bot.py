@@ -70,6 +70,17 @@ async def save_db(db_data):
 
 
 # ==========================================
+#         ФУНКЦИЯ ПРОВЕРКИ ДУБЛИКАТОВ
+# ==========================================
+def is_file_duplicate(file_unique_id: str) -> bool:
+    for cat in DATABASE["categories"].values():
+        for f in cat["files"]:
+            if f.get("file_unique_id") == file_unique_id:
+                return True
+    return False
+
+
+# ==========================================
 #                FSM СОСТОЯНИЯ
 # ==========================================
 class FileUpload(StatesGroup):        # админ загружает файл напрямую
@@ -146,9 +157,13 @@ def build_submission_action_kb(sub_id: str):
 @dp.message(F.document, F.from_user.id.in_(ADMIN_IDS))
 async def admin_doc_received(message: types.Message, state: FSMContext):
     doc = message.document
+    
+    if is_file_duplicate(doc.file_unique_id):
+        return await message.answer("⚠️ Этот файл уже есть в базе!")
+
     default_name = message.caption if message.caption else doc.file_name
 
-    await state.update_data(file_id=doc.file_id, default_name=default_name, selected=[])
+    await state.update_data(file_id=doc.file_id, file_unique_id=doc.file_unique_id, default_name=default_name, selected=[])
     await state.set_state(FileUpload.selecting_categories)
 
     await message.answer(
@@ -202,7 +217,11 @@ async def _admin_save_file(state: FSMContext, caption: str):
     data = await state.get_data()
     selected = data.get("selected", [])
     for cat_key in selected:
-        DATABASE["categories"][cat_key]["files"].append({"file_id": data["file_id"], "caption": caption})
+        DATABASE["categories"][cat_key]["files"].append({
+            "file_id": data["file_id"], 
+            "file_unique_id": data.get("file_unique_id"),
+            "caption": caption
+        })
     await save_db(DATABASE)
     return selected
 
@@ -242,9 +261,13 @@ async def submit_start(callback: types.CallbackQuery):
 @dp.message(F.document)
 async def user_doc_received(message: types.Message, state: FSMContext):
     doc = message.document
+    
+    if is_file_duplicate(doc.file_unique_id):
+        return await message.answer("⚠️ Этот файл уже есть в нашей базе, спасибо!")
+
     default_name = message.caption if message.caption else doc.file_name
 
-    await state.update_data(file_id=doc.file_id, default_name=default_name, selected=[])
+    await state.update_data(file_id=doc.file_id, file_unique_id=doc.file_unique_id, default_name=default_name, selected=[])
     await state.set_state(UserSubmit.selecting_categories)
 
     await message.answer(
@@ -283,6 +306,7 @@ async def usub_done(callback: types.CallbackQuery, state: FSMContext):
         "user_id": callback.from_user.id,
         "username": username,
         "file_id": data["file_id"],
+        "file_unique_id": data.get("file_unique_id"),
         "title": data["default_name"],
         "categories": selected,
         "status": "pending",
@@ -322,7 +346,11 @@ async def sub_approve(callback: types.CallbackQuery):
         return await callback.answer("Сначала выбери разделы («Изменить разделы»).", show_alert=True)
 
     for cat_key in sub["categories"]:
-        DATABASE["categories"][cat_key]["files"].append({"file_id": sub["file_id"], "caption": sub["title"]})
+        DATABASE["categories"][cat_key]["files"].append({
+            "file_id": sub["file_id"],
+            "file_unique_id": sub.get("file_unique_id"),
+            "caption": sub["title"]
+        })
     await save_db(DATABASE)
     sub["status"] = "approved"
 
@@ -426,13 +454,38 @@ async def links_main(callback: types.CallbackQuery):
 async def links_section(callback: types.CallbackQuery):
     key = callback.data.split(":", 2)[2]
     sec = DATABASE["links"][key]
-    builder = [[InlineKeyboardButton(text=item["title"], url=item["url"])] for item in sec["items"]]
-    if callback.from_user.id in ADMIN_IDS:
+    is_admin = callback.from_user.id in ADMIN_IDS
+    
+    builder = []
+    for idx, item in enumerate(sec["items"]):
+        row = [InlineKeyboardButton(text=item["title"], url=item["url"])]
+        if is_admin:
+            row.append(InlineKeyboardButton(text="🗑", callback_data=f"del_link:{key}:{idx}"))
+        builder.append(row)
+        
+    if is_admin:
         builder.append([InlineKeyboardButton(text="➕ Добавить ссылку", callback_data=f"links:add:{key}")])
     builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="links:main")])
+    
     text = f"**{sec['title']}**" + ("" if sec["items"] else "\n\nПока пусто.")
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("del_link:"), F.from_user.id.in_(ADMIN_IDS))
+async def admin_delete_link(callback: types.CallbackQuery):
+    _, key, idx_str = callback.data.split(":")
+    idx = int(idx_str)
+    
+    try:
+        deleted = DATABASE["links"][key]["items"].pop(idx)
+        await save_db(DATABASE)
+        await callback.answer(f"🗑 Ссылка удалена: {deleted['title']}", show_alert=True)
+        # Перерисовываем меню
+        callback.data = f"links:sec:{key}"
+        await links_section(callback)
+    except Exception:
+        await callback.answer("⚠️ Ошибка при удалении", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("links:add:"))
@@ -475,6 +528,7 @@ async def links_add_save(message: types.Message, state: FSMContext):
 async def process_category_click(callback: types.CallbackQuery):
     cat_key = callback.data.split(":", 1)[1]
     cat_data = DATABASE["categories"][cat_key]
+    is_admin = callback.from_user.id in ADMIN_IDS
 
     if not cat_data["files"]:
         builder = [[InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")]]
@@ -486,7 +540,11 @@ async def process_category_click(callback: types.CallbackQuery):
     builder = []
     for idx, item in enumerate(cat_data["files"]):
         btn_text = f"📄 {item['caption'][:35]}" + ("..." if len(item['caption']) > 35 else "")
-        builder.append([InlineKeyboardButton(text=btn_text, callback_data=f"file:{cat_key}:{idx}")])
+        row = [InlineKeyboardButton(text=btn_text, callback_data=f"file:{cat_key}:{idx}")]
+        if is_admin:
+            row.append(InlineKeyboardButton(text="🗑", callback_data=f"del_file:{cat_key}:{idx}"))
+        builder.append(row)
+        
     builder.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")])
 
     await callback.message.edit_text(
@@ -494,6 +552,22 @@ async def process_category_click(callback: types.CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
     )
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("del_file:"), F.from_user.id.in_(ADMIN_IDS))
+async def admin_delete_file(callback: types.CallbackQuery):
+    _, cat_key, idx_str = callback.data.split(":")
+    idx = int(idx_str)
+    
+    try:
+        deleted = DATABASE["categories"][cat_key]["files"].pop(idx)
+        await save_db(DATABASE)
+        await callback.answer(f"🗑 Файл удален: {deleted['caption']}", show_alert=True)
+        # Перерисовываем категорию
+        callback.data = f"cat:{cat_key}"
+        await process_category_click(callback)
+    except Exception:
+        await callback.answer("⚠️ Ошибка при удалении", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("file:"))
