@@ -32,7 +32,7 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # ==========================================
-#   СТРУКТУРА ПО УМОЛЧАНИЮ (только при первом запуске / после очистки Mongo)
+#   СТРУКТУРА ПО УМОЛЧАНИЮ (с новыми разделами)
 # ==========================================
 DEFAULT_STATE = {
     "categories": {
@@ -41,7 +41,13 @@ DEFAULT_STATE = {
         "algebra": {"title": "🧮 Алгебра", "files": []},
         "combinatorics": {"title": "🧩 Комбинаторика", "files": []},
         "higher_math": {"title": "🎓 Матанализ и высшая математика", "files": []},
-        "titu": {"title": "📘 Titu Andreescu", "files": []}
+        "titu": {"title": "📘 Titu Andreescu", "files": []},
+        "books": {"title": "📚 Книги", "files": []},
+        "algorithms": {"title": "⚙️ Алгоритмы", "files": []},
+        "problems": {"title": "📝 Задачи", "files": []},
+        "olympiads": {"title": "🏆 Олимпиады", "files": []},
+        "inequalities": {"title": "⚖️ Неравенства", "files": []},
+        "programming": {"title": "💻 Программирование", "files": []}
     },
     "links": {
         "useful_links": {"title": "🔗 Полезные ссылки", "items": []},
@@ -55,18 +61,32 @@ DATABASE = {}  # заполняется в main() из MongoDB
 PENDING_SUBMISSIONS = {}
 
 
+async def save_db(db_data):
+    await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {"data": db_data}}, upsert=True)
+
+
 async def load_db():
     doc = await db_collection.find_one({"_id": DB_DOC_ID})
     if doc is None:
         logger.info("В MongoDB нет каталога — создаю из DEFAULT_STATE")
         data = copy.deepcopy(DEFAULT_STATE)
-        await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {"data": data}}, upsert=True)
+        await save_db(data)
         return data
-    return doc["data"]
-
-
-async def save_db(db_data):
-    await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {"data": db_data}}, upsert=True)
+    
+    data = doc["data"]
+    updated = False
+    
+    # Синхронизируем новые категории, если в базе их еще нет
+    for cat_key, cat_val in DEFAULT_STATE["categories"].items():
+        if cat_key not in data["categories"]:
+            data["categories"][cat_key] = copy.deepcopy(cat_val)
+            updated = True
+            
+    if updated:
+        logger.info("В базу добавлены новые категории!")
+        await save_db(data)
+        
+    return data
 
 
 # ==========================================
