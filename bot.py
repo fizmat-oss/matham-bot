@@ -12,9 +12,7 @@ from aiogram.filters import Command
 from aiogram.types import (
     BotCommand,
     InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    ReplyKeyboardMarkup,
-    KeyboardButton
+    InlineKeyboardButton
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -46,7 +44,7 @@ db_collection = mongo_db["catalog"]
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Базовая структура по умолчанию
+# Базовая структура каталога по умолчанию
 DEFAULT_DATABASE_STRUCTURE = {
     "categories": {
         "geometry": {
@@ -200,6 +198,51 @@ DATABASE = {}
 # ==========================================
 #         DATABASE & MIGRATION
 # ==========================================
+def merge_categories_with_defaults(current_categories: dict) -> dict:
+    """Гарантирует, что все категории, блоки и темы по умолчанию присутствуют и не пусты."""
+    default_cats = copy.deepcopy(DEFAULT_DATABASE_STRUCTURE["categories"])
+    if not current_categories:
+        return default_cats
+
+    for cat_k, cat_v in default_cats.items():
+        if cat_k not in current_categories:
+            current_categories[cat_k] = cat_v
+        else:
+            if "title" not in current_categories[cat_k]:
+                current_categories[cat_k]["title"] = cat_v.get("title", cat_k)
+            curr_blocks = current_categories[cat_k].setdefault("blocks", {})
+            def_blocks = cat_v.get("blocks", {})
+
+            for blk_k, blk_v in def_blocks.items():
+                if blk_k not in curr_blocks:
+                    curr_blocks[blk_k] = blk_v
+                else:
+                    if "title" not in curr_blocks[blk_k]:
+                        curr_blocks[blk_k]["title"] = blk_v.get("title", blk_k)
+                    curr_topics = curr_blocks[blk_k].setdefault("topics", {})
+                    def_topics = blk_v.get("topics", {})
+
+                    for top_k, top_v in def_topics.items():
+                        if top_k not in curr_topics:
+                            curr_topics[top_k] = top_v
+                        else:
+                            if "title" not in curr_topics[top_k]:
+                                curr_topics[top_k]["title"] = top_v.get("title", top_k)
+                            curr_files = curr_topics[top_k].setdefault("files", [])
+                            for f in curr_files:
+                                if "id" not in f:
+                                    f["id"] = uuid.uuid4().hex[:8]
+                                if "tags" not in f:
+                                    f["tags"] = []
+                                if "difficulty" not in f:
+                                    f["difficulty"] = "medium"
+                                if "must_read" not in f:
+                                    f["must_read"] = False
+                                if "views" not in f:
+                                    f["views"] = 0
+    return current_categories
+
+
 def migrate_database_data(raw_data: dict) -> dict:
     """Обеспечивает обратную совместимость со старой структурой MongoDB."""
     data = copy.deepcopy(raw_data) if raw_data else {}
@@ -215,33 +258,18 @@ def migrate_database_data(raw_data: dict) -> dict:
                 old_categories[remaining_key] = data.pop(remaining_key)
 
         data = {
-            "categories": old_categories if old_categories else copy.deepcopy(DEFAULT_DATABASE_STRUCTURE["categories"]),
+            "categories": old_categories,
             "daily_tasks": data.get("daily_tasks", {}),
             "links": data.get("links", []),
             "users": data.get("users", {}),
             "suggestions": data.get("suggestions", [])
         }
 
-    # Проверка наличия всех ключевых секций
+    data["categories"] = merge_categories_with_defaults(data.get("categories", {}))
+
     for section, default_val in DEFAULT_DATABASE_STRUCTURE.items():
         if section not in data:
             data[section] = copy.deepcopy(default_val)
-
-    # Проверка каждого файла на наличие полей: id, tags, difficulty, must_read, views
-    for cat_data in data["categories"].values():
-        for b_data in cat_data.get("blocks", {}).values():
-            for t_data in b_data.get("topics", {}).values():
-                for f in t_data.get("files", []):
-                    if "id" not in f:
-                        f["id"] = uuid.uuid4().hex[:8]
-                    if "tags" not in f:
-                        f["tags"] = []
-                    if "difficulty" not in f:
-                        f["difficulty"] = "medium"
-                    if "must_read" not in f:
-                        f["must_read"] = False
-                    if "views" not in f:
-                        f["views"] = 0
 
     return data
 
@@ -257,8 +285,7 @@ async def load_db() -> dict:
 
     raw_data = doc.get("data", {})
     migrated_data = migrate_database_data(raw_data)
-    if migrated_data != raw_data:
-        await save_db(migrated_data)
+    await save_db(migrated_data)
     return migrated_data
 
 
@@ -497,6 +524,174 @@ class LinkAddState(StatesGroup):
 
 
 # ==========================================
+#   ПОЛЬЗОВАТЕЛЬ: 4-УРОВНЕВАЯ НАВИГАЦИЯ
+# ==========================================
+@dp.callback_query(F.data == "menu:categories")
+async def process_open_categories(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "📂 **Каталог материалов:**\nВыберите интересующий вас раздел:",
+        reply_markup=get_categories_keyboard()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cat:"))
+async def process_category_click(callback: types.CallbackQuery):
+    cat_key = callback.data.split(":")[1]
+    cat_data = DATABASE.get("categories", {}).get(cat_key)
+
+    if not cat_data:
+        return await callback.answer("Категория не найдена.", show_alert=True)
+
+    builder = [
+        [InlineKeyboardButton(text=b_data["title"], callback_data=f"blk:{cat_key}:{b_key}")]
+        for b_key, b_data in cat_data.get("blocks", {}).items()
+    ]
+    builder.append([InlineKeyboardButton(text="⬅️ Все разделы", callback_data="menu:categories")])
+
+    await callback.message.edit_text(
+        f"📁 Раздел **{cat_data['title']}**\nВыберите блок:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("blk:"))
+async def process_block_click(callback: types.CallbackQuery):
+    _, cat_key, b_key = callback.data.split(":")
+    cat_data = DATABASE.get("categories", {}).get(cat_key, {})
+    block_data = cat_data.get("blocks", {}).get(b_key)
+
+    if not block_data:
+        return await callback.answer("Блок не найден.", show_alert=True)
+
+    builder = [
+        [InlineKeyboardButton(text=f"• {t_data['title']}", callback_data=f"top:{cat_key}:{b_key}:{t_key}")]
+        for t_key, t_data in block_data.get("topics", {}).items()
+    ]
+    builder.append([InlineKeyboardButton(text="⬅️ Назад к разделу", callback_data=f"cat:{cat_key}")])
+
+    await callback.message.edit_text(
+        f"📁 **{cat_data.get('title', '')}** ➔ **{block_data['title']}**\nВыберите тему:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("top:"))
+async def process_topic_click(callback: types.CallbackQuery):
+    _, cat_key, b_key, t_key = callback.data.split(":")
+    topic_data = DATABASE.get("categories", {}).get(cat_key, {}).get("blocks", {}).get(b_key, {}).get("topics", {}).get(t_key)
+
+    if not topic_data:
+        return await callback.answer("Тема не найдена.", show_alert=True)
+
+    files = topic_data.get("files", [])
+    if not files:
+        builder = [
+            [InlineKeyboardButton(text="📤 Предложить файл сюда", callback_data="menu:suggest")],
+            [InlineKeyboardButton(text="⬅️ Назад к блоку", callback_data=f"blk:{cat_key}:{b_key}")]
+        ]
+        await callback.message.edit_text(
+            f"📁 В теме **{topic_data['title']}** пока нет загруженных файлов.\n\n"
+            f"Администраторы скоро добавят материалы! Вы можете предложить книгу или задачу:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
+        )
+        return await callback.answer()
+
+    builder = []
+    for f in files:
+        f_id = f.get("id")
+        mr_icon = "⭐ " if f.get("must_read") else "📄 "
+        diff_badge = format_difficulty_badge(f.get("difficulty", "medium"))
+        btn_title = f"{mr_icon}{f['caption'][:24]} ({diff_badge})"
+        builder.append([InlineKeyboardButton(text=btn_title, callback_data=f"fview:{f_id}")])
+
+    builder.append([InlineKeyboardButton(text="⬅️ Назад к блоку", callback_data=f"blk:{cat_key}:{b_key}")])
+
+    await callback.message.edit_text(
+        f"Тема: **{topic_data['title']}**\nНайдено материалов: **{len(files)}**\n⬇️ Нажмите на файл для скачивания:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("fview:"))
+@dp.callback_query(F.data.startswith("fdl:"))
+async def process_file_view_and_download(callback: types.CallbackQuery):
+    file_uid = callback.data.split(":")[1]
+    file_item, cat_k, blk_k, top_k = find_file_by_id(file_uid)
+
+    if not file_item:
+        return await callback.answer("❌ Файл не найден или был удалён.", show_alert=True)
+
+    file_item["views"] = file_item.get("views", 0) + 1
+    track_user(callback.from_user)
+    add_user_points(callback.from_user.id, 1)
+    await save_db(DATABASE)
+
+    await callback.answer("Отправляю файл... ⏳")
+
+    uid_str = str(callback.from_user.id)
+    user_favs = DATABASE.get("users", {}).get(uid_str, {}).get("favorites", [])
+    is_fav = file_uid in user_favs
+    fav_btn_text = "💔 Из избранного" if is_fav else "❤️ В избранное"
+
+    diff_badge = format_difficulty_badge(file_item.get("difficulty", "medium"))
+    tags_text = " ".join([f"#{t}" for t in file_item.get("tags", [])])
+
+    caption_text = (
+        f"📄 **{file_item['caption']}**\n"
+        f"📊 Сложность: {diff_badge}\n"
+        f"🏷 Теги: {tags_text or '—'}"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=fav_btn_text, callback_data=f"fav_toggle:{file_uid}")],
+        [InlineKeyboardButton(text="⬅️ Назад в тему", callback_data=f"top:{cat_k}:{blk_k}:{top_k}")]
+    ])
+
+    await callback.message.answer_document(
+        document=file_item["file_id"],
+        caption=caption_text,
+        reply_markup=kb
+    )
+
+
+@dp.callback_query(F.data.startswith("fav_toggle:"))
+async def handle_fav_toggle(callback: types.CallbackQuery):
+    file_uid = callback.data.split(":")[1]
+    uid = str(callback.from_user.id)
+    u = track_user(callback.from_user)
+
+    if "favorites" not in u:
+        u["favorites"] = []
+
+    if file_uid in u["favorites"]:
+        u["favorites"].remove(file_uid)
+        await save_db(DATABASE)
+        await callback.answer("💔 Удалено из избранного.")
+        btn_text = "❤️ В избранное"
+    else:
+        u["favorites"].append(file_uid)
+        await save_db(DATABASE)
+        await callback.answer("❤️ Добавлено в избранное!")
+        btn_text = "💔 Из избранного"
+
+    file_item, cat_k, blk_k, top_k = find_file_by_id(file_uid)
+    back_cb = f"top:{cat_k}:{blk_k}:{top_k}" if cat_k else "menu:categories"
+
+    new_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=btn_text, callback_data=f"fav_toggle:{file_uid}")],
+        [InlineKeyboardButton(text="⬅️ Назад в тему", callback_data=back_cb)]
+    ])
+    try:
+        await callback.message.edit_reply_markup(reply_markup=new_kb)
+    except Exception:
+        pass
+
+
+# ==========================================
 #         DAILY TASK ENGINE & VOTING
 # ==========================================
 def get_daily_task_for_date(date_str: str) -> dict | None:
@@ -521,19 +716,18 @@ async def render_daily_task_view(target, date_str: str, user_id: int):
     """Показывает задачу дня пользователю."""
     task = get_daily_task_for_date(date_str)
     if not task:
-        text = f"🎯 **Задача дня на {date_str}**\n\nНа этот день задача пока не опубликована. Загляните позже! ⏳"
+        text = f"🎯 **Задача дня на {date_str}**\n\nНа сегодня задача ещё не опубликована. Загляните чуть позже или порешайте задачи из /challenge! ⏳"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎲 Random Challenge", callback_data="menu:challenge")],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")]
+        ])
         if isinstance(target, types.CallbackQuery):
-            await target.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")]
-            ]))
+            await target.message.edit_text(text, reply_markup=kb)
             await target.answer()
         else:
-            await target.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main")]
-            ]))
+            await target.answer(text, reply_markup=kb)
         return
 
-    # Увеличение просмотров
     task["views"] = task.get("views", 0) + 1
     u = track_user(target.from_user)
     add_user_points(user_id, 2)
@@ -586,7 +780,7 @@ async def process_dt_vote(callback: types.CallbackQuery):
 
     await save_db(DATABASE)
 
-    avg_score, total_votes, _ = compute_task_rating(task)
+    avg_score, _, _ = compute_task_rating(task)
     await callback.answer(f"✅ Твой голос ({score} ⭐) учтён!\nСредний балл: {avg_score}/5", show_alert=True)
 
 
@@ -621,192 +815,6 @@ async def process_dt_solution(callback: types.CallbackQuery):
 
 
 # ==========================================
-#         FILE VIEW & ACTIONS
-# ==========================================
-def make_file_card_keyboard(file_uid: str, user_id: int) -> InlineKeyboardMarkup:
-    uid_str = str(user_id)
-    user_favs = DATABASE.get("users", {}).get(uid_str, {}).get("favorites", [])
-    is_fav = file_uid in user_favs
-
-    fav_text = "💔 Из избранного" if is_fav else "❤️ В избранное"
-    fav_cb = f"fav_rem:{file_uid}" if is_fav else f"fav_add:{file_uid}"
-
-    kb = [
-        [InlineKeyboardButton(text="📥 Скачать файл", callback_data=f"fdl:{file_uid}")],
-        [InlineKeyboardButton(text=fav_text, callback_data=fav_cb)],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:categories")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=kb)
-
-
-@dp.callback_query(F.data.startswith("fdl:"))
-async def handle_file_download(callback: types.CallbackQuery):
-    file_uid = callback.data.split(":")[1]
-    file_item, _, _, _ = find_file_by_id(file_uid)
-
-    if not file_item:
-        return await callback.answer("❌ Файл не найден или был удалён.", show_alert=True)
-
-    file_item["views"] = file_item.get("views", 0) + 1
-    track_user(callback.from_user)
-    add_user_points(callback.from_user.id, 1)
-    await save_db(DATABASE)
-
-    await callback.answer("Отправляю файл... ⏳")
-    diff_badge = format_difficulty_badge(file_item.get("difficulty", "medium"))
-    tags_text = " ".join([f"#{t}" for t in file_item.get("tags", [])])
-
-    cap = f"📄 **{file_item['caption']}**\nСложность: {diff_badge}"
-    if tags_text:
-        cap += f"\nТеги: {tags_text}"
-
-    await callback.message.answer_document(
-        document=file_item["file_id"],
-        caption=cap
-    )
-
-
-@dp.callback_query(F.data.startswith("fav_add:"))
-async def handle_fav_add(callback: types.CallbackQuery):
-    file_uid = callback.data.split(":")[1]
-    uid = str(callback.from_user.id)
-    u = track_user(callback.from_user)
-
-    if "favorites" not in u:
-        u["favorites"] = []
-
-    if file_uid not in u["favorites"]:
-        u["favorites"].append(file_uid)
-        await save_db(DATABASE)
-        await callback.answer("❤️ Файл добавлен в избранное!", show_alert=False)
-    else:
-        await callback.answer("Файл уже в избранном.", show_alert=False)
-
-    try:
-        await callback.message.edit_reply_markup(reply_markup=make_file_card_keyboard(file_uid, callback.from_user.id))
-    except Exception:
-        pass
-
-
-@dp.callback_query(F.data.startswith("fav_rem:"))
-async def handle_fav_rem(callback: types.CallbackQuery):
-    file_uid = callback.data.split(":")[1]
-    uid = str(callback.from_user.id)
-    u = track_user(callback.from_user)
-
-    if "favorites" in u and file_uid in u["favorites"]:
-        u["favorites"].remove(file_uid)
-        await save_db(DATABASE)
-        await callback.answer("💔 Файл удален из избранного.", show_alert=False)
-
-    try:
-        await callback.message.edit_reply_markup(reply_markup=make_file_card_keyboard(file_uid, callback.from_user.id))
-    except Exception:
-        pass
-
-
-# ==========================================
-#     ПОЛЬЗОВАТЕЛЬ: НАВИГАЦИЯ КАТАЛОГА
-# ==========================================
-@dp.callback_query(F.data.startswith("cat:"))
-async def process_category_click(callback: types.CallbackQuery):
-    cat_key = callback.data.split(":")[1]
-    cat_data = DATABASE.get("categories", {}).get(cat_key)
-
-    if not cat_data:
-        return await callback.answer("Категория не найдена.", show_alert=True)
-
-    builder = [
-        [InlineKeyboardButton(text=b_data["title"], callback_data=f"blk:{cat_key}:{b_key}")]
-        for b_key, b_data in cat_data.get("blocks", {}).items()
-    ]
-    builder.append([InlineKeyboardButton(text="⬅️ Все категории", callback_data="menu:categories")])
-
-    await callback.message.edit_text(
-        f"📁 Раздел **{cat_data['title']}**\nВыбери блок:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("blk:"))
-async def process_block_click(callback: types.CallbackQuery):
-    _, cat_key, b_key = callback.data.split(":")
-    cat_data = DATABASE.get("categories", {}).get(cat_key, {})
-    block_data = cat_data.get("blocks", {}).get(b_key)
-
-    if not block_data:
-        return await callback.answer("Блок не найден.", show_alert=True)
-
-    builder = [
-        [InlineKeyboardButton(text=f"• {t_data['title']}", callback_data=f"top:{cat_key}:{b_key}:{t_key}")]
-        for t_key, t_data in block_data.get("topics", {}).items()
-    ]
-    builder.append([InlineKeyboardButton(text="⬅️ Назад к разделу", callback_data=f"cat:{cat_key}")])
-
-    await callback.message.edit_text(
-        f"📁 **{cat_data.get('title', '')}** ➔ **{block_data['title']}**\nВыбери тему:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("top:"))
-async def process_topic_click(callback: types.CallbackQuery):
-    _, cat_key, b_key, t_key = callback.data.split(":")
-    topic_data = DATABASE.get("categories", {}).get(cat_key, {}).get("blocks", {}).get(b_key, {}).get("topics", {}).get(t_key)
-
-    if not topic_data:
-        return await callback.answer("Тема не найдена.", show_alert=True)
-
-    files = topic_data.get("files", [])
-    if not files:
-        return await callback.answer("📁 В этой теме пока нет файлов.", show_alert=True)
-
-    builder = []
-    for f in files:
-        f_id = f.get("id")
-        mr_icon = "⭐ " if f.get("must_read") else "📄 "
-        btn_title = mr_icon + (f['caption'][:28] + ("..." if len(f['caption']) > 28 else ""))
-        builder.append([InlineKeyboardButton(text=btn_title, callback_data=f"fview:{f_id}")])
-
-    builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"blk:{cat_key}:{b_key}")])
-
-    await callback.message.edit_text(
-        f"Тема: **{topic_data['title']}**\nНайдено файлов: {len(files)}\nВыбери файл для просмотра:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("fview:"))
-async def process_file_view(callback: types.CallbackQuery):
-    file_uid = callback.data.split(":")[1]
-    file_item, cat_k, blk_k, top_k = find_file_by_id(file_uid)
-
-    if not file_item:
-        return await callback.answer("❌ Файл не найден.", show_alert=True)
-
-    diff_badge = format_difficulty_badge(file_item.get("difficulty", "medium"))
-    tags_text = ", ".join([f"#{t}" for t in file_item.get("tags", [])]) or "нет"
-    mr_text = "Да ⭐" if file_item.get("must_read") else "Нет"
-
-    info_text = (
-        f"📄 **{file_item['caption']}**\n\n"
-        f"📊 Сложность: {diff_badge}\n"
-        f"🏷 Теги: {tags_text}\n"
-        f"⭐ Must-read: {mr_text}\n"
-        f"👁 Просмотров: {file_item.get('views', 0)}"
-    )
-
-    await callback.message.edit_text(
-        info_text,
-        reply_markup=make_file_card_keyboard(file_uid, callback.from_user.id)
-    )
-    await callback.answer()
-
-
-# ==========================================
 #        MUST-READ, FAVORITES, LINKS
 # ==========================================
 @dp.callback_query(F.data == "menu:must_read")
@@ -815,7 +823,11 @@ async def show_must_read(callback: types.CallbackQuery):
     mr_files = [item for item in all_f if item["file"].get("must_read")]
 
     if not mr_files:
-        return await callback.answer("⭐ В списке Must-read пока нет файлов.", show_alert=True)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")]
+        ])
+        await callback.message.edit_text("⭐ В списке Must-read пока нет материалов. Администраторы скоро добавят их!", reply_markup=kb)
+        return await callback.answer()
 
     builder = []
     for item in mr_files:
@@ -826,7 +838,7 @@ async def show_must_read(callback: types.CallbackQuery):
     builder.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")])
 
     await callback.message.edit_text(
-        "⭐ **Must-Read материалы**\nОбязательные и самые полезные книги и статьи:",
+        "⭐ **Must-Read материалы**\nОбязательные и самые фундаментальные книги и статьи:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
     )
     await callback.answer()
@@ -838,19 +850,19 @@ async def show_user_favorites(callback: types.CallbackQuery):
     fav_ids = DATABASE.get("users", {}).get(uid, {}).get("favorites", [])
 
     if not fav_ids:
-        return await callback.answer("❤️ У тебя пока нет избранных файлов.", show_alert=True)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📚 Перейти в каталог", callback_data="menu:categories")],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")]
+        ])
+        await callback.message.edit_text("❤️ У тебя пока нет избранных файлов. Нажимай кнопку «❤️ В избранное» у любого файла!", reply_markup=kb)
+        return await callback.answer()
 
     builder = []
-    found_any = False
     for fid in fav_ids:
         f_item, _, _, _ = find_file_by_id(fid)
         if f_item:
-            found_any = True
             btn_text = f"❤️ {f_item['caption'][:30]}"
             builder.append([InlineKeyboardButton(text=btn_text, callback_data=f"fview:{f_item['id']}")])
-
-    if not found_any:
-        return await callback.answer("❤️ Избранные файлы больше недоступны.", show_alert=True)
 
     builder.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")])
 
@@ -1047,7 +1059,6 @@ async def admin_start_add_file(callback: types.CallbackQuery, state: FSMContext)
 @dp.message(F.document)
 async def admin_doc_received(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
-    # Если мы в состоянии предложения от пользователя — обрабатываем там
     if current_state == SuggestionState.waiting_content.state:
         return await process_suggestion_content(message, state)
 
@@ -1067,7 +1078,7 @@ async def admin_doc_received(message: types.Message, state: FSMContext):
     builder.append([InlineKeyboardButton(text="❌ Отмена", callback_data="a_cancel")])
 
     await message.answer(
-        f"📥 **Получен файл:** `{default_name}`\n\nВыбери **Категорию** для сохранения:",
+        f"📥 **Получен файл:** `{default_name}`\n\nВыберите **Категорию** для сохранения:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
     )
 
@@ -1089,7 +1100,7 @@ async def admin_select_cat(callback: types.CallbackQuery):
         builder.append([InlineKeyboardButton(text=b_data["title"], callback_data=f"a_blk:{cat_key}:{b_key}")])
     builder.append([InlineKeyboardButton(text="❌ Отмена", callback_data="a_cancel")])
 
-    await callback.message.edit_text(f"📁 **{cat_data['title']}**\nВыбери **Блок**:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
+    await callback.message.edit_text(f"📁 **{cat_data['title']}**\nВыберите **Блок**:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
 
@@ -1103,7 +1114,7 @@ async def admin_select_blk(callback: types.CallbackQuery):
         builder.append([InlineKeyboardButton(text=f"• {t_data['title']}", callback_data=f"a_top:{cat_key}:{b_key}:{t_key}")])
     builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"a_cat:{cat_key}")])
 
-    await callback.message.edit_text(f"📁 **{block_data['title']}**\nВыбери **Тему**:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
+    await callback.message.edit_text(f"📁 **{block_data['title']}**\nВыберите **Тему**:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
 
@@ -1333,7 +1344,7 @@ async def admin_file_card(callback: types.CallbackQuery):
             InlineKeyboardButton(text=f"📊 {diff_badge}", callback_data=f"aed_diff:{file_uid}")
         ],
         [
-            InlineKeyboardButton(text="📥 Открыть файл", callback_data=f"fdl:{file_uid}"),
+            InlineKeyboardButton(text="📥 Открыть файл", callback_data=f"fview:{file_uid}"),
             InlineKeyboardButton(text="🗑 Удалить файл", callback_data=f"aed_del:{file_uid}")
         ],
         [
@@ -1428,10 +1439,7 @@ async def admin_save_new_caption(message: types.Message, state: FSMContext):
         await message.answer("✅ Название успешно обновлено!")
 
     await state.clear()
-    # Отправка обновленной карточки
-    for admin_id in ADMIN_IDS:
-        if admin_id == message.from_user.id:
-            await message.answer("👑 **Админ-панель:**", reply_markup=get_admin_menu_keyboard())
+    await message.answer("👑 **Админ-панель:**", reply_markup=get_admin_menu_keyboard())
 
 
 @dp.callback_query(F.data.startswith("aed_tags:"))
@@ -1820,7 +1828,6 @@ async def admin_stats_handler(event: types.Message | types.CallbackQuery):
     total_tasks = len(DATABASE.get("daily_tasks", {}))
     total_links = len(DATABASE.get("links", []))
 
-    # Сортировка самых просматриваемых файлов
     sorted_files = sorted(all_f, key=lambda x: x["file"].get("views", 0), reverse=True)[:5]
     top_files_str = "\n".join([f"• {item['file']['caption']} — {item['file'].get('views', 0)} просм." for item in sorted_files]) or "Нет данных"
 
@@ -1904,7 +1911,7 @@ async def admin_broadcast_execute(callback: types.CallbackQuery, state: FSMConte
             target_uid = int(uid_str)
             await bot.copy_message(chat_id=target_uid, from_chat_id=from_chat_id, message_id=msg_id)
             success_cnt += 1
-            await asyncio.sleep(0.05)  # Защита от лимитов Telegram API
+            await asyncio.sleep(0.05)
         except (TelegramForbiddenError, TelegramBadRequest):
             fail_cnt += 1
         except TelegramAPIError as e:
@@ -2113,22 +2120,9 @@ async def process_back_to_main(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(F.data == "menu:categories")
-async def process_open_categories(callback: types.CallbackQuery):
-    await callback.message.edit_text("📂 **Каталог материалов:**\nВыберите раздел:", reply_markup=get_categories_keyboard())
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "menu:task")
-async def process_open_task_cb(callback: types.CallbackQuery):
-    today = get_today_str()
-    await render_daily_task_view(callback, today, callback.from_user.id)
-
-
-# Глобальный умный поиск по ключевым словам и тегам
+# Глобальный поиск
 @dp.message(F.text & ~F.text.startswith("/"))
 async def global_smart_search(message: types.Message, state: FSMContext):
-    # Если бот ожидает текст в рамках FSM — не перехватываем
     current_state = await state.get_state()
     if current_state is not None:
         return
@@ -2152,7 +2146,6 @@ async def global_smart_search(message: types.Message, state: FSMContext):
         tags = [t.lower() for t in f.get("tags", [])]
         diff = f.get("difficulty", "").lower()
 
-        # Проверяем вхождение всех поисковых слов
         match = True
         for token in search_tokens:
             token_found = (
@@ -2182,7 +2175,7 @@ async def global_smart_search(message: types.Message, state: FSMContext):
         tags_str = " ".join([f"#{t}" for t in f.get("tags", [])])
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📥 Скачать", callback_data=f"fdl:{f['id']}")]
+            [InlineKeyboardButton(text="📥 Скачать", callback_data=f"fview:{f['id']}")]
         ])
 
         await message.answer(
