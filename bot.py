@@ -1,3 +1,4 @@
+# ПОЛНЫЙ КОД
 import os
 import asyncio
 import logging
@@ -5,19 +6,19 @@ import datetime
 import random
 import uuid
 from typing import Optional, Dict, Any, List
+from zoneinfo import ZoneInfo
 
 from aiohttp import web
 from motor.motor_asyncio import AsyncIOMotorClient
-import pytz
 
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton, BotCommand, InputMediaPhoto
+    ReplyKeyboardMarkup, KeyboardButton, BotCommand
 )
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramAPIError
 
@@ -35,7 +36,7 @@ DB_NAME = os.getenv("DB_NAME", "matham_bot_db")
 # Список ID администраторов
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "123456789").split(",") if x.strip().isdigit()]
 
-TIMEZONE = pytz.timezone("Asia/Yerevan")
+TIMEZONE = ZoneInfo("Asia/Yerevan")
 
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
@@ -80,14 +81,12 @@ async def init_db():
         DB_CACHE = DEFAULT_STATE.copy()
         await catalog_collection.insert_one(DB_CACHE)
     else:
-        # Миграция структуры без потери данных
         changed = False
         for key in DEFAULT_STATE:
             if key not in data:
                 data[key] = DEFAULT_STATE[key]
                 changed = True
         
-        # Миграция структуры файлов в категориях
         for cat, files in data.get("categories", {}).items():
             for f in files:
                 if "id" not in f:
@@ -135,7 +134,6 @@ def register_user_activity(user_id: int, username: str = "", full_name: str = ""
     u["username"] = username or u.get("username", "")
     u["full_name"] = full_name or u.get("full_name", "")
 
-    # Расчет Streak
     last_date_str = u.get("last_active_date", "")
     if last_date_str != now_str:
         if last_date_str:
@@ -337,7 +335,6 @@ async def open_category(callback: CallbackQuery):
     cat_name = callback.data.replace("cat_", "")
     files = DB_CACHE.get("categories", {}).get(cat_name, [])
 
-    # Статистика просмотров
     stats = DB_CACHE.setdefault("stats", {}).setdefault("cat_views", {})
     stats[cat_name] = stats.get(cat_name, 0) + 1
     await save_db()
@@ -364,7 +361,6 @@ async def send_file(callback: CallbackQuery):
         await callback.answer("Файл не найден.", show_alert=True)
         return
 
-    # Начисление баллов и просмотров
     u = register_user_activity(callback.from_user.id)
     f["views"] = f.get("views", 0) + 1
     
@@ -496,13 +492,10 @@ async def delete_file(callback: CallbackQuery):
         return
 
     file_id = callback.data.replace("delete_file_", "")
-    deleted = False
 
     for cat, files in DB_CACHE.get("categories", {}).items():
         DB_CACHE["categories"][cat] = [f for f in files if f.get("id") != file_id]
-        deleted = True
 
-    # Удаление из must_read
     if file_id in DB_CACHE.get("must_read", []):
         DB_CACHE["must_read"].remove(file_id)
 
@@ -527,7 +520,6 @@ async def show_daily_task(message: Message):
 
     u = register_user_activity(message.from_user.id, message.from_user.username, message.from_user.full_name)
     
-    # Начисление баллов за открытые задачи
     if today not in u.setdefault("opened_tasks", []):
         u["opened_tasks"].append(today)
         u["points"] = u.get("points", 0) + 5
@@ -570,7 +562,6 @@ async def rate_daily_task(callback: CallbackQuery):
     ratings[u_str] = val
     await save_db()
 
-    # Добавление баллов за первое голосование
     u = register_user_activity(callback.from_user.id)
     u["points"] = u.get("points", 0) + 2
     await save_db()
@@ -923,10 +914,8 @@ async def process_challenge(callback: CallbackQuery):
         parse_mode="Markdown"
     )
 
-# Обработка Поисковых запросов
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_search_query(message: Message, state: FSMContext):
-    # Если задействован FSM, пропускаем
     current_state = await state.get_state()
     if current_state is not None:
         return
@@ -1051,7 +1040,7 @@ async def confirm_broadcast(callback: CallbackQuery, state: FSMContext):
                 message_id=data.get("broadcast_msg_id")
             )
             success += 1
-            await asyncio.sleep(0.05) # Предотвращение Rate Limit
+            await asyncio.sleep(0.05)
         except (TelegramForbiddenError, TelegramBadRequest):
             errors += 1
         except TelegramAPIError:
@@ -1164,7 +1153,6 @@ async def main():
     await init_db()
     await set_bot_commands()
     
-    # Запуск фонового сервера
     asyncio.create_task(start_web_server())
 
     logger.info("Bot started successfully!")
