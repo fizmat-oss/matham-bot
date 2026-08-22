@@ -11,8 +11,13 @@ from aiogram.filters import Command, StateFilter
 from aiogram.types import (
     BotCommand,
     InlineKeyboardMarkup,
-    InlineKeyboardButton
+    InlineKeyboardButton,
+    InlineQuery,
+    InlineQueryResultCachedDocument,
+    InlineQueryResultArticle,
+    InputTextMessageContent
 )
+from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiohttp import web
@@ -47,13 +52,13 @@ mongo_client = AsyncIOMotorClient(MONGO_URI)
 mongo_db = mongo_client[MONGO_DB_NAME]
 
 db_collection = mongo_db["catalog"]
+submissions_collection = mongo_db["submissions"]
 DB_DOC_ID = "catalog_main"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 DATABASE = {}
-PENDING_SUBMISSIONS = {}
 
 # ==========================================
 # DEFAULT DATABASE
@@ -72,9 +77,9 @@ DEFAULT_STATE = {
         "useful_links": {"title": "🔗 Полезные ссылки", "items": []},
         "useful_videos": {"title": "🎥 Полезные видео", "items": []}
     },
-    "must_read": {"title": "⭐ Must-read", "files": []}, # Сохранено для совместимости
-    "task_of_day": {"file_id": None, "caption": "", "votes": {}}, # Старая система
-    "daily_tasks": {}, # Новая система задач по датам
+    "must_read": {"title": "⭐ Must-read", "files": []},
+    "task_of_day": {"file_id": None, "caption": "", "votes": {}},
+    "daily_tasks": {},
     "users": {},
     "settings": {}
 }
@@ -107,34 +112,51 @@ def get_file_categories(uid: str) -> list:
 
 async def track_user_activity(user_id: int, username: str = ""):
     uid_str = str(user_id)
-    if uid_str not in DATABASE["users"]:
-        DATABASE["users"][uid_str] = {
-            "username": username,
-            "streak": 0,
-            "last_active": "",
-            "score": 0,
-            "favorites": []
-        }
-    
-    user = DATABASE["users"][uid_str]
-    if username and user.get("username") != username:
-        user["username"] = username
-
     today = get_yerevan_date()
     yesterday = (datetime.now(YEREVAN_TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    if user["last_active"] != today:
-        if user["last_active"] == yesterday:
+    if uid_str not in DATABASE["users"]:
+        user_data = {
+            "username": username,
+            "streak": 1,
+            "last_active": today,
+            "score": 0,
+            "favorites": []
+        }
+        DATABASE["users"][uid_str] = user_data
+        await db_collection.update_one(
+            {"_id": DB_DOC_ID},
+            {"$set": {f"data.users.{uid_str}": user_data}}
+        )
+        return
+
+    user = DATABASE["users"][uid_str]
+    updates = {}
+    
+    if username and user.get("username") != username:
+        user["username"] = username
+        updates[f"data.users.{uid_str}.username"] = username
+
+    if user.get("last_active") != today:
+        if user.get("last_active") == yesterday:
             user["streak"] = user.get("streak", 0) + 1
         else:
             user["streak"] = 1
         user["last_active"] = today
-        await save_db(DATABASE)
+        updates[f"data.users.{uid_str}.streak"] = user["streak"]
+        updates[f"data.users.{uid_str}.last_active"] = today
 
-def award_points(user_id: int, points: int):
+    if updates:
+        await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": updates})
+
+async def award_points(user_id: int, points: int):
     uid_str = str(user_id)
     if uid_str in DATABASE["users"]:
         DATABASE["users"][uid_str]["score"] = DATABASE["users"][uid_str].get("score", 0) + points
+    await db_collection.update_one(
+        {"_id": DB_DOC_ID},
+        {"$inc": {f"data.users.{uid_str}.score": points}}
+    )
 
 # ==========================================
 # DATABASE FUNCTIONS
@@ -150,13 +172,11 @@ async def load_db():
 
     data = doc.get("data", copy.deepcopy(DEFAULT_STATE))
 
-    # Миграция и добавление новых полей
     if "users" not in data: data["users"] = {}
     if "daily_tasks" not in data: data["daily_tasks"] = {}
     if "settings" not in data: data["settings"] = {}
     if "must_read" not in data: data["must_read"] = {"title": "⭐ Must-read", "files": []}
     
-    # Миграция файлов (добавление новых атрибутов)
     for cat_data in data["categories"].values():
         for f in cat_data.get("files", []):
             if "file_unique_id" not in f:
@@ -165,7 +185,6 @@ async def load_db():
             if "difficulty" not in f: f["difficulty"] = None
             if "must_read" not in f: f["must_read"] = False
 
-    # Перенос старого must_read в атрибуты файлов
     if "files" in data.get("must_read", {}):
         for mrf in data["must_read"]["files"]:
             uid = mrf.get("file_unique_id")
@@ -173,13 +192,19 @@ async def load_db():
                 for f in cat_data.get("files", []):
                     if f.get("file_unique_id") == uid:
                         f["must_read"] = True
-        # Очищаем старый список, так как теперь ориентируемся на атрибут
         data["must_read"]["files"] = []
 
     return data
 
 async def save_db(db_data):
     await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {"data": db_data}}, upsert=True)
+
+async def save_submission(sub_id: str, data: dict):
+    await submissions_collection.update_one({"_id": sub_id}, {"$set": data}, upsert=True)
+
+async def get_submission(sub_id: str) -> dict:
+    doc = await submissions_collection.find_one({"_id": sub_id})
+    return doc if doc else {}
 
 # ==========================================
 # FSM STATES
@@ -217,36 +242,27 @@ class BroadcastAdmin(StatesGroup):
 # ==========================================
 
 def get_main_menu_keyboard(user_id: int):
-    builder = []
-    
-    # Первая строка: Каталог и Задача дня
-    builder.append([
-        InlineKeyboardButton(text="📚 Каталог", callback_data="menu:catalog"),
-        InlineKeyboardButton(text="🎯 Задача дня", callback_data="task:show")
-    ])
-    
-    # Вторая строка: Must-read и Избранное
-    builder.append([
-        InlineKeyboardButton(text="⭐ Must-read", callback_data="mustread:main"),
-        InlineKeyboardButton(text="❤️ Избранное", callback_data="favorites:main")
-    ])
-    
-    # Третья строка: Поиск и Рейтинг
-    builder.append([
-        InlineKeyboardButton(text="🔎 Поиск", switch_inline_query_current_chat=""), 
-        InlineKeyboardButton(text="🏆 Рейтинг", callback_data="rating:main")
-    ])
-    
-    # Четвертая строка: Рандом и Ссылки
-    builder.append([
-        InlineKeyboardButton(text="🎲 Случайный материал", callback_data="challenge:main"),
-        InlineKeyboardButton(text="🔗 Полезные ссылки", callback_data="links:main")
-    ])
-    
-    # Пятая строка: Предложить
-    builder.append([
-        InlineKeyboardButton(text="📤 Предложить файл", callback_data="submit:start")
-    ])
+    builder = [
+        [
+            InlineKeyboardButton(text="📚 Каталог", callback_data="menu:catalog"),
+            InlineKeyboardButton(text="🎯 Задача дня", callback_data="task:show")
+        ],
+        [
+            InlineKeyboardButton(text="⭐ Must-read", callback_data="mustread:main"),
+            InlineKeyboardButton(text="❤️ Избранное", callback_data="favorites:main")
+        ],
+        [
+            InlineKeyboardButton(text="🔎 Поиск", switch_inline_query_current_chat=""), 
+            InlineKeyboardButton(text="🏆 Рейтинг", callback_data="rating:main")
+        ],
+        [
+            InlineKeyboardButton(text="🎲 Случайный материал", callback_data="challenge:main"),
+            InlineKeyboardButton(text="🔗 Полезные ссылки", callback_data="links:main")
+        ],
+        [
+            InlineKeyboardButton(text="📤 Предложить файл", callback_data="submit:start")
+        ]
+    ]
 
     if is_admin(user_id):
         builder.append([
@@ -280,9 +296,8 @@ def build_user_categories_kb(selected: set):
     builder.append([InlineKeyboardButton(text="❌ Отмена", callback_data="usub_cancel")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
-def build_submission_categories_kb(sub_id: str):
-    sub = PENDING_SUBMISSIONS[sub_id]
-    selected = set(sub["categories"])
+def build_submission_categories_kb(sub_id: str, selected_cats: list):
+    selected = set(selected_cats)
     builder = []
     for cat_key, cat_data in DATABASE["categories"].items():
         mark = "☑️" if cat_key in selected else "▫️"
@@ -297,10 +312,6 @@ def build_submission_action_kb(sub_id: str):
         [InlineKeyboardButton(text="✏️ Изменить название", callback_data=f"sub_edittitle:{sub_id}")],
         [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"sub_reject:{sub_id}")]
     ])
-
-# ==========================================
-# FILE VIEW & EDIT KEYBOARDS
-# ==========================================
 
 def get_file_view_keyboard(uid: str, user_id: int):
     user = DATABASE["users"].get(str(user_id), {})
@@ -353,13 +364,57 @@ def get_file_edit_categories_kb(uid: str, selected: set):
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
 # ==========================================
+# INLINE SEARCH HANDLER
+# ==========================================
+
+@dp.inline_query()
+async def inline_search(inline_query: InlineQuery):
+    query = inline_query.query.strip().lower()
+    results = []
+
+    if not query:
+        results.append(
+            InlineQueryResultArticle(
+                id="info",
+                title="🔎 Поиск по базе matham",
+                description="Введите название файла, тему или хештег (например, #geometry)",
+                input_message_content=InputTextMessageContent(
+                    message_text="Воспользуйтесь встроенным поиском для нахождения учебных материалов!"
+                )
+            )
+        )
+        return await inline_query.answer(results, cache_time=1)
+
+    words = [w for w in query.split() if w]
+
+    for cat_data in DATABASE["categories"].values():
+        for f in cat_data.get("files", []):
+            haystack = (f"{cat_data['title']} {f['caption']} " + " ".join(f.get("tags", [])) + f" {f.get('difficulty','') or ''}").lower()
+            if all(w in haystack for w in words):
+                cap = f"📄 **{f['caption']}**\n📌 Раздел: {cat_data['title']}"
+                if f.get("tags"): cap += f"\n🏷 Теги: {' '.join(f['tags'])}"
+                if f.get("difficulty"): cap += f"\n📚 Уровень: {f['difficulty']}"
+
+                results.append(
+                    InlineQueryResultCachedDocument(
+                        id=f["file_unique_id"],
+                        title=f["caption"],
+                        document_file_id=f["file_id"],
+                        caption=cap,
+                        parse_mode="Markdown"
+                    )
+                )
+
+    await inline_query.answer(results[:50], cache_time=10)
+
+# ==========================================
 # COMMANDS
 # ==========================================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await track_user_activity(message.from_user.id, message.from_user.username)
+    await track_user_activity(message.from_user.id, message.from_user.username or "")
     await message.answer(
         "Здарова! ✌️\n"
         "Я бот библиотеки matham.\n\n"
@@ -372,12 +427,12 @@ async def cmd_start(message: types.Message, state: FSMContext):
 @dp.message(Command("menu"))
 async def cmd_menu(message: types.Message, state: FSMContext):
     await state.clear()
-    await track_user_activity(message.from_user.id)
+    await track_user_activity(message.from_user.id, message.from_user.username or "")
     await message.answer("📂 **Главное меню**", reply_markup=get_main_menu_keyboard(message.from_user.id))
 
 @dp.callback_query(F.data == "menu:main")
 async def process_back_to_main(callback: types.CallbackQuery):
-    await track_user_activity(callback.from_user.id)
+    await track_user_activity(callback.from_user.id, callback.from_user.username or "")
     await callback.message.edit_text("📂 **Главное меню**", reply_markup=get_main_menu_keyboard(callback.from_user.id))
     await callback.answer()
 
@@ -391,19 +446,20 @@ async def process_catalog(callback: types.CallbackQuery):
 # ==========================================
 
 def get_task_keyboard(date_str: str, admin_view: bool = False):
-    builder = []
-    builder.append([
-        InlineKeyboardButton(text="💡 Подсказка 1", callback_data=f"th:{date_str}:h1"),
-        InlineKeyboardButton(text="💡 Подсказка 2", callback_data=f"th:{date_str}:h2")
-    ])
-    builder.append([InlineKeyboardButton(text="✅ Решение", callback_data=f"th:{date_str}:sol")])
-    builder.append([
-        InlineKeyboardButton(text="⭐ 1", callback_data=f"tv:{date_str}:1"),
-        InlineKeyboardButton(text="⭐ 2", callback_data=f"tv:{date_str}:2"),
-        InlineKeyboardButton(text="⭐ 3", callback_data=f"tv:{date_str}:3"),
-        InlineKeyboardButton(text="⭐ 4", callback_data=f"tv:{date_str}:4"),
-        InlineKeyboardButton(text="⭐ 5", callback_data=f"tv:{date_str}:5")
-    ])
+    builder = [
+        [
+            InlineKeyboardButton(text="💡 Подсказка 1", callback_data=f"th:{date_str}:h1"),
+            InlineKeyboardButton(text="💡 Подсказка 2", callback_data=f"th:{date_str}:h2")
+        ],
+        [InlineKeyboardButton(text="✅ Решение", callback_data=f"th:{date_str}:sol")],
+        [
+            InlineKeyboardButton(text="⭐ 1", callback_data=f"tv:{date_str}:1"),
+            InlineKeyboardButton(text="⭐ 2", callback_data=f"tv:{date_str}:2"),
+            InlineKeyboardButton(text="⭐ 3", callback_data=f"tv:{date_str}:3"),
+            InlineKeyboardButton(text="⭐ 4", callback_data=f"tv:{date_str}:4"),
+            InlineKeyboardButton(text="⭐ 5", callback_data=f"tv:{date_str}:5")
+        ]
+    ]
     if admin_view:
         builder.append([InlineKeyboardButton(text="📊 Статистика задачи", callback_data=f"ts:{date_str}")])
     builder.append([InlineKeyboardButton(text="⬅️ Меню", callback_data="menu:main")])
@@ -424,19 +480,16 @@ async def send_daily_task(target, date_str: str = None):
         else: await target.message.edit_text(text, reply_markup=kb)
         return
 
-    # Награждаем за просмотр задачи дня (только за сегодня)
     if date_str == get_yerevan_date():
         uid_str = str(user_id)
         if "opened_tasks" not in DATABASE["users"].get(uid_str, {}):
-            DATABASE["users"][uid_str]["opened_tasks"] = []
+            DATABASE["users"].setdefault(uid_str, {})["opened_tasks"] = []
         if date_str not in DATABASE["users"][uid_str]["opened_tasks"]:
             DATABASE["users"][uid_str]["opened_tasks"].append(date_str)
-            award_points(user_id, 5)
-            await save_db(DATABASE)
+            await award_points(user_id, 5)
 
     cap = f"🧩 **Задача дня** ({date_str})\n\n{task.get('caption', '')}"
     
-    # Подсчет рейтинга
     votes = task.get("votes", {})
     if votes:
         avg = sum(votes.values()) / len(votes)
@@ -447,18 +500,20 @@ async def send_daily_task(target, date_str: str = None):
     if is_msg:
         await target.answer_photo(photo=task["photo_file_id"], caption=cap, reply_markup=kb)
     else:
-        # Нельзя edit_text если это фото. Поэтому удаляем старое и шлем новое.
-        await target.message.delete()
+        try:
+            await target.message.delete()
+        except Exception:
+            pass
         await target.message.answer_photo(photo=task["photo_file_id"], caption=cap, reply_markup=kb)
 
 @dp.message(Command("task"))
 async def cmd_task(message: types.Message):
-    await track_user_activity(message.from_user.id)
+    await track_user_activity(message.from_user.id, message.from_user.username or "")
     await send_daily_task(message)
 
 @dp.callback_query(F.data == "task:show")
 async def callback_task(callback: types.CallbackQuery):
-    await track_user_activity(callback.from_user.id)
+    await track_user_activity(callback.from_user.id, callback.from_user.username or "")
     await send_daily_task(callback)
 
 @dp.callback_query(F.data.startswith("tv:"))
@@ -474,12 +529,11 @@ async def task_vote_handler(callback: types.CallbackQuery):
     votes = task.setdefault("votes", {})
     
     if uid_str not in votes:
-        award_points(callback.from_user.id, 2)
+        await award_points(callback.from_user.id, 2)
         
     votes[uid_str] = score
     await save_db(DATABASE)
     
-    # Обновляем капчу с новым рейтингом
     avg = sum(votes.values()) / len(votes)
     cap = f"🧩 **Задача дня** ({date_str})\n\n{task.get('caption', '')}\n\n⭐ Оценка: {avg:.1f}/5 (Голосов: {len(votes)})"
     try:
@@ -523,7 +577,7 @@ async def task_stats_admin(callback: types.CallbackQuery):
     await callback.answer(text, show_alert=True)
 
 # ==========================================
-# MUST-READ
+# MUST-READ & FAVORITES
 # ==========================================
 
 @dp.callback_query(F.data == "mustread:main")
@@ -532,7 +586,6 @@ async def mustread_main(callback: types.CallbackQuery):
     for cat_data in DATABASE["categories"].values():
         for f in cat_data.get("files", []):
             if f.get("must_read"):
-                # Избегаем дублей, если файл в нескольких категориях
                 if not any(x["file_unique_id"] == f["file_unique_id"] for x in files):
                     files.append(f)
                     
@@ -540,25 +593,21 @@ async def mustread_main(callback: types.CallbackQuery):
         return await callback.message.edit_text("⭐ **MUST-READ**\n\nПока пусто.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Меню", callback_data="menu:main")]]))
 
     builder = []
-    for f in files[:90]: # Защита от переполнения кнопок
+    for f in files[:90]:
         builder.append([InlineKeyboardButton(text=f"📄 {f['caption'][:35]}", callback_data=f"fv:{f['file_unique_id']}")])
         
     builder.append([InlineKeyboardButton(text="⬅️ Меню", callback_data="menu:main")])
     await callback.message.edit_text("⭐ **MUST-READ**\n\nСамые полезные материалы:", reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
-# ==========================================
-# FAVORITES
-# ==========================================
-
 @dp.message(Command("favorites"))
 async def cmd_fav(message: types.Message):
-    await track_user_activity(message.from_user.id)
+    await track_user_activity(message.from_user.id, message.from_user.username or "")
     await show_favorites(message)
 
 @dp.callback_query(F.data == "favorites:main")
 async def cb_fav(callback: types.CallbackQuery):
-    await track_user_activity(callback.from_user.id)
+    await track_user_activity(callback.from_user.id, callback.from_user.username or "")
     await show_favorites(callback)
 
 async def show_favorites(target):
@@ -592,26 +641,26 @@ async def toggle_fav(callback: types.CallbackQuery):
     uid = callback.data.split(":")[1]
     user_id_str = str(callback.from_user.id)
     if user_id_str not in DATABASE["users"]:
-        await track_user_activity(callback.from_user.id)
+        await track_user_activity(callback.from_user.id, callback.from_user.username or "")
         
     user = DATABASE["users"][user_id_str]
     favs = user.setdefault("favorites", [])
     
     if uid in favs:
         favs.remove(uid)
+        await db_collection.update_one({"_id": DB_DOC_ID}, {"$pull": {f"data.users.{user_id_str}.favorites": uid}})
         await callback.answer("💔 Удалено из избранного")
     else:
         favs.append(uid)
+        await db_collection.update_one({"_id": DB_DOC_ID}, {"$addToSet": {f"data.users.{user_id_str}.favorites": uid}})
         await callback.answer("❤️ Добавлено в избранное")
-        
-    await save_db(DATABASE)
     
     try:
         await callback.message.edit_reply_markup(reply_markup=get_file_view_keyboard(uid, callback.from_user.id))
     except Exception: pass
 
 # ==========================================
-# RATING / STREAK
+# RATING & CHALLENGE
 # ==========================================
 
 @dp.message(Command("rating"))
@@ -627,7 +676,6 @@ async def show_rating(target):
     users.sort(key=lambda x: x[1].get("score", 0), reverse=True)
     
     text = "🏆 **Рейтинг активности**\n\n"
-    
     medals = ["🥇", "🥈", "🥉"]
     for i, (uid, u) in enumerate(users[:10]):
         medal = medals[i] if i < 3 else "🏅"
@@ -645,10 +693,6 @@ async def show_rating(target):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Меню", callback_data="menu:main")]])
     if isinstance(target, types.Message): await target.answer(text, reply_markup=kb)
     else: await target.message.edit_text(text, reply_markup=kb)
-
-# ==========================================
-# CHALLENGE / SURPRISE
-# ==========================================
 
 @dp.message(Command("surprise"))
 async def cmd_surprise(message: types.Message):
@@ -694,7 +738,7 @@ async def process_random(target, diff: str):
         return
 
     selected_file, cat_title = random.choice(all_files)
-    award_points(target.from_user.id, 1) # Поощряем активность
+    await award_points(target.from_user.id, 1)
     
     text = f"🎲 Случайный материал!\nРаздел: **{cat_title}**"
     if selected_file.get("difficulty"): text += f"\nСложность: {selected_file['difficulty'].upper()}"
@@ -707,7 +751,8 @@ async def process_random(target, diff: str):
             reply_markup=get_file_view_keyboard(selected_file["file_unique_id"], target.from_user.id)
         )
     else:
-        await target.message.delete()
+        try: await target.message.delete()
+        except Exception: pass
         await target.message.answer_document(
             document=selected_file["file_id"],
             caption=f"📄 {selected_file['caption']}",
@@ -758,7 +803,7 @@ async def view_file(callback: types.CallbackQuery):
     )
 
 # ==========================================
-# SEARCH
+# SEARCH HANDLER (TEXT)
 # ==========================================
 
 @dp.message(F.text & ~F.text.startswith("/"))
@@ -810,10 +855,9 @@ async def admin_panel(callback: types.CallbackQuery):
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📤 Добавить файл", callback_data="admin:upload")],
-        [InlineKeyboardButton(text="✏️ Управление файлами", callback_data="menu:catalog")], # Обычный каталог имеет инструменты редактирования
+        [InlineKeyboardButton(text="✏️ Управление файлами", callback_data="menu:catalog")],
         [InlineKeyboardButton(text="🎯 Задача дня", callback_data="admin:tasks")],
         [InlineKeyboardButton(text="⭐ Управление Must-read", callback_data="mustread:main")],
-        [InlineKeyboardButton(text="🔗 Ссылки", callback_data="links:main")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
         [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")]
@@ -827,7 +871,7 @@ async def admin_stats(callback: types.CallbackQuery):
     
     files_count = len(list(set([f["file_unique_id"] for c in DATABASE["categories"].values() for f in c.get("files",[])])))
     must_read_count = len([1 for c in DATABASE["categories"].values() for f in c.get("files",[]) if f.get("must_read")])
-    must_read_count = int(must_read_count / max(1, len(DATABASE["categories"]))) # Приблизительно уникальные
+    must_read_count = int(must_read_count / max(1, len(DATABASE["categories"])))
     links_count = sum(len(s["items"]) for s in DATABASE["links"].values())
     tasks_count = len(DATABASE["daily_tasks"])
     users_count = len(DATABASE["users"])
@@ -851,7 +895,7 @@ async def admin_stats(callback: types.CallbackQuery):
 async def admin_broadcast_start(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
     await state.set_state(BroadcastAdmin.waiting_for_message)
-    await callback.message.answer("📢 Отправь сообщение для рассылки всем пользователям бота (текст, фото с подписью и т.д.).\n\nДля отмены напиши 'отмена'.")
+    await callback.message.answer("📢 Отправь сообщение для рассылки всем пользователям бота.\n\nДля отмены напиши 'отмена'.")
     await callback.answer()
 
 @dp.message(BroadcastAdmin.waiting_for_message)
@@ -887,15 +931,22 @@ async def broadcast_confirm(callback: types.CallbackQuery, state: FSMContext):
     success = 0
     errors = 0
     
-    for uid_str in DATABASE["users"].keys():
+    for uid_str in list(DATABASE["users"].keys()):
         try:
             await bot.copy_message(chat_id=int(uid_str), from_chat_id=chat_id, message_id=msg_id)
             success += 1
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after)
+            try:
+                await bot.copy_message(chat_id=int(uid_str), from_chat_id=chat_id, message_id=msg_id)
+                success += 1
+            except Exception:
+                errors += 1
         except Exception:
             errors += 1
-        await asyncio.sleep(0.05) # Лимиты Telegram
+        await asyncio.sleep(0.05)
         
-    await callback.message.answer(f"📢 **Рассылка завершена!**\n✅ Успешно: {success}\n❌ Ошибок (заблокировали): {errors}")
+    await callback.message.answer(f"📢 **Рассылка завершена!**\n✅ Успешно: {success}\n❌ Ошибок: {errors}")
 
 # ==========================================
 # ADMIN: DAILY TASK MANAGEMENT
@@ -964,7 +1015,6 @@ async def adm_task_date(message: types.Message, state: FSMContext):
     if date_str.lower() == "сегодня":
         date_str = get_yerevan_date()
         
-    # Проверка формата
     try:
         datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
@@ -986,11 +1036,17 @@ async def adm_task_date(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Задача на {date_str} успешно сохранена!")
 
 # ==========================================
-# ADMIN: FILE EDITING SYSTEM
+# ADMIN FILE EDITING SYSTEM
 # ==========================================
 
+def update_file_everywhere(uid: str, key: str, value):
+    for cat in DATABASE["categories"].values():
+        for f in cat.get("files", []):
+            if f.get("file_unique_id") == uid:
+                f[key] = value
+
 @dp.callback_query(F.data.startswith("fe_m:"))
-async def fe_menu(callback: types.CallbackQuery, state: FSMContext):
+async def fe_menu(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id): return
     uid = callback.data.split(":")[1]
     f = get_file_by_uid(uid)
@@ -1000,15 +1056,7 @@ async def fe_menu(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "fe_close")
 async def fe_close(callback: types.CallbackQuery):
-    # При закрытии возвращаем обычную клавиатуру файла, достаем uid из первой кнопки, если можем.
-    # Но проще удалить сообщение или вернуть старую.
     await callback.message.delete()
-
-def update_file_everywhere(uid: str, key: str, value):
-    for cat in DATABASE["categories"].values():
-        for f in cat.get("files", []):
-            if f.get("file_unique_id") == uid:
-                f[key] = value
 
 @dp.callback_query(F.data.startswith("fe_mr:"))
 async def fe_toggle_mustread(callback: types.CallbackQuery):
@@ -1089,7 +1137,6 @@ async def fe_cat_toggle(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id): return
     _, uid, cat_key = callback.data.split(":")
     
-    # Реконструируем текущий выбор из кнопок клавиатуры (чтобы не хранить состояние)
     kb = callback.message.reply_markup.inline_keyboard
     selected = set()
     for row in kb:
@@ -1121,11 +1168,9 @@ async def fe_cat_save(callback: types.CallbackQuery):
     if not f_master: return await callback.answer("Ошибка", show_alert=True)
     f_copy = copy.deepcopy(f_master)
     
-    # Удаляем отовсюду
     for cat_data in DATABASE["categories"].values():
         cat_data["files"] = [x for x in cat_data.get("files", []) if x.get("file_unique_id") != uid]
         
-    # Добавляем в нужные
     for cat in new_cats:
         DATABASE["categories"][cat]["files"].append(f_copy)
         
@@ -1151,13 +1196,13 @@ async def fe_doc_receive(message: types.Message, state: FSMContext):
     
     update_file_everywhere(uid, "file_id", doc.file_id)
     update_file_everywhere(uid, "file_unique_id", doc.file_unique_id)
-    # Если мы меняем unique_id, нужно учесть это, так как избранное хранит старый uid!
-    # Обновим избранное пользователей:
-    for u in DATABASE["users"].values():
+
+    for u_id, u in DATABASE["users"].items():
         if uid in u.get("favorites", []):
             u["favorites"].remove(uid)
             u["favorites"].append(doc.file_unique_id)
-            
+            await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {f"data.users.{u_id}.favorites": u["favorites"]}})
+
     await save_db(DATABASE)
     await state.clear()
     await message.answer("✅ Документ успешно заменен!")
@@ -1188,12 +1233,8 @@ async def admin_doc_received_state(message: types.Message, state: FSMContext):
     await state.clear()
     await process_admin_document(message, state)
 
-@dp.message(F.document, F.from_user.id.in_(ADMIN_IDS))
+@dp.message(F.document, F.from_user.id.in_(ADMIN_IDS), StateFilter(None))
 async def admin_doc_received(message: types.Message, state: FSMContext):
-    # Чтобы не перехватывать процесс редактирования документа
-    curr_state = await state.get_state()
-    if curr_state == EditFile.waiting_for_document.state:
-        return
     await process_admin_document(message, state)
 
 async def process_admin_document(message: types.Message, state: FSMContext):
@@ -1275,11 +1316,11 @@ async def admin_save_custom_caption(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "submit:start")
 async def submit_start(callback: types.CallbackQuery):
-    await track_user_activity(callback.from_user.id)
+    await track_user_activity(callback.from_user.id, callback.from_user.username or "")
     await callback.message.answer("📤 Просто пришли мне сюда файл (PDF и т.п.) — я передам его админу.")
     await callback.answer()
 
-@dp.message(F.document)
+@dp.message(F.document, StateFilter(None))
 async def user_doc_received(message: types.Message, state: FSMContext):
     if is_admin(message.from_user.id): return
     doc = message.document
@@ -1310,7 +1351,8 @@ async def usub_cancel(callback: types.CallbackQuery, state: FSMContext):
 async def usub_done(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     sub_id = uuid.uuid4().hex[:8]
-    PENDING_SUBMISSIONS[sub_id] = {
+    sub_data = {
+        "_id": sub_id,
         "user_id": callback.from_user.id,
         "username": callback.from_user.username or callback.from_user.full_name,
         "file_id": data["file_id"],
@@ -1319,24 +1361,25 @@ async def usub_done(callback: types.CallbackQuery, state: FSMContext):
         "categories": data.get("selected", []),
         "status": "pending"
     }
+    await save_submission(sub_id, sub_data)
     await state.clear()
     await callback.message.edit_text("📤 Файл отправлен админу. Спасибо! 🙌")
     
-    # Отправка админам
-    sub = PENDING_SUBMISSIONS[sub_id]
-    cats_text = ", ".join(DATABASE["categories"][c]["title"] for c in sub["categories"]) if sub["categories"] else "Не указано"
-    caption = f"📥 **Новый файл**\n👤 От: @{sub['username']}\n📄 {sub['title']}\n📁 {cats_text}"
+    cats_text = ", ".join(DATABASE["categories"][c]["title"] for c in sub_data["categories"]) if sub_data["categories"] else "Не указано"
+    caption = f"📥 **Новый файл**\n👤 От: @{sub_data['username']}\n📄 {sub_data['title']}\n📁 {cats_text}"
     for admin_id in ADMIN_IDS:
-        try: await bot.send_document(admin_id, document=sub["file_id"], caption=caption, reply_markup=build_submission_action_kb(sub_id))
-        except Exception: pass
+        try:
+            await bot.send_document(admin_id, document=sub_data["file_id"], caption=caption, reply_markup=build_submission_action_kb(sub_id))
+        except Exception:
+            pass
 
 @dp.callback_query(F.data.startswith("sub_approve:"))
 async def sub_approve(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id): return
     sub_id = callback.data.split(":")[1]
-    sub = PENDING_SUBMISSIONS.get(sub_id)
-    if not sub or sub["status"] != "pending": return await callback.answer("Уже обработано.", show_alert=True)
-    if not sub["categories"]: return await callback.answer("Сначала выбери разделы.", show_alert=True)
+    sub = await get_submission(sub_id)
+    if not sub or sub.get("status") != "pending": return await callback.answer("Уже обработано.", show_alert=True)
+    if not sub.get("categories"): return await callback.answer("Сначала выбери разделы.", show_alert=True)
 
     for cat_key in sub["categories"]:
         DATABASE["categories"][cat_key]["files"].append({
@@ -1349,8 +1392,9 @@ async def sub_approve(callback: types.CallbackQuery):
         })
     await save_db(DATABASE)
     sub["status"] = "approved"
+    await save_submission(sub_id, sub)
     
-    award_points(sub["user_id"], 15) # Бонус за одобренный файл
+    await award_points(sub["user_id"], 15)
     
     try: await callback.message.edit_caption(caption=(callback.message.caption or "") + "\n\n✅ ОДОБРЕНО", reply_markup=None)
     except Exception: pass
@@ -1361,9 +1405,11 @@ async def sub_approve(callback: types.CallbackQuery):
 async def sub_reject(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id): return
     sub_id = callback.data.split(":")[1]
-    sub = PENDING_SUBMISSIONS.get(sub_id)
-    if not sub or sub["status"] != "pending": return
+    sub = await get_submission(sub_id)
+    if not sub or sub.get("status") != "pending": return
     sub["status"] = "rejected"
+    await save_submission(sub_id, sub)
+    
     try: await callback.message.edit_caption(caption=(callback.message.caption or "") + "\n\n❌ ОТКЛОНЕНО", reply_markup=None)
     except Exception: pass
     try: await bot.send_message(sub["user_id"], "😔 Твой файл не был принят.")
@@ -1373,20 +1419,24 @@ async def sub_reject(callback: types.CallbackQuery):
 async def sub_editcat(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id): return
     sub_id = callback.data.split(":")[1]
-    if PENDING_SUBMISSIONS.get(sub_id, {}).get("status") != "pending": return
-    await callback.message.edit_reply_markup(reply_markup=build_submission_categories_kb(sub_id))
+    sub = await get_submission(sub_id)
+    if sub.get("status") != "pending": return
+    await callback.message.edit_reply_markup(reply_markup=build_submission_categories_kb(sub_id, sub.get("categories", [])))
 
 @dp.callback_query(F.data.startswith("subcat_toggle:"))
 async def subcat_toggle(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id): return
     _, sub_id, cat_key = callback.data.split(":")
-    sub = PENDING_SUBMISSIONS.get(sub_id)
-    if not sub or sub["status"] != "pending": return
-    selected = set(sub["categories"])
+    sub = await get_submission(sub_id)
+    if not sub or sub.get("status") != "pending": return
+    
+    selected = set(sub.get("categories", []))
     if cat_key in selected: selected.remove(cat_key)
     else: selected.add(cat_key)
     sub["categories"] = list(selected)
-    await callback.message.edit_reply_markup(reply_markup=build_submission_categories_kb(sub_id))
+    await save_submission(sub_id, sub)
+    
+    await callback.message.edit_reply_markup(reply_markup=build_submission_categories_kb(sub_id, sub["categories"]))
 
 @dp.callback_query(F.data.startswith("subcat_done:"))
 async def subcat_done(callback: types.CallbackQuery):
@@ -1430,7 +1480,6 @@ async def main():
     logger.info("✅ Подключение к MongoDB установлено")
     
     DATABASE = await load_db()
-    await save_db(DATABASE)
     
     await set_main_menu(bot)
     logger.info("🤖 Бот запущен!")
