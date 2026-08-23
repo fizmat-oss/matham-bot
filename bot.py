@@ -52,7 +52,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 logging.basicConfig(
 
-    level=logging.INFO,
+    level=logging.DEBUG if os.environ.get("DEBUG", "0").lower() in ("1", "true", "yes") else logging.INFO,
 
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 
@@ -363,25 +363,12 @@ TEXTS = {
 }
 
 def get_user_language(user_id: int) -> str:
-
-    user = DATABASE.get("users", {}).get(str(user_id), {})
-
-    lang = user.get("language", "ru")
-
-    return lang if lang in ("ru", "en") else "ru"
+    return "ru"
 
 def t(user_id: int, key: str) -> str:
-
-    lang = get_user_language(user_id)
-
-    return TEXTS[lang].get(key, TEXTS["ru"].get(key, key))
+    return TEXTS["ru"].get(key, key)
 
 def category_title(cat_data: dict, user_id: int) -> str:
-
-    if get_user_language(user_id) == "en":
-
-        return cat_data.get("title_en", cat_data.get("title", ""))
-
     return cat_data.get("title", "")
 
 # ============================================================
@@ -656,18 +643,23 @@ async def load_db():
 
         user.setdefault("language", "ru")
 
-    # Daily task migration
-
-    for date_str, task in data["daily_tasks"].items():
-
-        task.setdefault("solution", "")
-
-        task.setdefault("solution_photo_file_id", None)
-
-        task.setdefault("votes", {})
-
-        task.setdefault("user_solutions", {})
-
+    # Daily task migration - group multiple tasks under one date.
+    for date_str, group in list(data["daily_tasks"].items()):
+        if isinstance(group, dict) and "tasks" not in group:
+            group = {"tasks": [copy.deepcopy(group)]}
+            data["daily_tasks"][date_str] = group
+        elif isinstance(group, list):
+            group = {"tasks": group}
+            data["daily_tasks"][date_str] = group
+        group.setdefault("tasks", [])
+        for i, task in enumerate(group["tasks"]):
+            task.setdefault("task_id", uuid.uuid4().hex[:10])
+            task.setdefault("solution", "")
+            task.setdefault("solution_photo_file_id", None)
+            task.setdefault("votes", {})
+            task.setdefault("user_solutions", {})
+            task.setdefault("created_at", get_yerevan_date())
+            task["number"] = i + 1
     return data
 
 async def save_db(db_data):
@@ -749,6 +741,24 @@ class LanguageState(StatesGroup):
     choosing = State()
 
 # ============================================================
+
+# DAILY TASK GROUP HELPERS
+def get_task_group(date_str: str):
+    group = DATABASE.get("daily_tasks", {}).get(date_str)
+    if not group:
+        return None
+    if "tasks" not in group:
+        group = {"tasks": [group]}
+        DATABASE["daily_tasks"][date_str] = group
+    return group
+
+def get_tasks_for_date(date_str: str) -> list:
+    group = get_task_group(date_str)
+    return group.get("tasks", []) if group else []
+
+def get_task_by_index(date_str: str, index: int = 0):
+    tasks = get_tasks_for_date(date_str)
+    return tasks[index] if 0 <= index < len(tasks) else None
 
 # KEYBOARDS
 
@@ -879,18 +889,6 @@ def get_main_menu_keyboard(user_id: int):
             )
 
         ],
-
-        [
-
-            InlineKeyboardButton(
-
-                text=t(user_id, "language"),
-
-                callback_data="language:change"
-
-            )
-
-        ]
 
     ]
 
@@ -1428,7 +1426,9 @@ def get_task_keyboard(
 
     user_id: int,
 
-    admin_view: bool = False
+    admin_view: bool = False,
+
+    task_index: int = 0
 
 ):
 
@@ -1440,7 +1440,7 @@ def get_task_keyboard(
 
                 text=t(user_id, "solution"),
 
-                callback_data=f"th:{date_str}:sol"
+                callback_data=f"th:{date_str}:{task_index}"
 
             )
 
@@ -1452,7 +1452,7 @@ def get_task_keyboard(
 
                 text=t(user_id, "send_solution"),
 
-                callback_data=f"tsol:{date_str}"
+                callback_data=f"tsol:{date_str}:{task_index}"
 
             )
 
@@ -1464,7 +1464,7 @@ def get_task_keyboard(
 
                 text="⭐ 1",
 
-                callback_data=f"tv:{date_str}:1"
+                callback_data=f"tv:{date_str}:{task_index}:1"
 
             ),
 
@@ -1472,7 +1472,7 @@ def get_task_keyboard(
 
                 text="⭐ 2",
 
-                callback_data=f"tv:{date_str}:2"
+                callback_data=f"tv:{date_str}:{task_index}:2"
 
             ),
 
@@ -1480,7 +1480,7 @@ def get_task_keyboard(
 
                 text="⭐ 3",
 
-                callback_data=f"tv:{date_str}:3"
+                callback_data=f"tv:{date_str}:{task_index}:3"
 
             ),
 
@@ -1488,7 +1488,7 @@ def get_task_keyboard(
 
                 text="⭐ 4",
 
-                callback_data=f"tv:{date_str}:4"
+                callback_data=f"tv:{date_str}:{task_index}:4"
 
             ),
 
@@ -1496,7 +1496,7 @@ def get_task_keyboard(
 
                 text="⭐ 5",
 
-                callback_data=f"tv:{date_str}:5"
+                callback_data=f"tv:{date_str}:{task_index}:5"
 
             )
 
@@ -1512,7 +1512,7 @@ def get_task_keyboard(
 
                 text="📊 Статистика задачи",
 
-                callback_data=f"ts:{date_str}"
+                callback_data=f"ts:{date_str}:{task_index}"
 
             )
 
@@ -1524,7 +1524,7 @@ def get_task_keyboard(
 
                 text="👥 Решения пользователей",
 
-                callback_data=f"tusers:{date_str}"
+                callback_data=f"tusers:{date_str}:{task_index}"
 
             )
 
@@ -1561,78 +1561,20 @@ def get_task_keyboard(
     )
 
 def get_history_keyboard(user_id: int):
-
-    tasks = DATABASE.get(
-
-        "daily_tasks",
-
-        {}
-
-    )
-
-    dates = sorted(
-
-        tasks.keys(),
-
-        reverse=True
-
-    )
-
+    dates = sorted(DATABASE.get("daily_tasks", {}).keys(), reverse=True)
     builder = []
-
     for date_str in dates[:30]:
-
-        if date_str == get_yerevan_date():
-
-            title = f"🧩 {date_str} - Сегодня"
-
-        else:
-
-            title = f"📅 {date_str}"
-
-        builder.append([
-
-            InlineKeyboardButton(
-
-                text=title,
-
-                callback_data=f"taskdate:{date_str}"
-
-            )
-
-        ])
-
+        tasks = get_tasks_for_date(date_str)
+        if not tasks:
+            continue
+        title = f"🧩 {date_str} - Сегодня" if date_str == get_yerevan_date() else f"📅 {date_str}"
+        builder.append([InlineKeyboardButton(text=title, callback_data="noop")])
+        for i, _task in enumerate(tasks):
+            builder.append([InlineKeyboardButton(text=f"{i + 1}. Задача", callback_data=f"taskdate:{date_str}:{i}")])
     if not builder:
-
-        builder.append([
-
-            InlineKeyboardButton(
-
-                text=t(user_id, "no_tasks"),
-
-                callback_data="noop"
-
-            )
-
-        ])
-
-    builder.append([
-
-        InlineKeyboardButton(
-
-            text=t(user_id, "menu"),
-
-            callback_data="menu:main"
-
-        )
-
-    ])
-
-    return InlineKeyboardMarkup(
-
-        inline_keyboard=builder
-
-    )
+        builder.append([InlineKeyboardButton(text=t(user_id, "no_tasks"), callback_data="noop")])
+    builder.append([InlineKeyboardButton(text=t(user_id, "menu"), callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=builder)
 
 # ============================================================
 
@@ -1644,7 +1586,9 @@ def get_solution_rating_keyboard(
 
     date_str: str,
 
-    solution_id: str
+    solution_id: str,
+
+    task_index: int = 0
 
 ):
 
@@ -1658,7 +1602,7 @@ def get_solution_rating_keyboard(
 
                     text="⭐ 1",
 
-                    callback_data=f"usrate:{date_str}:{solution_id}:1"
+                    callback_data=f"usrate:{date_str}:{task_index}:{solution_id}:1"
 
                 ),
 
@@ -1666,7 +1610,7 @@ def get_solution_rating_keyboard(
 
                     text="⭐ 2",
 
-                    callback_data=f"usrate:{date_str}:{solution_id}:2"
+                    callback_data=f"usrate:{date_str}:{task_index}:{solution_id}:2"
 
                 ),
 
@@ -1674,7 +1618,7 @@ def get_solution_rating_keyboard(
 
                     text="⭐ 3",
 
-                    callback_data=f"usrate:{date_str}:{solution_id}:3"
+                    callback_data=f"usrate:{date_str}:{task_index}:{solution_id}:3"
 
                 ),
 
@@ -1682,7 +1626,7 @@ def get_solution_rating_keyboard(
 
                     text="⭐ 4",
 
-                    callback_data=f"usrate:{date_str}:{solution_id}:4"
+                    callback_data=f"usrate:{date_str}:{task_index}:{solution_id}:4"
 
                 ),
 
@@ -1690,7 +1634,7 @@ def get_solution_rating_keyboard(
 
                     text="⭐ 5",
 
-                    callback_data=f"usrate:{date_str}:{solution_id}:5"
+                    callback_data=f"usrate:{date_str}:{task_index}:{solution_id}:5"
 
                 )
 
@@ -1846,110 +1790,6 @@ async def inline_search(inline_query: InlineQuery):
 
 # ============================================================
 
-@dp.message(Command("language"))
-
-async def cmd_language(
-
-    message: types.Message,
-
-    state: FSMContext
-
-):
-
-    await state.clear()
-
-    await message.answer(
-
-        "🌍 Choose language / Выбери язык:",
-
-        reply_markup=get_language_keyboard()
-
-    )
-
-@dp.callback_query(F.data == "language:change")
-
-async def language_change(
-
-    callback: types.CallbackQuery
-
-):
-
-    await callback.message.edit_text(
-
-        "🌍 Choose language / Выбери язык:",
-
-        reply_markup=get_language_keyboard()
-
-    )
-
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("lang:"))
-
-async def language_select(
-
-    callback: types.CallbackQuery
-
-):
-
-    lang = callback.data.split(":")[1]
-
-    if lang not in ("ru", "en"):
-
-        return await callback.answer(
-
-            "Invalid language",
-
-            show_alert=True
-
-        )
-
-    uid = str(callback.from_user.id)
-
-    if uid not in DATABASE["users"]:
-
-        await track_user_activity(
-
-            callback.from_user.id,
-
-            callback.from_user.username or ""
-
-        )
-
-    DATABASE["users"][uid]["language"] = lang
-
-    await db_collection.update_one(
-
-        {"_id": DB_DOC_ID},
-
-        {
-
-            "$set": {
-
-                f"data.users.{uid}.language": lang
-
-            }
-
-        }
-
-    )
-
-    await callback.message.edit_text(
-
-        TEXTS[lang]["language_saved"],
-
-        reply_markup=get_main_menu_keyboard(
-
-            callback.from_user.id
-
-        )
-
-    )
-
-    await callback.answer()
-
-# ============================================================
-
 # COMMANDS
 
 # ============================================================
@@ -1966,27 +1806,6 @@ async def cmd_start(
 
     await state.clear()
 
-    is_new = str(message.from_user.id) not in DATABASE["users"]
-
-    await track_user_activity(
-
-        message.from_user.id,
-
-        message.from_user.username or ""
-
-    )
-
-    if is_new:
-
-        await message.answer(
-
-            "🌍 Choose language / Выбери язык:",
-
-            reply_markup=get_language_keyboard()
-
-        )
-
-        return
 
     await message.answer(
 
@@ -2007,6 +1826,21 @@ async def cmd_start(
         )
 
     )
+
+@dp.message(F.text.in_({"⬅️ Назад", "🔙 Назад", "Назад"}))
+async def universal_back(message: types.Message, state: FSMContext):
+    logger.debug("Back pressed by user=%s; clearing FSM state", message.from_user.id)
+    await state.clear()
+    if is_admin(message.from_user.id):
+        await message.answer("👑 Админ-панель", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎯 Задачи дня", callback_data="admin:tasks")],[InlineKeyboardButton(text="⬅️ Меню", callback_data="menu:main")]]))
+    else:
+        await message.answer("📂 Главное меню", reply_markup=get_main_menu_keyboard(message.from_user.id))
+
+@dp.message(F.text.in_({"⬅️ Назад", "🔙 Назад", "Назад"}))
+async def universal_back(message: types.Message, state: FSMContext):
+    logger.debug("Back pressed user=%s", message.from_user.id)
+    await state.clear()
+    await message.answer("📂 Главное меню", reply_markup=get_main_menu_keyboard(message.from_user.id))
 
 @dp.message(Command("menu"))
 
@@ -2100,237 +1934,44 @@ async def process_catalog(
 
 # ============================================================
 
-async def send_daily_task(
-
-    target,
-
-    date_str: str = None
-
-):
-
+async def send_daily_task(target, date_str: str = None, task_index: int = 0):
     if not date_str:
-
         date_str = get_yerevan_date()
-
-    task = DATABASE["daily_tasks"].get(
-
-        date_str
-
-    )
-
-    is_message = isinstance(
-
-        target,
-
-        types.Message
-
-    )
-
+    task = get_task_by_index(date_str, task_index)
+    is_message = isinstance(target, types.Message)
     user_id = target.from_user.id
-
     if not task:
-
-        text = (
-
-            f"🧩 **Задача дня ({date_str})**\n\n"
-
-            f"{t(user_id, 'task_not_found')}"
-
-        )
-
-        kb = InlineKeyboardMarkup(
-
-            inline_keyboard=[
-
-                [
-
-                    InlineKeyboardButton(
-
-                        text=t(user_id, "menu"),
-
-                        callback_data="menu:main"
-
-                    )
-
-                ]
-
-            ]
-
-        )
-
-        if is_message:
-
-            await target.answer(
-
-                text,
-
-                reply_markup=kb
-
-            )
-
-        else:
-
-            await target.message.edit_text(
-
-                text,
-
-                reply_markup=kb
-
-            )
-
+        text = f"🧩 **Задача дня ({date_str})**\n\n{t(user_id, 'task_not_found')}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t(user_id, "menu"), callback_data="menu:main")]])
+        if is_message: await target.answer(text, reply_markup=kb)
+        else: await target.message.edit_text(text, reply_markup=kb)
         return
-
     if date_str == get_yerevan_date():
-
         uid_str = str(user_id)
-
-        if uid_str not in DATABASE["users"]:
-
-            await track_user_activity(
-
-                user_id
-
-            )
-
-        opened = DATABASE["users"][uid_str].setdefault(
-
-            "opened_tasks",
-
-            []
-
-        )
-
-        if date_str not in opened:
-
-            opened.append(date_str)
-
-            await award_points(
-
-                user_id,
-
-                5
-
-            )
-
-            await db_collection.update_one(
-
-                {"_id": DB_DOC_ID},
-
-                {
-
-                    "$set": {
-
-                        f"data.users.{uid_str}.opened_tasks":
-
-                            opened
-
-                    }
-
-                }
-
-            )
-
-    cap = (
-
-        f"🧩 **Задача дня** ({date_str})"
-
-    )
-
-    votes = task.get(
-
-        "votes",
-
-        {}
-
-    )
-
+        opened = DATABASE["users"].setdefault(uid_str, {}).setdefault("opened_tasks", [])
+        key = f"{date_str}:{task_index}"
+        if key not in opened:
+            opened.append(key)
+            await award_points(user_id, 5)
+            await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {f"data.users.{uid_str}.opened_tasks": opened}})
+    cap = f"🧩 **Задача {task_index + 1}** ({date_str})"
+    votes = task.get("votes", {})
     if votes:
-
-        avg = sum(
-
-            votes.values()
-
-        ) / len(votes)
-
-        cap += (
-
-            f"\n\n⭐ Оценка: {avg:.1f}/5 "
-
-            f"(Голосов: {len(votes)})"
-
-        )
-
-    photo_id = task.get(
-
-        "photo_file_id"
-
-    )
-
-    kb = get_task_keyboard(
-
-        date_str,
-
-        user_id,
-
-        is_admin(user_id)
-
-    )
-
+        avg = sum(votes.values()) / len(votes)
+        cap += f"\n\n⭐ Оценка: {avg:.1f}/5 (Голосов: {len(votes)})"
+    if len(get_tasks_for_date(date_str)) > 1:
+        cap += f"\n📚 Задач за эту дату: {len(get_tasks_for_date(date_str))}"
+    kb = get_task_keyboard(date_str, user_id, is_admin(user_id), task_index)
+    photo_id = task.get("photo_file_id")
     if photo_id:
-
-        if is_message:
-
-            await target.answer_photo(
-
-                photo=photo_id,
-
-                caption=cap,
-
-                reply_markup=kb
-
-            )
-
+        if is_message: await target.answer_photo(photo=photo_id, caption=cap, reply_markup=kb)
         else:
-
-            try:
-
-                await target.message.delete()
-
-            except Exception:
-
-                pass
-
-            await target.message.answer_photo(
-
-                photo=photo_id,
-
-                caption=cap,
-
-                reply_markup=kb
-
-            )
-
+            try: await target.message.delete()
+            except Exception: pass
+            await target.message.answer_photo(photo=photo_id, caption=cap, reply_markup=kb)
     else:
-
-        if is_message:
-
-            await target.answer(
-
-                cap,
-
-                reply_markup=kb
-
-            )
-
-        else:
-
-            await target.message.edit_text(
-
-                cap,
-
-                reply_markup=kb
-
-            )
+        if is_message: await target.answer(cap, reply_markup=kb)
+        else: await target.message.edit_text(cap, reply_markup=kb)
 
 @dp.message(Command("task"))
 
@@ -2409,29 +2050,11 @@ async def tasks_history(
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("taskdate:"))
-
-async def previous_task(
-
-    callback: types.CallbackQuery
-
-):
-
-    date_str = callback.data.split(
-
-        ":",
-
-        1
-
-    )[1]
-
-    await send_daily_task(
-
-        callback,
-
-        date_str
-
-    )
-
+async def previous_task(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    date_str = parts[1]
+    task_index = int(parts[2]) if len(parts) > 2 else 0
+    await send_daily_task(callback, date_str, task_index)
     await callback.answer()
 
 # ============================================================
@@ -2462,11 +2085,7 @@ async def task_vote_handler(
 
         )
 
-    task = DATABASE["daily_tasks"].get(
-
-        date_str
-
-    )
+    task = get_task_by_index(date_str, task_index)
 
     if not task:
 
@@ -2518,7 +2137,7 @@ async def task_vote_handler(
 
     cap = (
 
-        f"🧩 **Задача дня** ({date_str})\n\n"
+        f"🧩 **Задача {task_index + 1}** ({date_str})\n\n"
 
         f"⭐ Оценка: {avg:.1f}/5 "
 
@@ -2538,7 +2157,9 @@ async def task_vote_handler(
 
                 callback.from_user.id,
 
-                is_admin(callback.from_user.id)
+                is_admin(callback.from_user.id),
+
+                task_index
 
             )
 
@@ -2563,162 +2184,47 @@ async def task_vote_handler(
 # ============================================================
 
 @dp.callback_query(F.data.startswith("th:"))
-
-async def task_solution_handler(
-
-    callback: types.CallbackQuery
-
-):
-
-    _, date_str, _ = callback.data.split(":")
-
-    task = DATABASE["daily_tasks"].get(
-
-        date_str
-
-    )
-
+async def task_solution_handler(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    date_str = parts[1]
+    task_index = int(parts[2]) if len(parts) > 2 else 0
+    task = get_task_by_index(date_str, task_index)
     if not task:
-
-        return await callback.answer(
-
-            t(callback.from_user.id, "task_not_found"),
-
-            show_alert=True
-
-        )
-
-    text_solution = task.get(
-
-        "solution",
-
-        ""
-
-    )
-
-    photo_solution = task.get(
-
-        "solution_photo_file_id"
-
-    )
-
+        return await callback.answer(t(callback.from_user.id, "task_not_found"), show_alert=True)
+    text_solution = task.get("solution", "")
+    photo_solution = task.get("solution_photo_file_id")
     if not text_solution and not photo_solution:
-
-        return await callback.answer(
-
-            t(callback.from_user.id, "solution_missing"),
-
-            show_alert=True
-
-        )
-
+        return await callback.answer(t(callback.from_user.id, "solution_missing"), show_alert=True)
+    title = f"📝 **Решение задачи {task_index + 1} ({date_str})**"
     if photo_solution:
-
-        try:
-
-            await callback.message.answer_photo(
-
-                photo=photo_solution,
-
-                caption=(
-
-                    f"📝 **Решение задачи {date_str}**"
-
-                    + (
-
-                        f"\n\n{text_solution}"
-
-                        if text_solution
-
-                        else ""
-
-                    )
-
-                )
-
-            )
-
-        except Exception:
-
-            pass
-
-    elif text_solution:
-
-        await callback.message.answer(
-
-            f"📝 **Решение задачи {date_str}**\n\n"
-
-            f"{text_solution}"
-
-        )
-
+        await callback.message.answer_photo(photo=photo_solution, caption=title + (f"\n\n{text_solution}" if text_solution else ""))
+    else:
+        await callback.message.answer(title + "\n\n" + text_solution)
     await callback.answer()
 
-# ============================================================
-
-# USER SUBMITS DAILY SOLUTION
+# USER SUBMITS DAILY SOLUTION# USER SUBMITS DAILY SOLUTION
 
 # ============================================================
 
 @dp.callback_query(F.data.startswith("tsol:"))
-
-async def user_solution_start(
-
-    callback: types.CallbackQuery,
-
-    state: FSMContext
-
-):
-
-    date_str = callback.data.split(
-
-        ":",
-
-        1
-
-    )[1]
-
-    if date_str not in DATABASE["daily_tasks"]:
-
-        return await callback.answer(
-
-            t(callback.from_user.id, "task_not_found"),
-
-            show_alert=True
-
-        )
-
-    await state.update_data(
-
-        solution_date=date_str
-
-    )
-
-    await state.set_state(
-
-        UserTaskSolution.waiting_for_solution
-
-    )
-
-    await callback.message.answer(
-
-        t(
-
-            callback.from_user.id,
-
-            "send_text_or_photo"
-
-        )
-
-        + "\n\n"
-
-        + "❌ Напиши /cancel для отмены."
-
-    )
-
+async def user_solution_start(callback: types.CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    date_str = parts[1]
+    task_index = int(parts[2]) if len(parts) > 2 else 0
+    if not get_task_by_index(date_str, task_index):
+        return await callback.answer(t(callback.from_user.id, "task_not_found"), show_alert=True)
+    await state.update_data(solution_date=date_str, solution_task_index=task_index)
+    await state.set_state(UserTaskSolution.waiting_for_solution)
+    await callback.message.answer(t(callback.from_user.id, "send_text_or_photo") + "\n\n❌ Напиши /cancel для отмены.")
     await callback.answer()
 
 @dp.message(
+
+    UserTaskSolution.waiting_for_solution,
+
+    F.text
+
+)@dp.message(
 
     UserTaskSolution.waiting_for_solution,
 
@@ -2820,6 +2326,9 @@ async def save_user_daily_solution(
 
 ):
 
+    data = await state.get_data()
+    task_index = data.get("solution_task_index", 0)
+
     if not date_str:
 
         await state.clear()
@@ -2830,11 +2339,7 @@ async def save_user_daily_solution(
 
         )
 
-    task = DATABASE["daily_tasks"].get(
-
-        date_str
-
-    )
+    task = get_task_by_index(date_str, task_index)
 
     if not task:
 
@@ -2928,13 +2433,7 @@ async def save_user_daily_solution(
 
             )
 
-            kb = get_solution_rating_keyboard(
-
-                date_str,
-
-                solution_id
-
-            )
+            kb = get_solution_rating_keyboard(date_str, solution_id, task_index)
 
             if solution_type == "photo":
 
@@ -3006,17 +2505,14 @@ async def admin_rate_user_solution(
 
     parts = callback.data.split(":")
 
-    if len(parts) != 4:
-
-        return await callback.answer(
-
-            "Ошибка",
-
-            show_alert=True
-
-        )
-
-    _, date_str, solution_id, score_str = parts
+    if len(parts) == 5:
+        _, date_str, idx_str, solution_id, score_str = parts
+        task_index = int(idx_str)
+    elif len(parts) == 4:
+        _, date_str, solution_id, score_str = parts
+        task_index = 0
+    else:
+        return await callback.answer("Ошибка", show_alert=True)
 
     score = int(score_str)
 
@@ -3030,11 +2526,7 @@ async def admin_rate_user_solution(
 
         )
 
-    task = DATABASE["daily_tasks"].get(
-
-        date_str
-
-    )
+    task = get_task_by_index(date_str, task_index)
 
     if not task:
 
@@ -3182,19 +2674,11 @@ async def admin_task_user_solutions(
 
         )
 
-    date_str = callback.data.split(
+    parts = callback.data.split(":")
+    date_str = parts[1]
+    task_index = int(parts[2]) if len(parts) > 2 else 0
 
-        ":",
-
-        1
-
-    )[1]
-
-    task = DATABASE["daily_tasks"].get(
-
-        date_str
-
-    )
+    task = get_task_by_index(date_str, task_index)
 
     if not task:
 
@@ -3262,7 +2746,7 @@ async def admin_task_user_solutions(
 
                         text="📨 Показать решения",
 
-                        callback_data=f"tshow:{date_str}"
+                        callback_data=f"tshow:{date_str}:{task_index}"
 
                     )
 
@@ -3274,7 +2758,7 @@ async def admin_task_user_solutions(
 
                         text="⬅️ Назад",
 
-                        callback_data=f"taskdate:{date_str}"
+                        callback_data=f"taskdate:{date_str}:{task_index}"
 
                     )
 
@@ -3310,19 +2794,11 @@ async def admin_show_user_solutions(
 
         )
 
-    date_str = callback.data.split(
+    parts = callback.data.split(":")
+    date_str = parts[1]
+    task_index = int(parts[2]) if len(parts) > 2 else 0
 
-        ":",
-
-        1
-
-    )[1]
-
-    task = DATABASE["daily_tasks"].get(
-
-        date_str
-
-    )
+    task = get_task_by_index(date_str, task_index)
 
     if not task:
 
@@ -3396,13 +2872,7 @@ async def admin_show_user_solutions(
 
                     reply_markup=(
 
-                        get_solution_rating_keyboard(
-
-                            date_str,
-
-                            solution["solution_id"]
-
-                        )
+                        get_solution_rating_keyboard(date_str, solution["solution_id"], task_index)
 
                         if rating is None
 
@@ -3472,13 +2942,11 @@ async def task_stats_admin(
 
         return
 
-    _, date_str = callback.data.split(":")
+    parts = callback.data.split(":")
+    date_str = parts[1]
+    task_index = int(parts[2]) if len(parts) > 2 else 0
 
-    task = DATABASE["daily_tasks"].get(
-
-        date_str
-
-    )
+    task = get_task_by_index(date_str, task_index)
 
     if not task:
 
@@ -4810,7 +4278,10 @@ async def global_search_handler(
 
 ):
 
+    logger.debug("GLOBAL SEARCH user=%s query=%r state=NONE", message.from_user.id, message.text)
+
     query = message.text.strip().lower()
+    logger.debug("Global search user=%s query=%r", message.from_user.id, query)
 
     if query in [
 
@@ -5226,11 +4697,7 @@ async def admin_stats(
 
     )
 
-    tasks_count = len(
-
-        DATABASE["daily_tasks"]
-
-    )
+    tasks_count = sum(len(get_tasks_for_date(d)) for d in DATABASE["daily_tasks"])
 
     users_count = len(
 
@@ -5702,6 +5169,7 @@ async def adm_task_photo(
 
         return
 
+    logger.debug("Admin task photo received user=%s", message.from_user.id)
     await state.update_data(
 
         photo_id=message.photo[-1].file_id
@@ -5713,6 +5181,7 @@ async def adm_task_photo(
         TaskOfDayAdmin.waiting_for_solution
 
     )
+    logger.debug("Admin task state -> waiting_for_solution user=%s", message.from_user.id)
 
     await message.answer(
 
@@ -5896,33 +5365,21 @@ async def adm_task_date(
 
     await state.clear()
 
-    DATABASE["daily_tasks"][date_str] = {
-
+    group = get_task_group(date_str)
+    if not group:
+        group = {"tasks": []}
+        DATABASE["daily_tasks"][date_str] = group
+    group["tasks"].append({
+        "task_id": uuid.uuid4().hex[:10],
         "photo_file_id": data["photo_id"],
-
-        "solution": data.get(
-
-            "solution",
-
-            ""
-
-        ),
-
-        "solution_photo_file_id":
-
-            data.get(
-
-                "solution_photo_file_id"
-
-            ),
-
+        "solution": data.get("solution", ""),
+        "solution_photo_file_id": data.get("solution_photo_file_id"),
         "votes": {},
-
         "user_solutions": {},
-
-        "created_at": get_yerevan_date()
-
-    }
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    for i, task_item in enumerate(group["tasks"], 1):
+        task_item["number"] = i
 
     await save_db(
 
@@ -8172,14 +7629,6 @@ async def set_main_menu(
 
         ),
 
-        BotCommand(
-
-            command="language",
-
-            description="Язык 🌍"
-
-        )
-
     ]
 
     await b.set_my_commands(
@@ -8288,7 +7737,9 @@ async def main():
 
     logger.info(
 
-        "🤖 Bot started!"
+        "🤖 Bot started! DEBUG=%s",
+
+        os.environ.get("DEBUG", "0")
 
     )
 
@@ -8301,5 +7752,3 @@ async def main():
 if __name__ == "__main__":
 
     asyncio.run(main())
-
-    
