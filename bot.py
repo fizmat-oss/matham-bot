@@ -363,26 +363,13 @@ TEXTS = {
 }
 
 def get_user_language(user_id: int) -> str:
-    """Получить язык пользователя из БД"""
-    uid_str = str(user_id)
-    if uid_str in DATABASE.get("users", {}):
-        lang = DATABASE["users"][uid_str].get("language", "ru")
-        return lang if lang in TEXTS else "ru"
     return "ru"
 
 def t(user_id: int, key: str) -> str:
-    """Получить текст на правильном языке пользователя"""
-    lang = get_user_language(user_id)
-    text_dict = TEXTS.get(lang, TEXTS.get("ru", {}))
-    return text_dict.get(key, key)
+    return TEXTS["ru"].get(key, key)
 
 def category_title(cat_data: dict, user_id: int) -> str:
-    """Получить название категории на правильном языке"""
-    lang = get_user_language(user_id)
-    if lang == "en":
-        return cat_data.get("title_en", cat_data.get("title", ""))
-    else:
-        return cat_data.get("title", "")
+    return cat_data.get("title", "")
 
 # ============================================================
 
@@ -7722,64 +7709,6 @@ async def run_web_server():
 
 # ============================================================
 
-# ============================================================
-
-# INLINE SEARCH (Поиск)
-
-# ============================================================
-
-@dp.inline_query()
-
-async def inline_search(inline_query: types.InlineQuery):
-    """Обработчик inline-запросов для функции Поиск"""
-    try:
-        query = inline_query.query.lower().strip()
-        results = []
-        
-        logger.debug(f"Inline search: '{query}' from user {inline_query.from_user.id}")
-        
-        if not query or len(query) < 2:
-            # Если запрос слишком короткий, показываем категории
-            for cat_key, cat_data in DATABASE.get("categories", {}).items():
-                title = cat_data.get("title", "")
-                results.append(
-                    InlineQueryResultArticle(
-                        id=f"cat_{cat_key}",
-                        title=title,
-                        input_message_content=InputTextMessageContent(
-                            message_text=f"📚 {title}"
-                        ),
-                        description="Категория файлов"
-                    )
-                )
-        else:
-            # Ищем в названиях файлов
-            for cat_data in DATABASE.get("categories", {}).values():
-                for f in cat_data.get("files", []):
-                    name = f.get("name", "").lower()
-                    if query in name:
-                        results.append(
-                            InlineQueryResultArticle(
-                                id=f.get("file_unique_id"),
-                                title=f.get("name", "Файл"),
-                                input_message_content=InputTextMessageContent(
-                                    message_text=f"📄 {f.get('name', 'Файл')}"
-                                ),
-                                description="Найденный файл"
-                            )
-                        )
-                        if len(results) >= 50:
-                            break
-                if len(results) >= 50:
-                    break
-        
-        await inline_query.answer(results)
-        
-    except Exception as e:
-        logger.error(f"Error in inline_search: {e}", exc_info=True)
-        await inline_query.answer([])
-
-
 async def main():
 
     global DATABASE
@@ -7799,12 +7728,6 @@ async def main():
     )
 
     DATABASE = await load_db()
-    
-    # Логирование загрузки БД
-    logger.info(
-        f"📊 DATABASE loaded: {len(DATABASE.get('categories', {}))} categories, "
-        f"{len(DATABASE.get('users', {}))} users"
-    )
 
     await set_main_menu(
 
