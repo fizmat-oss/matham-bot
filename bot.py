@@ -228,9 +228,6 @@ class EditFile(StatesGroup):
 
 class TaskOfDayAdmin(StatesGroup):
     waiting_for_photo = State()
-    waiting_for_caption = State()
-    waiting_for_hint1 = State()
-    waiting_for_hint2 = State()
     waiting_for_solution = State()
     waiting_for_date = State()
 
@@ -447,10 +444,6 @@ async def process_catalog(callback: types.CallbackQuery):
 
 def get_task_keyboard(date_str: str, admin_view: bool = False):
     builder = [
-        [
-            InlineKeyboardButton(text="💡 Подсказка 1", callback_data=f"th:{date_str}:h1"),
-            InlineKeyboardButton(text="💡 Подсказка 2", callback_data=f"th:{date_str}:h2")
-        ],
         [InlineKeyboardButton(text="✅ Решение", callback_data=f"th:{date_str}:sol")],
         [
             InlineKeyboardButton(text="⭐ 1", callback_data=f"tv:{date_str}:1"),
@@ -488,7 +481,7 @@ async def send_daily_task(target, date_str: str = None):
             DATABASE["users"][uid_str]["opened_tasks"].append(date_str)
             await award_points(user_id, 5)
 
-    cap = f"🧩 **Задача дня** ({date_str})\n\n{task.get('caption', '')}"
+    cap = f"🧩 **Задача дня** ({date_str})"
     
     votes = task.get("votes", {})
     if votes:
@@ -535,7 +528,7 @@ async def task_vote_handler(callback: types.CallbackQuery):
     await save_db(DATABASE)
     
     avg = sum(votes.values()) / len(votes)
-    cap = f"🧩 **Задача дня** ({date_str})\n\n{task.get('caption', '')}\n\n⭐ Оценка: {avg:.1f}/5 (Голосов: {len(votes)})"
+    cap = f"🧩 **Задача дня** ({date_str})\n\n⭐ Оценка: {avg:.1f}/5 (Голосов: {len(votes)})"
     try:
         await callback.message.edit_caption(caption=cap, reply_markup=get_task_keyboard(date_str, is_admin(callback.from_user.id)))
     except Exception:
@@ -545,11 +538,11 @@ async def task_vote_handler(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("th:"))
 async def task_hint_handler(callback: types.CallbackQuery):
-    _, date_str, hint_type = callback.data.split(":")
+    _, date_str, action = callback.data.split(":")
     task = DATABASE["daily_tasks"].get(date_str)
     if not task: return await callback.answer("Ошибка", show_alert=True)
     
-    val = task.get(f"hint{hint_type[-1]}" if hint_type.startswith("h") else "solution", "")
+    val = task.get("solution", "")
     if not val:
         val = "Пусто. Админ не добавил этот пункт 😔"
         
@@ -972,30 +965,6 @@ async def adm_task_add(callback: types.CallbackQuery, state: FSMContext):
 async def adm_task_photo(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
     await state.update_data(photo_id=message.photo[-1].file_id)
-    await state.set_state(TaskOfDayAdmin.waiting_for_caption)
-    await message.answer("Отправь текст/условие задачи (или напиши '-' чтобы пропустить).")
-
-@dp.message(TaskOfDayAdmin.waiting_for_caption, F.text)
-async def adm_task_cap(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id): return
-    cap = message.text if message.text != "-" else ""
-    await state.update_data(caption=cap)
-    await state.set_state(TaskOfDayAdmin.waiting_for_hint1)
-    await message.answer("Отправь Подсказку 1 (или напиши '-' чтобы пропустить).")
-
-@dp.message(TaskOfDayAdmin.waiting_for_hint1, F.text)
-async def adm_task_h1(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id): return
-    h1 = message.text if message.text != "-" else ""
-    await state.update_data(hint1=h1)
-    await state.set_state(TaskOfDayAdmin.waiting_for_hint2)
-    await message.answer("Отправь Подсказку 2 (или напиши '-' чтобы пропустить).")
-
-@dp.message(TaskOfDayAdmin.waiting_for_hint2, F.text)
-async def adm_task_h2(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id): return
-    h2 = message.text if message.text != "-" else ""
-    await state.update_data(hint2=h2)
     await state.set_state(TaskOfDayAdmin.waiting_for_solution)
     await message.answer("Отправь Решение (или напиши '-' чтобы пропустить).")
 
@@ -1025,9 +994,6 @@ async def adm_task_date(message: types.Message, state: FSMContext):
     
     DATABASE["daily_tasks"][date_str] = {
         "photo_file_id": data["photo_id"],
-        "caption": data["caption"],
-        "hint1": data["hint1"],
-        "hint2": data["hint2"],
         "solution": data["solution"],
         "votes": {},
         "created_at": get_yerevan_date()
@@ -1486,7 +1452,6 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
