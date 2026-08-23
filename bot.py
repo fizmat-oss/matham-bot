@@ -34,7 +34,7 @@ from aiogram.types import (
 
 )
 
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 
 from aiogram.fsm.context import FSMContext
 
@@ -54,7 +54,7 @@ logging.basicConfig(
 
     level=logging.INFO,
 
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 
 )
 
@@ -93,6 +93,8 @@ mongo_db = mongo_client[MONGO_DB_NAME]
 db_collection = mongo_db["catalog"]
 
 submissions_collection = mongo_db["submissions"]
+
+task_solutions_collection = mongo_db["task_solutions"]
 
 DB_DOC_ID = "catalog_main"
 
@@ -210,7 +212,7 @@ DEFAULT_STATE = {
 
 # =========================================================
 
-# GENERAL HELPERS
+# HELPERS
 
 # =========================================================
 
@@ -236,7 +238,7 @@ def get_file_by_uid(uid: str) -> dict:
 
 def get_file_categories(uid: str) -> list:
 
-    categories = []
+    cats = []
 
     for cat_key, cat_data in DATABASE.get("categories", {}).items():
 
@@ -244,45 +246,11 @@ def get_file_categories(uid: str) -> list:
 
             if f.get("file_unique_id") == uid:
 
-                categories.append(cat_key)
+                cats.append(cat_key)
 
                 break
 
-    return categories
-
-def get_unique_files():
-
-    """
-
-    Возвращает уникальные файлы, даже если файл находится
-
-    сразу в нескольких категориях.
-
-    """
-
-    result = {}
-
-    for cat_data in DATABASE.get("categories", {}).values():
-
-        for f in cat_data.get("files", []):
-
-            uid = f.get("file_unique_id")
-
-            if uid and uid not in result:
-
-                result[uid] = f
-
-    return list(result.values())
-
-def get_unique_file_count():
-
-    return len(get_unique_files())
-
-# =========================================================
-
-# USER ACTIVITY
-
-# =========================================================
+    return cats
 
 async def track_user_activity(user_id: int, username: str = ""):
 
@@ -310,7 +278,7 @@ async def track_user_activity(user_id: int, username: str = ""):
 
             "favorites": [],
 
-            "opened_tasks": []
+            "opened_tasks": [],
 
         }
 
@@ -328,7 +296,9 @@ async def track_user_activity(user_id: int, username: str = ""):
 
                 }
 
-            }
+            },
+
+            upsert=True,
 
         )
 
@@ -398,7 +368,9 @@ async def track_user_activity(user_id: int, username: str = ""):
 
             {"_id": DB_DOC_ID},
 
-            {"$set": updates}
+            {"$set": updates},
+
+            upsert=True,
 
         )
 
@@ -410,9 +382,11 @@ async def award_points(user_id: int, points: int):
 
         await track_user_activity(user_id)
 
-    user = DATABASE["users"][uid_str]
+    DATABASE["users"][uid_str]["score"] = (
 
-    user["score"] = user.get("score", 0) + points
+        DATABASE["users"][uid_str].get("score", 0) + points
+
+    )
 
     await db_collection.update_one(
 
@@ -420,21 +394,21 @@ async def award_points(user_id: int, points: int):
 
         {
 
-            "$set": {
+            "$inc": {
 
-                f"data.users.{uid_str}": user
+                f"data.users.{uid_str}.score": points
 
             }
 
         },
 
-        upsert=True
+        upsert=True,
 
     )
 
 # =========================================================
 
-# DATABASE
+# DATABASE FUNCTIONS
 
 # =========================================================
 
@@ -460,17 +434,9 @@ async def load_db():
 
             {"_id": DB_DOC_ID},
 
-            {
+            {"$set": {"data": data}},
 
-                "$set": {
-
-                    "data": data
-
-                }
-
-            },
-
-            upsert=True
+            upsert=True,
 
         )
 
@@ -484,13 +450,7 @@ async def load_db():
 
     )
 
-    changed = False
-
-    # -----------------------------------------------------
-
     # Missing top-level fields
-
-    # -----------------------------------------------------
 
     if "categories" not in data:
 
@@ -500,8 +460,6 @@ async def load_db():
 
         )
 
-        changed = True
-
     if "links" not in data:
 
         data["links"] = copy.deepcopy(
@@ -510,25 +468,17 @@ async def load_db():
 
         )
 
-        changed = True
-
     if "users" not in data:
 
         data["users"] = {}
-
-        changed = True
 
     if "daily_tasks" not in data:
 
         data["daily_tasks"] = {}
 
-        changed = True
-
     if "settings" not in data:
 
         data["settings"] = {}
-
-        changed = True
 
     if "must_read" not in data:
 
@@ -540,13 +490,7 @@ async def load_db():
 
         }
 
-        changed = True
-
-    # -----------------------------------------------------
-
     # Missing categories
-
-    # -----------------------------------------------------
 
     for key, default_cat in DEFAULT_STATE["categories"].items():
 
@@ -558,147 +502,7 @@ async def load_db():
 
             )
 
-            changed = True
-
-    # -----------------------------------------------------
-
-    # Normalize category files
-
-    # -----------------------------------------------------
-
-    for cat_data in data["categories"].values():
-
-        if "files" not in cat_data:
-
-            cat_data["files"] = []
-
-            changed = True
-
-        for f in cat_data["files"]:
-
-            if "file_unique_id" not in f:
-
-                original = f.get(
-
-                    "file_id",
-
-                    str(uuid.uuid4())
-
-                )
-
-                f["file_unique_id"] = (
-
-                    str(original)[-15:]
-
-                    + uuid.uuid4().hex[:5]
-
-                )
-
-                changed = True
-
-            if "tags" not in f:
-
-                f["tags"] = []
-
-                changed = True
-
-            if "difficulty" not in f:
-
-                f["difficulty"] = None
-
-                changed = True
-
-            if "must_read" not in f:
-
-                f["must_read"] = False
-
-                changed = True
-
-    # -----------------------------------------------------
-
-    # Normalize users
-
-    # -----------------------------------------------------
-
-    for uid, user in data["users"].items():
-
-        if "username" not in user:
-
-            user["username"] = ""
-
-            changed = True
-
-        if "streak" not in user:
-
-            user["streak"] = 0
-
-            changed = True
-
-        if "last_active" not in user:
-
-            user["last_active"] = ""
-
-            changed = True
-
-        if "score" not in user:
-
-            user["score"] = 0
-
-            changed = True
-
-        if "favorites" not in user:
-
-            user["favorites"] = []
-
-            changed = True
-
-        if "opened_tasks" not in user:
-
-            user["opened_tasks"] = []
-
-            changed = True
-
-    # -----------------------------------------------------
-
-    # Old must_read migration
-
-    # -----------------------------------------------------
-
-    if "files" in data.get("must_read", {}):
-
-        old_must_read = data["must_read"].get(
-
-            "files",
-
-            []
-
-        )
-
-        for mrf in old_must_read:
-
-            uid = mrf.get("file_unique_id")
-
-            if not uid:
-
-                continue
-
-            for cat_data in data["categories"].values():
-
-                for f in cat_data.get("files", []):
-
-                    if f.get("file_unique_id") == uid:
-
-                        f["must_read"] = True
-
-        data["must_read"]["files"] = []
-
-        changed = True
-
-    # -----------------------------------------------------
-
-    # Normalize links
-
-    # -----------------------------------------------------
+    # Missing links
 
     for key, default_link in DEFAULT_STATE["links"].items():
 
@@ -710,45 +514,73 @@ async def load_db():
 
             )
 
-            changed = True
+    # Users migration
 
-        if "items" not in data["links"][key]:
+    for uid, user in data["users"].items():
 
-            data["links"][key]["items"] = []
+        if "favorites" not in user:
 
-            changed = True
+            user["favorites"] = []
 
-    # -----------------------------------------------------
+        if "opened_tasks" not in user:
 
-    # Save migrations
+            user["opened_tasks"] = []
 
-    # -----------------------------------------------------
+        if "score" not in user:
 
-    if changed:
+            user["score"] = 0
 
-        await db_collection.update_one(
+        if "streak" not in user:
 
-            {"_id": DB_DOC_ID},
+            user["streak"] = 0
 
-            {
+    # Files migration
 
-                "$set": {
+    for cat_data in data["categories"].values():
 
-                    "data": data
+        for f in cat_data.get("files", []):
 
-                }
+            if "file_unique_id" not in f:
 
-            },
+                f["file_unique_id"] = (
 
-            upsert=True
+                    str(f.get("file_id", uuid.uuid4().hex))
 
-        )
+                    [-15:]
 
-        logger.info(
+                    + uuid.uuid4().hex[:5]
 
-            "🔄 MongoDB database migration completed"
+                )
 
-        )
+            if "tags" not in f:
+
+                f["tags"] = []
+
+            if "difficulty" not in f:
+
+                f["difficulty"] = None
+
+            if "must_read" not in f:
+
+                f["must_read"] = False
+
+    # Old must-read migration
+
+    if "files" in data.get("must_read", {}):
+
+        for mrf in data["must_read"]["files"]:
+
+            uid = mrf.get("file_unique_id")
+
+            for cat_data in data["categories"].values():
+
+                for f in cat_data.get("files", []):
+
+                    if f.get("file_unique_id") == uid:
+
+                        f["must_read"] = True
+
+        data["must_read"]["files"] = []
 
     return data
 
@@ -758,37 +590,21 @@ async def save_db(db_data):
 
         {"_id": DB_DOC_ID},
 
-        {
+        {"$set": {"data": db_data}},
 
-            "$set": {
-
-                "data": db_data
-
-            }
-
-        },
-
-        upsert=True
+        upsert=True,
 
     )
 
 async def save_submission(sub_id: str, data: dict):
 
-    clean_data = copy.deepcopy(data)
-
-    clean_data["_id"] = sub_id
-
     await submissions_collection.update_one(
 
         {"_id": sub_id},
 
-        {
+        {"$set": data},
 
-            "$set": clean_data
-
-        },
-
-        upsert=True
+        upsert=True,
 
     )
 
@@ -802,6 +618,28 @@ async def get_submission(sub_id: str) -> dict:
 
     return doc if doc else {}
 
+async def save_task_solution(solution_id: str, data: dict):
+
+    await task_solutions_collection.update_one(
+
+        {"_id": solution_id},
+
+        {"$set": data},
+
+        upsert=True,
+
+    )
+
+async def get_task_solution(solution_id: str) -> dict:
+
+    doc = await task_solutions_collection.find_one(
+
+        {"_id": solution_id}
+
+    )
+
+    return doc if doc else {}
+
 # =========================================================
 
 # FSM STATES
@@ -809,8 +647,6 @@ async def get_submission(sub_id: str) -> dict:
 # =========================================================
 
 class FileUpload(StatesGroup):
-
-    waiting_for_document = State()
 
     selecting_categories = State()
 
@@ -841,6 +677,10 @@ class TaskOfDayAdmin(StatesGroup):
     waiting_for_solution = State()
 
     waiting_for_date = State()
+
+class UserTaskSolution(StatesGroup):
+
+    waiting_for_solution = State()
 
 class BroadcastAdmin(StatesGroup):
 
@@ -1234,13 +1074,7 @@ def build_submission_action_kb(sub_id: str):
 
     )
 
-def get_file_view_keyboard(
-
-    uid: str,
-
-    user_id: int
-
-):
+def get_file_view_keyboard(uid: str, user_id: int):
 
     user = DATABASE["users"].get(
 
@@ -1564,6 +1398,178 @@ def get_file_edit_categories_kb(
 
 # =========================================================
 
+# DAILY TASK KEYBOARDS
+
+# =========================================================
+
+def get_task_keyboard(
+
+    date_str: str,
+
+    admin_view: bool = False
+
+):
+
+    builder = [
+
+        [
+
+            InlineKeyboardButton(
+
+                text="📝 Отправить решение",
+
+                callback_data=f"tsubmit:{date_str}"
+
+            )
+
+        ],
+
+        [
+
+            InlineKeyboardButton(
+
+                text="💡 Решение автора",
+
+                callback_data=f"th:{date_str}:sol"
+
+            )
+
+        ],
+
+        [
+
+            InlineKeyboardButton(
+
+                text="⭐ 1",
+
+                callback_data=f"tv:{date_str}:1"
+
+            ),
+
+            InlineKeyboardButton(
+
+                text="⭐ 2",
+
+                callback_data=f"tv:{date_str}:2"
+
+            ),
+
+            InlineKeyboardButton(
+
+                text="⭐ 3",
+
+                callback_data=f"tv:{date_str}:3"
+
+            ),
+
+            InlineKeyboardButton(
+
+                text="⭐ 4",
+
+                callback_data=f"tv:{date_str}:4"
+
+            ),
+
+            InlineKeyboardButton(
+
+                text="⭐ 5",
+
+                callback_data=f"tv:{date_str}:5"
+
+            )
+
+        ]
+
+    ]
+
+    if admin_view:
+
+        builder.append([
+
+            InlineKeyboardButton(
+
+                text="📊 Статистика задачи",
+
+                callback_data=f"ts:{date_str}"
+
+            )
+
+        ])
+
+    builder.append([
+
+        InlineKeyboardButton(
+
+            text="⬅️ Меню",
+
+            callback_data="menu:main"
+
+        )
+
+    ])
+
+    return InlineKeyboardMarkup(
+
+        inline_keyboard=builder
+
+    )
+
+def get_solution_rating_keyboard(solution_id: str):
+
+    return InlineKeyboardMarkup(
+
+        inline_keyboard=[
+
+            [
+
+                InlineKeyboardButton(
+
+                    text="⭐ 1",
+
+                    callback_data=f"solrate:{solution_id}:1"
+
+                ),
+
+                InlineKeyboardButton(
+
+                    text="⭐ 2",
+
+                    callback_data=f"solrate:{solution_id}:2"
+
+                ),
+
+                InlineKeyboardButton(
+
+                    text="⭐ 3",
+
+                    callback_data=f"solrate:{solution_id}:3"
+
+                ),
+
+                InlineKeyboardButton(
+
+                    text="⭐ 4",
+
+                    callback_data=f"solrate:{solution_id}:4"
+
+                ),
+
+                InlineKeyboardButton(
+
+                    text="⭐ 5",
+
+                    callback_data=f"solrate:{solution_id}:5"
+
+                )
+
+            ]
+
+        ]
+
+    )
+
+# =========================================================
+
 # INLINE SEARCH
 
 # =========================================================
@@ -1588,9 +1594,7 @@ async def inline_search(inline_query: InlineQuery):
 
                 description=(
 
-                    "Введите название файла, тему или хештег "
-
-                    "(например, #geometry)"
+                    "Введите название файла, тему или хештег"
 
                 ),
 
@@ -1628,17 +1632,9 @@ async def inline_search(inline_query: InlineQuery):
 
     ]
 
-    seen = set()
-
     for cat_data in DATABASE["categories"].values():
 
         for f in cat_data.get("files", []):
-
-            uid = f.get("file_unique_id")
-
-            if not uid or uid in seen:
-
-                continue
 
             haystack = (
 
@@ -1660,11 +1656,9 @@ async def inline_search(inline_query: InlineQuery):
 
             ):
 
-                seen.add(uid)
-
                 cap = (
 
-                    f"📄 **{f.get('caption', '')}**\n"
+                    f"📄 **{f.get('caption', 'Без названия')}**\n"
 
                     f"📌 Раздел: {cat_data['title']}"
 
@@ -1674,9 +1668,9 @@ async def inline_search(inline_query: InlineQuery):
 
                     cap += (
 
-                        "\n🏷 Теги: "
+                        f"\n🏷 Теги: "
 
-                        + " ".join(f["tags"])
+                        f"{' '.join(f['tags'])}"
 
                     )
 
@@ -1694,7 +1688,7 @@ async def inline_search(inline_query: InlineQuery):
 
                     InlineQueryResultCachedDocument(
 
-                        id=uid,
+                        id=f["file_unique_id"],
 
                         title=f.get(
 
@@ -1754,9 +1748,11 @@ async def cmd_start(
 
         "Я бот библиотеки matham.\n\n"
 
-        "🔎 **Поиск:** Просто напиши слово или хештег.\n"
+        "🔎 **Поиск:** Просто напиши слово.\n"
 
-        "🧩 **Задача дня:** новая олимпиадная задача каждый день.\n"
+        "🧩 **Задача дня:** новая олимпиадная задача.\n"
+
+        "📝 **Решение:** можешь отправить своё решение.\n"
 
         "⭐ **Must-read:** самые важные материалы.\n",
 
@@ -1856,106 +1852,6 @@ async def process_catalog(
 
 # =========================================================
 
-def get_task_keyboard(
-
-    date_str: str,
-
-    admin_view: bool = False
-
-):
-
-    builder = [
-
-        [
-
-            InlineKeyboardButton(
-
-                text="✅ Решение",
-
-                callback_data=f"th:{date_str}:sol"
-
-            )
-
-        ],
-
-        [
-
-            InlineKeyboardButton(
-
-                text="⭐ 1",
-
-                callback_data=f"tv:{date_str}:1"
-
-            ),
-
-            InlineKeyboardButton(
-
-                text="⭐ 2",
-
-                callback_data=f"tv:{date_str}:2"
-
-            ),
-
-            InlineKeyboardButton(
-
-                text="⭐ 3",
-
-                callback_data=f"tv:{date_str}:3"
-
-            ),
-
-            InlineKeyboardButton(
-
-                text="⭐ 4",
-
-                callback_data=f"tv:{date_str}:4"
-
-            ),
-
-            InlineKeyboardButton(
-
-                text="⭐ 5",
-
-                callback_data=f"tv:{date_str}:5"
-
-            )
-
-        ]
-
-    ]
-
-    if admin_view:
-
-        builder.append([
-
-            InlineKeyboardButton(
-
-                text="📊 Статистика задачи",
-
-                callback_data=f"ts:{date_str}"
-
-            )
-
-        ])
-
-    builder.append([
-
-        InlineKeyboardButton(
-
-            text="⬅️ Меню",
-
-            callback_data="menu:main"
-
-        )
-
-    ])
-
-    return InlineKeyboardMarkup(
-
-        inline_keyboard=builder
-
-    )
-
 async def send_daily_task(
 
     target,
@@ -1974,7 +1870,7 @@ async def send_daily_task(
 
     )
 
-    is_message = isinstance(
+    is_msg = isinstance(
 
         target,
 
@@ -2014,7 +1910,7 @@ async def send_daily_task(
 
         )
 
-        if is_message:
+        if is_msg:
 
             await target.answer(
 
@@ -2036,12 +1932,6 @@ async def send_daily_task(
 
         return
 
-    # -----------------------------------------------------
-
-    # Reward for opening today's task
-
-    # -----------------------------------------------------
-
     if date_str == get_yerevan_date():
 
         uid_str = str(user_id)
@@ -2052,15 +1942,11 @@ async def send_daily_task(
 
             {
 
-                "username": (
-
-                    target.from_user.username or ""
-
-                ),
+                "username": "",
 
                 "streak": 1,
 
-                "last_active": get_yerevan_date(),
+                "last_active": date_str,
 
                 "score": 0,
 
@@ -2098,7 +1984,9 @@ async def send_daily_task(
 
                     }
 
-                }
+                },
+
+                upsert=True,
 
             )
 
@@ -2110,19 +1998,13 @@ async def send_daily_task(
 
             )
 
-    # -----------------------------------------------------
-
-    # Build caption
-
-    # -----------------------------------------------------
-
     cap = (
 
         f"🧩 **Задача дня** ({date_str})"
 
     )
 
-    votes = task.setdefault(
+    votes = task.get(
 
         "votes",
 
@@ -2132,17 +2014,21 @@ async def send_daily_task(
 
     if votes:
 
-        avg = sum(
+        avg = (
 
-            votes.values()
+            sum(votes.values())
 
-        ) / len(votes)
+            / len(votes)
+
+        )
 
         cap += (
 
-            f"\n\n⭐ Оценка: {avg:.1f}/5"
+            f"\n\n⭐ Оценка: "
 
-            f" (Голосов: {len(votes)})"
+            f"{avg:.1f}/5 "
+
+            f"(Голосов: {len(votes)})"
 
         )
 
@@ -2154,7 +2040,7 @@ async def send_daily_task(
 
     )
 
-    if is_message:
+    if is_msg:
 
         await target.answer_photo(
 
@@ -2188,7 +2074,11 @@ async def send_daily_task(
 
 @dp.message(Command("task"))
 
-async def cmd_task(message: types.Message):
+async def cmd_task(
+
+    message: types.Message
+
+):
 
     await track_user_activity(
 
@@ -2220,6 +2110,12 @@ async def callback_task(
 
     await callback.answer()
 
+# =========================================================
+
+# TASK VOTING
+
+# =========================================================
+
 @dp.callback_query(F.data.startswith("tv:"))
 
 async def task_vote_handler(
@@ -2230,29 +2126,25 @@ async def task_vote_handler(
 
     try:
 
-        _, date_str, score_str = (
-
-            callback.data.split(":")
-
-        )
+        _, date_str, score_str = callback.data.split(":")
 
         score = int(score_str)
 
-    except (ValueError, AttributeError):
+    except Exception:
 
         return await callback.answer(
 
-            "❌ Ошибка.",
+            "Ошибка.",
 
             show_alert=True
 
         )
 
-    if score not in range(1, 6):
+    if score < 1 or score > 5:
 
         return await callback.answer(
 
-            "❌ Неверная оценка.",
+            "Неверная оценка.",
 
             show_alert=True
 
@@ -2288,13 +2180,7 @@ async def task_vote_handler(
 
     )
 
-    is_first_vote = uid_str not in votes
-
-    votes[uid_str] = score
-
-    await save_db(DATABASE)
-
-    if is_first_vote:
+    if uid_str not in votes:
 
         await award_points(
 
@@ -2303,6 +2189,10 @@ async def task_vote_handler(
             2
 
         )
+
+    votes[uid_str] = score
+
+    await save_db(DATABASE)
 
     avg = (
 
@@ -2354,6 +2244,12 @@ async def task_vote_handler(
 
     )
 
+# =========================================================
+
+# TASK AUTHOR SOLUTION
+
+# =========================================================
+
 @dp.callback_query(F.data.startswith("th:"))
 
 async def task_hint_handler(
@@ -2364,17 +2260,13 @@ async def task_hint_handler(
 
     try:
 
-        _, date_str, action = (
+        _, date_str, action = callback.data.split(":")
 
-            callback.data.split(":")
-
-        )
-
-    except ValueError:
+    except Exception:
 
         return await callback.answer(
 
-            "❌ Ошибка.",
+            "Ошибка.",
 
             show_alert=True
 
@@ -2390,13 +2282,13 @@ async def task_hint_handler(
 
         return await callback.answer(
 
-            "❌ Задача не найдена.",
+            "Ошибка.",
 
             show_alert=True
 
         )
 
-    solution = task.get(
+    val = task.get(
 
         "solution",
 
@@ -2404,37 +2296,663 @@ async def task_hint_handler(
 
     )
 
-    if not solution:
+    if not val:
+
+        val = (
+
+            "Админ пока не добавил решение 😔"
+
+        )
+
+    # Telegram callback alert ограничен по длине
+
+    if len(val) > 190:
+
+        val = val[:187] + "..."
+
+    await callback.answer(
+
+        val,
+
+        show_alert=True
+
+    )
+
+# =========================================================
+
+# USER TASK SOLUTION SUBMISSION
+
+# =========================================================
+
+@dp.callback_query(F.data.startswith("tsubmit:"))
+
+async def task_solution_start(
+
+    callback: types.CallbackQuery,
+
+    state: FSMContext
+
+):
+
+    date_str = callback.data.split(":", 1)[1]
+
+    task = DATABASE["daily_tasks"].get(
+
+        date_str
+
+    )
+
+    if not task:
 
         return await callback.answer(
 
-            "Решение пока не добавлено 😔",
+            "Задача не найдена.",
 
             show_alert=True
 
         )
 
-    # Telegram callback alert is limited.
+    await state.set_state(
 
-    if len(solution) <= 190:
+        UserTaskSolution.waiting_for_solution
 
-        return await callback.answer(
+    )
 
-            solution,
+    await state.update_data(
 
-            show_alert=True
+        task_date=date_str
 
-        )
+    )
 
     await callback.message.answer(
 
-        f"📝 **Решение задачи {date_str}**\n\n"
+        "📝 **Отправка решения**\n\n"
 
-        f"{solution}"
+        "Пришли своё решение текстом "
+
+        "или фотографией.\n\n"
+
+        "Для отмены напиши `/cancel`."
 
     )
 
     await callback.answer()
+
+@dp.message(
+
+    UserTaskSolution.waiting_for_solution,
+
+    Command("cancel")
+
+)
+
+async def cancel_task_solution(
+
+    message: types.Message,
+
+    state: FSMContext
+
+):
+
+    await state.clear()
+
+    await message.answer(
+
+        "❌ Отправка решения отменена."
+
+    )
+
+@dp.message(
+
+    UserTaskSolution.waiting_for_solution,
+
+    F.text
+
+)
+
+async def task_solution_text(
+
+    message: types.Message,
+
+    state: FSMContext
+
+):
+
+    text = message.text.strip()
+
+    if not text:
+
+        return await message.answer(
+
+            "❌ Решение не может быть пустым."
+
+        )
+
+    data = await state.get_data()
+
+    date_str = data.get(
+
+        "task_date"
+
+    )
+
+    if not date_str:
+
+        await state.clear()
+
+        return await message.answer(
+
+            "❌ Сессия решения устарела."
+
+        )
+
+    solution_id = uuid.uuid4().hex[:12]
+
+    username = (
+
+        f"@{message.from_user.username}"
+
+        if message.from_user.username
+
+        else message.from_user.full_name
+
+    )
+
+    solution_data = {
+
+        "_id": solution_id,
+
+        "solution_id": solution_id,
+
+        "task_date": date_str,
+
+        "user_id": message.from_user.id,
+
+        "username": username,
+
+        "type": "text",
+
+        "text": text,
+
+        "file_id": None,
+
+        "status": "pending",
+
+        "rating": None,
+
+        "created_at": datetime.now(
+
+            timezone.utc
+
+        ).isoformat(),
+
+    }
+
+    await save_task_solution(
+
+        solution_id,
+
+        solution_data
+
+    )
+
+    await state.clear()
+
+    await award_points(
+
+        message.from_user.id,
+
+        5
+
+    )
+
+    await message.answer(
+
+        "✅ Решение отправлено админу!\n"
+
+        "Ты получил +5 очков за отправку."
+
+    )
+
+    await notify_admins_about_solution(
+
+        solution_data
+
+    )
+
+@dp.message(
+
+    UserTaskSolution.waiting_for_solution,
+
+    F.photo
+
+)
+
+async def task_solution_photo(
+
+    message: types.Message,
+
+    state: FSMContext
+
+):
+
+    data = await state.get_data()
+
+    date_str = data.get(
+
+        "task_date"
+
+    )
+
+    if not date_str:
+
+        await state.clear()
+
+        return await message.answer(
+
+            "❌ Сессия решения устарела."
+
+        )
+
+    solution_id = uuid.uuid4().hex[:12]
+
+    username = (
+
+        f"@{message.from_user.username}"
+
+        if message.from_user.username
+
+        else message.from_user.full_name
+
+    )
+
+    caption = (
+
+        message.caption or ""
+
+    ).strip()
+
+    solution_data = {
+
+        "_id": solution_id,
+
+        "solution_id": solution_id,
+
+        "task_date": date_str,
+
+        "user_id": message.from_user.id,
+
+        "username": username,
+
+        "type": "photo",
+
+        "text": caption,
+
+        "file_id": message.photo[-1].file_id,
+
+        "status": "pending",
+
+        "rating": None,
+
+        "created_at": datetime.now(
+
+            timezone.utc
+
+        ).isoformat(),
+
+    }
+
+    await save_task_solution(
+
+        solution_id,
+
+        solution_data
+
+    )
+
+    await state.clear()
+
+    await award_points(
+
+        message.from_user.id,
+
+        5
+
+    )
+
+    await message.answer(
+
+        "✅ Фото решения отправлено админу!\n"
+
+        "Ты получил +5 очков за отправку."
+
+    )
+
+    await notify_admins_about_solution(
+
+        solution_data
+
+    )
+
+async def notify_admins_about_solution(
+
+    solution_data: dict
+
+):
+
+    solution_id = solution_data["solution_id"]
+
+    date_str = solution_data["task_date"]
+
+    username = solution_data["username"]
+
+    header = (
+
+        "📝 **Новое решение задачи дня**\n\n"
+
+        f"📅 Дата: `{date_str}`\n"
+
+        f"👤 Автор: {username}\n"
+
+        f"🆔 ID: `{solution_id}`"
+
+    )
+
+    keyboard = get_solution_rating_keyboard(
+
+        solution_id
+
+    )
+
+    for admin_id in ADMIN_IDS:
+
+        try:
+
+            if solution_data["type"] == "photo":
+
+                caption = header
+
+                if solution_data.get("text"):
+
+                    caption += (
+
+                        "\n\n💬 Комментарий:\n"
+
+                        + solution_data["text"]
+
+                    )
+
+                await bot.send_photo(
+
+                    admin_id,
+
+                    photo=solution_data["file_id"],
+
+                    caption=caption,
+
+                    reply_markup=keyboard
+
+                )
+
+            else:
+
+                text = (
+
+                    header
+
+                    + "\n\n"
+
+                    + "💬 Решение:\n"
+
+                    + solution_data["text"]
+
+                )
+
+                await bot.send_message(
+
+                    admin_id,
+
+                    text,
+
+                    reply_markup=keyboard
+
+                )
+
+        except Exception as e:
+
+            logger.exception(
+
+                "Не удалось отправить решение админу %s: %s",
+
+                admin_id,
+
+                e
+
+            )
+
+# =========================================================
+
+# ADMIN RATING OF USER SOLUTION
+
+# =========================================================
+
+@dp.callback_query(F.data.startswith("solrate:"))
+
+async def admin_rate_solution(
+
+    callback: types.CallbackQuery
+
+):
+
+    if not is_admin(
+
+        callback.from_user.id
+
+    ):
+
+        return await callback.answer(
+
+            "⛔ Нет доступа.",
+
+            show_alert=True
+
+        )
+
+    try:
+
+        _, solution_id, rating_str = (
+
+            callback.data.split(":")
+
+        )
+
+        rating = int(rating_str)
+
+    except Exception:
+
+        return await callback.answer(
+
+            "Ошибка.",
+
+            show_alert=True
+
+        )
+
+    if rating < 1 or rating > 5:
+
+        return await callback.answer(
+
+            "Оценка должна быть от 1 до 5.",
+
+            show_alert=True
+
+        )
+
+    solution = await get_task_solution(
+
+        solution_id
+
+    )
+
+    if not solution:
+
+        return await callback.answer(
+
+            "Решение не найдено.",
+
+            show_alert=True
+
+        )
+
+    if solution.get("rating") is not None:
+
+        return await callback.answer(
+
+            "Это решение уже оценено.",
+
+            show_alert=True
+
+        )
+
+    solution["rating"] = rating
+
+    solution["status"] = "rated"
+
+    solution["rated_by"] = callback.from_user.id
+
+    solution["rated_at"] = datetime.now(
+
+        timezone.utc
+
+    ).isoformat()
+
+    await save_task_solution(
+
+        solution_id,
+
+        solution
+
+    )
+
+    # Очки за оценку решения
+
+    points_by_rating = {
+
+        1: 2,
+
+        2: 4,
+
+        3: 6,
+
+        4: 8,
+
+        5: 10,
+
+    }
+
+    points = points_by_rating[rating]
+
+    await award_points(
+
+        solution["user_id"],
+
+        points
+
+    )
+
+    # Убираем кнопки
+
+    try:
+
+        if callback.message.photo:
+
+            old_caption = (
+
+                callback.message.caption
+
+                or ""
+
+            )
+
+            await callback.message.edit_caption(
+
+                caption=(
+
+                    old_caption
+
+                    + f"\n\n✅ Оценено админом: "
+
+                    f"{rating}/5 ⭐"
+
+                ),
+
+                reply_markup=None
+
+            )
+
+        else:
+
+            old_text = (
+
+                callback.message.text
+
+                or ""
+
+            )
+
+            await callback.message.edit_text(
+
+                old_text
+
+                + f"\n\n✅ Оценено админом: "
+
+                f"{rating}/5 ⭐",
+
+                reply_markup=None
+
+            )
+
+    except Exception:
+
+        pass
+
+    try:
+
+        await bot.send_message(
+
+            solution["user_id"],
+
+            (
+
+                "🎉 **Твоё решение проверено!**\n\n"
+
+                f"📅 Задача: {solution['task_date']}\n"
+
+                f"⭐ Оценка: {rating}/5\n"
+
+                f"🏆 Получено очков: +{points}"
+
+            )
+
+        )
+
+    except Exception:
+
+        pass
+
+    await callback.answer(
+
+        f"Оценка {rating}/5 сохранена.",
+
+        show_alert=True
+
+    )
+
+# =========================================================
+
+# TASK STATISTICS
+
+# =========================================================
 
 @dp.callback_query(F.data.startswith("ts:"))
 
@@ -2458,23 +2976,7 @@ async def task_stats_admin(
 
         )
 
-    try:
-
-        _, date_str = (
-
-            callback.data.split(":")
-
-        )
-
-    except ValueError:
-
-        return await callback.answer(
-
-            "❌ Ошибка.",
-
-            show_alert=True
-
-        )
+    _, date_str = callback.data.split(":")
 
     task = DATABASE["daily_tasks"].get(
 
@@ -2500,15 +3002,15 @@ async def task_stats_admin(
 
     )
 
-    if not votes:
+    avg = (
 
-        return await callback.answer(
+        sum(votes.values()) / len(votes)
 
-            "Оценок пока нет.",
+        if votes
 
-            show_alert=True
+        else 0
 
-        )
+    )
 
     counts = {
 
@@ -2530,31 +3032,61 @@ async def task_stats_admin(
 
             counts[value] += 1
 
-    avg = (
+    solutions_count = await (
 
-        sum(votes.values())
+        task_solutions_collection.count_documents(
 
-        / len(votes)
+            {
+
+                "task_date": date_str
+
+            }
+
+        )
+
+    )
+
+    rated_count = await (
+
+        task_solutions_collection.count_documents(
+
+            {
+
+                "task_date": date_str,
+
+                "rating": {
+
+                    "$ne": None
+
+                }
+
+            }
+
+        )
 
     )
 
     text = (
 
-        f"📊 Статистика за {date_str}\n"
+        f"📊 **Статистика за {date_str}**\n\n"
 
-        f"Всего голосов: {len(votes)}\n"
+        f"👥 Голосов: {len(votes)}\n"
 
-        f"Средняя: {avg:.2f}\n"
+        f"⭐ Средняя: {avg:.2f}/5\n\n"
 
-        f"5⭐: {counts[5]} | "
+        f"5⭐: {counts[5]}\n"
 
-        f"4⭐: {counts[4]} | "
+        f"4⭐: {counts[4]}\n"
 
         f"3⭐: {counts[3]}\n"
 
-        f"2⭐: {counts[2]} | "
+        f"2⭐: {counts[2]}\n"
 
-        f"1⭐: {counts[1]}"
+        f"1⭐: {counts[1]}\n\n"
+
+        f"📝 Решений пользователей: {solutions_count}\n"
+
+        f"✅ Проверено: {rated_count}"
 
     )
 
@@ -2582,31 +3114,23 @@ async def mustread_main(
 
     files = []
 
-    seen = set()
-
     for cat_data in DATABASE["categories"].values():
 
         for f in cat_data.get("files", []):
 
-            uid = f.get(
+            if f.get("must_read"):
 
-                "file_unique_id"
+                if not any(
 
-            )
+                    x["file_unique_id"]
 
-            if (
+                    == f["file_unique_id"]
 
-                f.get("must_read")
+                    for x in files
 
-                and uid
+                ):
 
-                and uid not in seen
-
-            ):
-
-                seen.add(uid)
-
-                files.append(f)
+                    files.append(f)
 
     if not files:
 
@@ -2642,7 +3166,7 @@ async def mustread_main(
 
     for f in files[:90]:
 
-        title = f.get(
+        caption = f.get(
 
             "caption",
 
@@ -2654,13 +3178,9 @@ async def mustread_main(
 
             InlineKeyboardButton(
 
-                text=f"📄 {title[:35]}",
+                text=f"📄 {caption[:35]}",
 
-                callback_data=(
-
-                    f"fv:{f['file_unique_id']}"
-
-                )
+                callback_data=f"fv:{f['file_unique_id']}"
 
             )
 
@@ -2736,8 +3256,6 @@ async def cb_fav(
 
     await show_favorites(callback)
 
-    await callback.answer()
-
 async def show_favorites(target):
 
     user_id = target.from_user.id
@@ -2764,9 +3282,7 @@ async def show_favorites(target):
 
             "❤️ **Избранное**\n\n"
 
-            "Тут пока пусто. "
-
-            "Добавляй файлы с помощью кнопки под ними!"
+            "Тут пока пусто."
 
         )
 
@@ -2830,19 +3346,11 @@ async def show_favorites(target):
 
             valid_count += 1
 
-            title = f.get(
-
-                "caption",
-
-                "Без названия"
-
-            )
-
             builder.append([
 
                 InlineKeyboardButton(
 
-                    text=f"📄 {title[:35]}",
+                    text=f"📄 {f.get('caption', 'Файл')[:35]}",
 
                     callback_data=f"fv:{uid}"
 
@@ -2864,7 +3372,7 @@ async def show_favorites(target):
 
     text = (
 
-        f"❤️ **Твое избранное** "
+        f"❤️ **Твоё избранное** "
 
         f"({valid_count} шт.):"
 
@@ -2918,16 +3426,6 @@ async def toggle_fav(
 
     )[1]
 
-    if not get_file_by_uid(uid):
-
-        return await callback.answer(
-
-            "❌ Файл не найден.",
-
-            show_alert=True
-
-        )
-
     user_id_str = str(
 
         callback.from_user.id
@@ -2944,27 +3442,7 @@ async def toggle_fav(
 
         )
 
-    user = DATABASE["users"].setdefault(
-
-        user_id_str,
-
-        {
-
-            "username": "",
-
-            "streak": 1,
-
-            "last_active": get_yerevan_date(),
-
-            "score": 0,
-
-            "favorites": [],
-
-            "opened_tasks": []
-
-        }
-
-    )
+    user = DATABASE["users"][user_id_str]
 
     favs = user.setdefault(
 
@@ -2984,11 +3462,11 @@ async def toggle_fav(
 
             {
 
-                "$set": {
+                "$pull": {
 
                     f"data.users.{user_id_str}.favorites":
 
-                        favs
+                        uid
 
                 }
 
@@ -3012,11 +3490,11 @@ async def toggle_fav(
 
             {
 
-                "$set": {
+                "$addToSet": {
 
                     f"data.users.{user_id_str}.favorites":
 
-                        favs
+                        uid
 
                 }
 
@@ -3090,8 +3568,6 @@ async def cb_rating(
 
     await show_rating(callback)
 
-    await callback.answer()
-
 async def show_rating(target):
 
     users = [
@@ -3162,7 +3638,7 @@ async def show_rating(target):
 
         text += (
 
-            f"{medal} {name} - "
+            f"{medal} {name} — "
 
             f"{u.get('score', 0)} очков\n"
 
@@ -3262,7 +3738,7 @@ async def show_rating(target):
 
 # =========================================================
 
-# RANDOM CHALLENGE
+# RANDOM / CHALLENGE
 
 # =========================================================
 
@@ -3476,27 +3952,9 @@ async def process_random(
 
     all_files = []
 
-    seen = set()
-
     for cat_data in DATABASE["categories"].values():
 
-        for f in cat_data.get(
-
-            "files",
-
-            []
-
-        ):
-
-            uid = f.get(
-
-                "file_unique_id"
-
-            )
-
-            if not uid or uid in seen:
-
-                continue
+        for f in cat_data.get("files", []):
 
             if (
 
@@ -3506,27 +3964,35 @@ async def process_random(
 
             ):
 
-                seen.add(uid)
+                if not any(
 
-                all_files.append(
+                    x[0]["file_unique_id"]
 
-                    (
+                    == f["file_unique_id"]
 
-                        f,
+                    for x in all_files
 
-                        cat_data["title"]
+                ):
+
+                    all_files.append(
+
+                        (
+
+                            f,
+
+                            cat_data["title"]
+
+                        )
 
                     )
-
-                )
 
     if not all_files:
 
         msg = (
 
-            "К сожалению, файлов такой "
+            "К сожалению, файлов "
 
-            "сложности пока нет 😔"
+            "такой сложности пока нет 😔"
 
         )
 
@@ -3542,11 +4008,7 @@ async def process_random(
 
         else:
 
-            await target.message.edit_text(
-
-                msg
-
-            )
+            await target.message.edit_text(msg)
 
         return
 
@@ -3572,15 +4034,11 @@ async def process_random(
 
     )
 
-    if selected_file.get(
-
-        "difficulty"
-
-    ):
+    if selected_file.get("difficulty"):
 
         text += (
 
-            "\nСложность: "
+            f"\nСложность: "
 
             f"{selected_file['difficulty'].upper()}"
 
@@ -3604,7 +4062,7 @@ async def process_random(
 
                 f"📄 "
 
-                f"{selected_file['caption']}"
+                f"{selected_file.get('caption', 'Файл')}"
 
             ),
 
@@ -3636,7 +4094,7 @@ async def process_random(
 
                 f"📄 "
 
-                f"{selected_file['caption']}"
+                f"{selected_file.get('caption', 'Файл')}"
 
             ),
 
@@ -3652,7 +4110,7 @@ async def process_random(
 
 # =========================================================
 
-# CATEGORIES
+# CATEGORIES & FILES
 
 # =========================================================
 
@@ -3682,7 +4140,7 @@ async def process_category_click(
 
         return await callback.answer(
 
-            "❌ Раздел не найден.",
+            "Раздел не найден.",
 
             show_alert=True
 
@@ -3722,21 +4180,7 @@ async def process_category_click(
 
     builder = []
 
-    seen = set()
-
     for item in cat_data["files"][:90]:
-
-        uid = item.get(
-
-            "file_unique_id"
-
-        )
-
-        if not uid or uid in seen:
-
-            continue
-
-        seen.add(uid)
 
         caption = item.get(
 
@@ -3768,7 +4212,7 @@ async def process_category_click(
 
                 text=btn_text,
 
-                callback_data=f"fv:{uid}"
+                callback_data=f"fv:{item['file_unique_id']}"
 
             )
 
@@ -3856,9 +4300,9 @@ async def view_file(
 
         cap += (
 
-            "\n🏷 Теги: "
+            f"\n🏷 Теги: "
 
-            + " ".join(tags)
+            f"{' '.join(tags)}"
 
         )
 
@@ -3866,7 +4310,7 @@ async def view_file(
 
         cap += (
 
-            "\n📚 Уровень: "
+            f"\n📚 Уровень: "
 
             f"{f['difficulty']}"
 
@@ -3894,13 +4338,35 @@ async def view_file(
 
 # =========================================================
 
-# TEXT SEARCH
+# GLOBAL TEXT SEARCH
+
+# =========================================================
+
+#
+
+# ВАЖНО:
+
+# StateFilter(None) означает:
+
+# поиск работает ТОЛЬКО если пользователь
+
+# сейчас не находится ни в одном FSM-состоянии.
+
+#
+
+# Именно это чинит проблему:
+
+# фото -> решение -> поиск.
 
 # =========================================================
 
 @dp.message(
 
-    F.text & ~F.text.startswith("/")
+    StateFilter(None),
+
+    F.text,
+
+    ~F.text.startswith("/")
 
 )
 
@@ -3946,27 +4412,9 @@ async def global_search_handler(
 
     found_files = []
 
-    seen_files = set()
-
     for cat_data in DATABASE["categories"].values():
 
-        for f in cat_data.get(
-
-            "files",
-
-            []
-
-        ):
-
-            uid = f.get(
-
-                "file_unique_id"
-
-            )
-
-            if not uid or uid in seen_files:
-
-                continue
+        for f in cat_data.get("files", []):
 
             haystack = (
 
@@ -3986,39 +4434,41 @@ async def global_search_handler(
 
             if all(
 
-                w in haystack
+                word in haystack
 
-                for w in words
+                for word in words
 
             ):
 
-                seen_files.add(uid)
+                if not any(
 
-                found_files.append(
+                    x[0]["file_unique_id"]
 
-                    (
+                    == f["file_unique_id"]
 
-                        f,
+                    for x in found_files
 
-                        cat_data["title"]
+                ):
+
+                    found_files.append(
+
+                        (
+
+                            f,
+
+                            cat_data["title"]
+
+                        )
 
                     )
-
-                )
 
     found_links = []
 
     for sec in DATABASE["links"].values():
 
-        for item in sec.get(
+        for item in sec.get("items", []):
 
-            "items",
-
-            []
-
-        ):
-
-            title = item.get(
+            item_title = item.get(
 
                 "title",
 
@@ -4028,17 +4478,13 @@ async def global_search_handler(
 
             if all(
 
-                w in title
+                word in item_title
 
-                for w in words
+                for word in words
 
             ):
 
-                found_links.append(
-
-                    item
-
-                )
+                found_links.append(item)
 
     if not found_files and not found_links:
 
@@ -4046,9 +4492,7 @@ async def global_search_handler(
 
             "🔍 Ничего не найдено.\n"
 
-            "Попробуй другое слово "
-
-            "или открой меню:",
+            "Попробуй другое слово или открой меню:",
 
             reply_markup=get_main_menu_keyboard(
 
@@ -4076,7 +4520,7 @@ async def global_search_handler(
 
                 caption=(
 
-                    f"📄 **{f['caption']}**\n"
+                    f"📄 **{f.get('caption', 'Файл')}**\n"
 
                     f"📌 {cat_title}"
 
@@ -4098,10 +4542,6 @@ async def global_search_handler(
 
         for item in found_links[:10]:
 
-            if not item.get("url"):
-
-                continue
-
             builder.append([
 
                 InlineKeyboardButton(
@@ -4114,27 +4554,31 @@ async def global_search_handler(
 
                     ),
 
-                    url=item["url"]
+                    url=item.get(
+
+                        "url",
+
+                        ""
+
+                    )
 
                 )
 
             ])
 
-        if builder:
+        await message.answer(
 
-            await message.answer(
+            f"🔗 Найдено ссылок: "
 
-                f"🔗 Найдено ссылок: "
+            f"**{len(found_links)}**",
 
-                f"**{len(found_links)}**",
+            reply_markup=InlineKeyboardMarkup(
 
-                reply_markup=InlineKeyboardMarkup(
-
-                    inline_keyboard=builder
-
-                )
+                inline_keyboard=builder
 
             )
+
+        )
 
 # =========================================================
 
@@ -4268,6 +4712,12 @@ async def admin_panel(
 
     await callback.answer()
 
+# =========================================================
+
+# ADMIN STATS
+
+# =========================================================
+
 @dp.callback_query(F.data == "admin:stats")
 
 async def admin_stats(
@@ -4290,53 +4740,37 @@ async def admin_stats(
 
         )
 
-    files_count = get_unique_file_count()
+    unique_files = set()
 
-    must_read_uids = set()
+    must_read_files = set()
 
-    for cat_data in DATABASE["categories"].values():
+    for c in DATABASE["categories"].values():
 
-        for f in cat_data.get(
+        for f in c.get("files", []):
 
-            "files",
+            uid = f.get(
 
-            []
+                "file_unique_id"
 
-        ):
+            )
 
-            if f.get("must_read"):
+            if uid:
 
-                uid = f.get(
+                unique_files.add(uid)
 
-                    "file_unique_id"
+                if f.get("must_read"):
 
-                )
-
-                if uid:
-
-                    must_read_uids.add(uid)
-
-    must_read_count = len(
-
-        must_read_uids
-
-    )
+                    must_read_files.add(uid)
 
     links_count = sum(
 
         len(
 
-            section.get(
-
-                "items",
-
-                []
-
-            )
+            s.get("items", [])
 
         )
 
-        for section in DATABASE["links"].values()
+        for s in DATABASE["links"].values()
 
     )
 
@@ -4362,21 +4796,49 @@ async def admin_stats(
 
     )
 
+    total_solutions = await (
+
+        task_solutions_collection.count_documents({})
+
+    )
+
+    rated_solutions = await (
+
+        task_solutions_collection.count_documents(
+
+            {
+
+                "rating": {
+
+                    "$ne": None
+
+                }
+
+            }
+
+        )
+
+    )
+
     text = (
 
         "📊 **Статистика**\n\n"
 
-        f"👥 Пользователей: {users_count} "
+        f"👥 Пользователей: {users_count}\n"
 
-        f"(Активных: {active_users})\n"
+        f"🔥 Активных: {active_users}\n"
 
-        f"📚 Уникальных файлов: {files_count}\n"
+        f"📚 Уникальных файлов: {len(unique_files)}\n"
 
-        f"⭐ Must-read: {must_read_count}\n"
+        f"⭐ Must-read: {len(must_read_files)}\n"
 
         f"🔗 Ссылок: {links_count}\n"
 
-        f"🎯 Задач дня в базе: {tasks_count}\n"
+        f"🎯 Задач дня: {tasks_count}\n"
+
+        f"📝 Решений пользователей: {total_solutions}\n"
+
+        f"✅ Проверено решений: {rated_solutions}"
 
     )
 
@@ -4410,7 +4872,7 @@ async def admin_stats(
 
 # =========================================================
 
-# BROADCAST
+# ADMIN BROADCAST
 
 # =========================================================
 
@@ -4450,11 +4912,39 @@ async def admin_broadcast_start(
 
         "всем пользователям бота.\n\n"
 
-        "Для отмены напиши 'отмена'."
+        "Можно отправить текст, фото, видео "
+
+        "или документ.\n\n"
+
+        "Для отмены напиши `/cancel`."
 
     )
 
     await callback.answer()
+
+@dp.message(
+
+    BroadcastAdmin.waiting_for_message,
+
+    Command("cancel")
+
+)
+
+async def broadcast_cancel_command(
+
+    message: types.Message,
+
+    state: FSMContext
+
+):
+
+    await state.clear()
+
+    await message.answer(
+
+        "❌ Рассылка отменена."
+
+    )
 
 @dp.message(
 
@@ -4477,22 +4967,6 @@ async def admin_broadcast_msg(
     ):
 
         return
-
-    if (
-
-        message.text
-
-        and message.text.lower() == "отмена"
-
-    ):
-
-        await state.clear()
-
-        return await message.answer(
-
-            "❌ Рассылка отменена."
-
-        )
 
     await state.update_data(
 
@@ -4600,11 +5074,11 @@ async def broadcast_confirm(
 
     await state.clear()
 
-    if not msg_id or not chat_id:
+    if not msg_id:
 
         return await callback.answer(
 
-            "Ошибка данных рассылки.",
+            "Ошибка.",
 
             show_alert=True
 
@@ -4678,7 +5152,7 @@ async def broadcast_confirm(
 
     await callback.message.answer(
 
-        "📢 **Рассылка завершена!**\n"
+        "📢 **Рассылка завершена!**\n\n"
 
         f"✅ Успешно: {success}\n"
 
@@ -4686,9 +5160,11 @@ async def broadcast_confirm(
 
     )
 
+    await callback.answer()
+
 # =========================================================
 
-# DAILY TASK ADMIN
+# ADMIN DAILY TASK MANAGEMENT
 
 # =========================================================
 
@@ -4780,6 +5256,8 @@ async def adm_task_add(
 
         )
 
+    await state.clear()
+
     await state.set_state(
 
         TaskOfDayAdmin.waiting_for_photo
@@ -4788,11 +5266,17 @@ async def adm_task_add(
 
     await callback.message.answer(
 
-        "Отправь ФОТО для задачи дня."
+        "📸 Отправь **ФОТО** для задачи дня."
 
     )
 
     await callback.answer()
+
+# ---------------------------------------------------------
+
+# ADMIN TASK PHOTO
+
+# ---------------------------------------------------------
 
 @dp.message(
 
@@ -4832,11 +5316,47 @@ async def adm_task_photo(
 
     await message.answer(
 
-        "Отправь решение "
+        "✅ Фото получено.\n\n"
 
-        "(или напиши '-' чтобы пропустить)."
+        "📝 Теперь отправь **решение задачи**.\n\n"
+
+        "Если решения нет - напиши `-`."
 
     )
+
+# Если вместо фото отправили что-то другое
+
+@dp.message(
+
+    TaskOfDayAdmin.waiting_for_photo
+
+)
+
+async def adm_task_photo_invalid(
+
+    message: types.Message
+
+):
+
+    if not is_admin(
+
+        message.from_user.id
+
+    ):
+
+        return
+
+    await message.answer(
+
+        "⚠️ Сейчас я жду именно **фото** задачи."
+
+    )
+
+# ---------------------------------------------------------
+
+# ADMIN TASK SOLUTION
+
+# ---------------------------------------------------------
 
 @dp.message(
 
@@ -4862,15 +5382,11 @@ async def adm_task_sol(
 
         return
 
-    sol = (
+    sol = message.text.strip()
 
-        ""
+    if sol == "-":
 
-        if message.text.strip() == "-"
-
-        else message.text.strip()
-
-    )
+        sol = ""
 
     await state.update_data(
 
@@ -4888,13 +5404,21 @@ async def adm_task_sol(
 
     await message.answer(
 
-        "Отправь дату в формате YYYY-MM-DD.\n"
+        "✅ Решение получено.\n\n"
 
-        f"Или напиши 'сегодня' "
+        f"📅 Отправь дату в формате `YYYY-MM-DD`.\n"
+
+        f"Или напиши `сегодня` "
 
         f"(сохранится на {today})."
 
     )
+
+# ---------------------------------------------------------
+
+# ADMIN TASK DATE
+
+# ---------------------------------------------------------
 
 @dp.message(
 
@@ -4942,15 +5466,25 @@ async def adm_task_date(
 
             "❌ Неверный формат.\n"
 
-            "Используй YYYY-MM-DD "
+            "Используй `YYYY-MM-DD` "
 
-            "или 'сегодня'."
+            "или `сегодня`."
 
         )
 
     data = await state.get_data()
 
-    await state.clear()
+    if not data.get("photo_id"):
+
+        await state.clear()
+
+        return await message.answer(
+
+            "❌ Фото задачи потерялось. "
+
+            "Начни добавление заново."
+
+        )
 
     DATABASE["daily_tasks"][date_str] = {
 
@@ -4970,23 +5504,87 @@ async def adm_task_date(
 
     }
 
-    await save_db(
+    await save_db(DATABASE)
 
-        DATABASE
-
-    )
+    await state.clear()
 
     await message.answer(
 
-        f"✅ Задача на {date_str} "
+        f"✅ **Задача на {date_str} сохранена!**\n\n"
 
-        "успешно сохранена!"
+        "Теперь пользователи смогут:\n"
+
+        "📝 отправлять свои решения\n"
+
+        "⭐ оценивать задачу\n"
+
+        "👑 а ты сможешь оценивать их решения."
+
+    )
+
+# Invalid input while waiting for solution
+
+@dp.message(
+
+    TaskOfDayAdmin.waiting_for_solution
+
+)
+
+async def adm_task_solution_invalid(
+
+    message: types.Message
+
+):
+
+    if not is_admin(
+
+        message.from_user.id
+
+    ):
+
+        return
+
+    await message.answer(
+
+        "⚠️ Сейчас я жду текст решения.\n"
+
+        "Если решения нет - напиши `-`."
+
+    )
+
+# Invalid input while waiting for date
+
+@dp.message(
+
+    TaskOfDayAdmin.waiting_for_date
+
+)
+
+async def adm_task_date_invalid(
+
+    message: types.Message
+
+):
+
+    if not is_admin(
+
+        message.from_user.id
+
+    ):
+
+        return
+
+    await message.answer(
+
+        "⚠️ Сейчас я жду дату в формате "
+
+        "`YYYY-MM-DD` или `сегодня`."
 
     )
 
 # =========================================================
 
-# FILE EDITING
+# ADMIN FILE EDITING
 
 # =========================================================
 
@@ -5000,79 +5598,13 @@ def update_file_everywhere(
 
 ):
 
-    for cat_data in DATABASE["categories"].values():
+    for cat in DATABASE["categories"].values():
 
-        for f in cat_data.get(
+        for f in cat.get("files", []):
 
-            "files",
-
-            []
-
-        ):
-
-            if f.get(
-
-                "file_unique_id"
-
-            ) == uid:
+            if f.get("file_unique_id") == uid:
 
                 f[key] = value
-
-def replace_file_everywhere(
-
-    old_uid: str,
-
-    new_file_id: str,
-
-    new_uid: str
-
-):
-
-    for cat_data in DATABASE["categories"].values():
-
-        for f in cat_data.get(
-
-            "files",
-
-            []
-
-        ):
-
-            if f.get(
-
-                "file_unique_id"
-
-            ) == old_uid:
-
-                f["file_id"] = new_file_id
-
-                f["file_unique_id"] = new_uid
-
-    # Update favorites
-
-    for user in DATABASE["users"].values():
-
-        favorites = user.get(
-
-            "favorites",
-
-            []
-
-        )
-
-        if old_uid in favorites:
-
-            user["favorites"] = [
-
-                new_uid
-
-                if x == old_uid
-
-                else x
-
-                for x in favorites
-
-            ]
 
 @dp.callback_query(F.data.startswith("fe_m:"))
 
@@ -5129,14 +5661,6 @@ async def fe_close(
     callback: types.CallbackQuery
 
 ):
-
-    if not is_admin(
-
-        callback.from_user.id
-
-    ):
-
-        return
 
     try:
 
@@ -5202,11 +5726,7 @@ async def fe_toggle_mustread(
 
     )
 
-    await save_db(
-
-        DATABASE
-
-    )
+    await save_db(DATABASE)
 
     await callback.message.edit_reply_markup(
 
@@ -5248,16 +5768,6 @@ async def fe_diff_menu(
 
     )[1]
 
-    if not get_file_by_uid(uid):
-
-        return await callback.answer(
-
-            "Файл не найден.",
-
-            show_alert=True
-
-        )
-
     await callback.message.edit_reply_markup(
 
         reply_markup=get_difficulty_keyboard(
@@ -5286,33 +5796,11 @@ async def fe_set_diff(
 
         return
 
-    try:
+    _, uid, diff = callback.data.split(
 
-        _, uid, diff = (
+        ":"
 
-            callback.data.split(":")
-
-        )
-
-    except ValueError:
-
-        return await callback.answer(
-
-            "Ошибка.",
-
-            show_alert=True
-
-        )
-
-    if not get_file_by_uid(uid):
-
-        return await callback.answer(
-
-            "Файл не найден.",
-
-            show_alert=True
-
-        )
+    )
 
     if diff == "none":
 
@@ -5328,11 +5816,7 @@ async def fe_set_diff(
 
     )
 
-    await save_db(
-
-        DATABASE
-
-    )
+    await save_db(DATABASE)
 
     await callback.message.edit_reply_markup(
 
@@ -5346,7 +5830,7 @@ async def fe_set_diff(
 
     await callback.answer(
 
-        "Уровень сложности обновлен."
+        "Сложность обновлена."
 
     )
 
@@ -5376,16 +5860,6 @@ async def fe_edit_title(
 
     )[1]
 
-    if not get_file_by_uid(uid):
-
-        return await callback.answer(
-
-            "Файл не найден.",
-
-            show_alert=True
-
-        )
-
     await state.set_state(
 
         EditFile.waiting_for_title
@@ -5400,7 +5874,7 @@ async def fe_edit_title(
 
     await callback.message.answer(
 
-        "Отправь новое название для файла:"
+        "Отправь новое название для файла."
 
     )
 
@@ -5430,16 +5904,6 @@ async def fe_save_title(
 
         return
 
-    new_title = message.text.strip()
-
-    if not new_title:
-
-        return await message.answer(
-
-            "❌ Название не может быть пустым."
-
-        )
-
     data = await state.get_data()
 
     uid = data.get(
@@ -5448,13 +5912,23 @@ async def fe_save_title(
 
     )
 
-    if not uid or not get_file_by_uid(uid):
+    if not uid:
 
         await state.clear()
 
         return await message.answer(
 
-            "❌ Файл не найден."
+            "❌ Ошибка состояния."
+
+        )
+
+    new_title = message.text.strip()
+
+    if not new_title:
+
+        return await message.answer(
+
+            "Название не может быть пустым."
 
         )
 
@@ -5468,11 +5942,7 @@ async def fe_save_title(
 
     )
 
-    await save_db(
-
-        DATABASE
-
-    )
+    await save_db(DATABASE)
 
     await state.clear()
 
@@ -5508,16 +5978,6 @@ async def fe_edit_tags(
 
     )[1]
 
-    if not get_file_by_uid(uid):
-
-        return await callback.answer(
-
-            "Файл не найден.",
-
-            show_alert=True
-
-        )
-
     await state.set_state(
 
         EditFile.waiting_for_tags
@@ -5532,9 +5992,11 @@ async def fe_edit_tags(
 
     await callback.message.answer(
 
-        "Отправь теги через пробел.\n"
+        "🏷 Отправь теги через пробел.\n"
 
-        "Например: #geometry #imo"
+        "Например:\n"
+
+        "`#geometry #imo #inequality`"
 
     )
 
@@ -5572,13 +6034,13 @@ async def fe_save_tags(
 
     )
 
-    if not uid or not get_file_by_uid(uid):
+    if not uid:
 
         await state.clear()
 
         return await message.answer(
 
-            "❌ Файл не найден."
+            "❌ Ошибка состояния."
 
         )
 
@@ -5602,11 +6064,7 @@ async def fe_save_tags(
 
     )
 
-    await save_db(
-
-        DATABASE
-
-    )
+    await save_db(DATABASE)
 
     await state.clear()
 
@@ -5620,7 +6078,7 @@ async def fe_save_tags(
 
             if tags
 
-            else "Нет тегов"
+            else "нет тегов"
 
         )
 
@@ -5649,16 +6107,6 @@ async def fe_edit_cats(
         1
 
     )[1]
-
-    if not get_file_by_uid(uid):
-
-        return await callback.answer(
-
-            "Файл не найден.",
-
-            show_alert=True
-
-        )
 
     current_cats = set(
 
@@ -5696,85 +6144,25 @@ async def fe_cat_toggle(
 
         return
 
-    try:
+    _, uid, cat_key = callback.data.split(
 
-        _, uid, cat_key = (
+        ":"
 
-            callback.data.split(":")
+    )
 
-        )
+    current_cats = set(
 
-    except ValueError:
+        get_file_categories(uid)
 
-        return await callback.answer(
+    )
 
-            "Ошибка.",
+    if cat_key in current_cats:
 
-            show_alert=True
-
-        )
-
-    if not get_file_by_uid(uid):
-
-        return await callback.answer(
-
-            "Файл не найден.",
-
-            show_alert=True
-
-        )
-
-    if cat_key not in DATABASE["categories"]:
-
-        return await callback.answer(
-
-            "Категория не найдена.",
-
-            show_alert=True
-
-        )
-
-    kb = callback.message.reply_markup
-
-    selected = set()
-
-    if kb:
-
-        for row in kb.inline_keyboard:
-
-            for btn in row:
-
-                if (
-
-                    btn.callback_data
-
-                    and btn.callback_data.startswith(
-
-                        "fec_t:"
-
-                    )
-
-                ):
-
-                    btn_cat = (
-
-                        btn.callback_data
-
-                        .split(":")[2]
-
-                    )
-
-                    if "☑️" in btn.text:
-
-                        selected.add(btn_cat)
-
-    if cat_key in selected:
-
-        selected.remove(cat_key)
+        current_cats.remove(cat_key)
 
     else:
 
-        selected.add(cat_key)
+        current_cats.add(cat_key)
 
     await callback.message.edit_reply_markup(
 
@@ -5782,7 +6170,7 @@ async def fe_cat_toggle(
 
             uid,
 
-            selected
+            current_cats
 
         )
 
@@ -5814,45 +6202,51 @@ async def fe_cat_save(
 
     )[1]
 
-    if not get_file_by_uid(uid):
+    # Получаем текущие выбранные категории
+
+    # из markup
+
+    kb = callback.message.reply_markup
+
+    if not kb:
 
         return await callback.answer(
 
-            "Файл не найден.",
+            "Ошибка.",
 
             show_alert=True
 
         )
 
-    kb = callback.message.reply_markup
-
     new_cats = set()
 
-    if kb:
+    for row in kb.inline_keyboard:
 
-        for row in kb.inline_keyboard:
+        for btn in row:
 
-            for btn in row:
+            if (
 
-                if (
+                btn.callback_data
 
-                    btn.callback_data
+                and btn.callback_data.startswith(
 
-                    and btn.callback_data.startswith(
+                    "fec_t:"
 
-                        "fec_t:"
+                )
 
-                    )
+                and "☑️" in btn.text
 
-                    and "☑️" in btn.text
+            ):
 
-                ):
+                new_cats.add(
 
-                    new_cats.add(
+                    btn.callback_data.split(
 
-                        btn.callback_data.split(":")[2]
+                        ":"
 
-                    )
+                    )[2]
+
+                )
 
     if not new_cats:
 
@@ -5870,7 +6264,7 @@ async def fe_cat_save(
 
         return await callback.answer(
 
-            "Ошибка.",
+            "Файл не найден.",
 
             show_alert=True
 
@@ -5888,35 +6282,23 @@ async def fe_cat_save(
 
             x
 
-            for x in cat_data.get(
+            for x in cat_data.get("files", [])
 
-                "files",
-
-                []
-
-            )
-
-            if x.get(
-
-                "file_unique_id"
-
-            ) != uid
+            if x.get("file_unique_id") != uid
 
         ]
 
     for cat in new_cats:
 
-        DATABASE["categories"][cat]["files"].append(
+        if cat in DATABASE["categories"]:
 
-            copy.deepcopy(f_copy)
+            DATABASE["categories"][cat]["files"].append(
 
-        )
+                copy.deepcopy(f_copy)
 
-    await save_db(
+            )
 
-        DATABASE
-
-    )
+    await save_db(DATABASE)
 
     await callback.message.edit_reply_markup(
 
@@ -5960,16 +6342,6 @@ async def fe_doc_start(
 
     )[1]
 
-    if not get_file_by_uid(uid):
-
-        return await callback.answer(
-
-            "Файл не найден.",
-
-            show_alert=True
-
-        )
-
     await state.set_state(
 
         EditFile.waiting_for_document
@@ -5984,9 +6356,9 @@ async def fe_doc_start(
 
     await callback.message.answer(
 
-        "📤 Отправь новый файл (документ), "
+        "📄 Отправь новый файл (документ).\n"
 
-        "он заменит старый."
+        "Он заменит старый."
 
     )
 
@@ -6018,61 +6390,123 @@ async def fe_doc_receive(
 
     data = await state.get_data()
 
-    old_uid = data.get(
+    uid = data.get(
 
         "edit_uid"
 
     )
 
-    if not old_uid:
+    if not uid:
 
         await state.clear()
 
         return await message.answer(
 
-            "❌ Не удалось определить файл."
+            "❌ Ошибка состояния."
 
         )
 
-    old_file = get_file_by_uid(
-
-        old_uid
-
-    )
-
-    if not old_file:
-
-        await state.clear()
-
-        return await message.answer(
-
-            "❌ Старый файл не найден."
-
-        )
+    old_uid = uid
 
     doc = message.document
 
-    replace_file_everywhere(
+    update_file_everywhere(
 
         old_uid,
 
-        doc.file_id,
+        "file_id",
+
+        doc.file_id
+
+    )
+
+    update_file_everywhere(
+
+        old_uid,
+
+        "file_unique_id",
 
         doc.file_unique_id
 
     )
 
-    await save_db(
+    new_uid = doc.file_unique_id
 
-        DATABASE
+    for u_id, u in DATABASE["users"].items():
 
-    )
+        favorites = u.get(
+
+            "favorites",
+
+            []
+
+        )
+
+        if old_uid in favorites:
+
+            u["favorites"] = [
+
+                new_uid
+
+                if x == old_uid
+
+                else x
+
+                for x in favorites
+
+            ]
+
+            await db_collection.update_one(
+
+                {"_id": DB_DOC_ID},
+
+                {
+
+                    "$set": {
+
+                        f"data.users.{u_id}.favorites":
+
+                            u["favorites"]
+
+                    }
+
+                }
+
+            )
+
+    await save_db(DATABASE)
 
     await state.clear()
 
     await message.answer(
 
-        "✅ Документ успешно заменён!"
+        "✅ Документ успешно заменен!"
+
+    )
+
+@dp.message(
+
+    EditFile.waiting_for_document
+
+)
+
+async def fe_doc_invalid(
+
+    message: types.Message
+
+):
+
+    if not is_admin(
+
+        message.from_user.id
+
+    ):
+
+        return
+
+    await message.answer(
+
+        "⚠️ Отправь именно документ."
 
     )
 
@@ -6100,39 +6534,17 @@ async def fe_delete_file(
 
     )[1]
 
-    if not get_file_by_uid(uid):
-
-        return await callback.answer(
-
-            "Файл уже удалён.",
-
-            show_alert=True
-
-        )
-
     for cat_data in DATABASE["categories"].values():
 
         cat_data["files"] = [
 
             x
 
-            for x in cat_data.get(
+            for x in cat_data.get("files", [])
 
-                "files",
-
-                []
-
-            )
-
-            if x.get(
-
-                "file_unique_id"
-
-            ) != uid
+            if x.get("file_unique_id") != uid
 
         ]
-
-    # Remove from favorites
 
     for user in DATABASE["users"].values():
 
@@ -6144,21 +6556,9 @@ async def fe_delete_file(
 
         ):
 
-            user["favorites"] = [
+            user["favorites"].remove(uid)
 
-                x
-
-                for x in user["favorites"]
-
-                if x != uid
-
-            ]
-
-    await save_db(
-
-        DATABASE
-
-    )
+    await save_db(DATABASE)
 
     try:
 
@@ -6206,15 +6606,13 @@ async def adm_upload_start(
 
         )
 
-    await state.set_state(
-
-        FileUpload.waiting_for_document
-
-    )
+    await state.clear()
 
     await callback.message.answer(
 
-        "📤 Отправь документ (PDF и т.п.)."
+        "📄 Отправь документ (PDF и т.д.), "
+
+        "чтобы добавить его в базу."
 
     )
 
@@ -6222,7 +6620,7 @@ async def adm_upload_start(
 
 @dp.message(
 
-    FileUpload.waiting_for_document,
+    FileUpload.selecting_categories,
 
     F.document
 
@@ -6243,6 +6641,36 @@ async def admin_doc_received_state(
     ):
 
         return
+
+    # Не надо очищать state здесь,
+
+    # process_admin_document сам установит новый.
+
+    await process_admin_document(
+
+        message,
+
+        state
+
+    )
+
+@dp.message(
+
+    StateFilter(None),
+
+    F.document,
+
+    F.from_user.id.in_(ADMIN_IDS)
+
+)
+
+async def admin_doc_received(
+
+    message: types.Message,
+
+    state: FSMContext
+
+):
 
     await process_admin_document(
 
@@ -6268,8 +6696,6 @@ async def process_admin_document(
 
     ):
 
-        await state.clear()
-
         return await message.answer(
 
             "⚠️ Этот файл уже есть "
@@ -6287,10 +6713,6 @@ async def process_admin_document(
         else doc.file_name
 
     )
-
-    if not default_name:
-
-        default_name = "Без названия"
 
     await state.update_data(
 
@@ -6312,9 +6734,9 @@ async def process_admin_document(
 
     await message.answer(
 
-        f"📥 **Новый файл:** "
+        f"📥 **Новый файл:**\n"
 
-        f"`{default_name}`\n"
+        f"`{default_name}`\n\n"
 
         "Отметь разделы:",
 
@@ -6349,16 +6771,6 @@ async def admin_toggle_cat(
         1
 
     )[1]
-
-    if cat_key not in DATABASE["categories"]:
-
-        return await callback.answer(
-
-            "Категория не найдена.",
-
-            show_alert=True
-
-        )
 
     data = await state.get_data()
 
@@ -6484,11 +6896,25 @@ async def admin_categories_done(
 
         "default_name",
 
-        "Без названия"
+        "Файл"
 
     )
 
-    short_name = default_name[:25]
+    short_name = (
+
+        default_name[:25]
+
+        + (
+
+            "..."
+
+            if len(default_name) > 25
+
+            else ""
+
+        )
+
+    )
 
     builder = [
 
@@ -6522,7 +6948,7 @@ async def admin_categories_done(
 
         "✍️ Введи название файла "
 
-        "или нажми «Оставить»:",
+        "или нажми «Оставить».",
 
         reply_markup=InlineKeyboardMarkup(
 
@@ -6560,6 +6986,10 @@ async def _admin_save_file(
 
     for cat_key in selected:
 
+        if cat_key not in DATABASE["categories"]:
+
+            continue
+
         DATABASE["categories"][cat_key]["files"].append(
 
             {
@@ -6580,11 +7010,7 @@ async def _admin_save_file(
 
         )
 
-    await save_db(
-
-        DATABASE
-
-    )
+    await save_db(DATABASE)
 
     return selected
 
@@ -6614,7 +7040,7 @@ async def admin_skip_caption(
 
             "default_name",
 
-            "Без названия"
+            "Файл"
 
         )
 
@@ -6652,7 +7078,7 @@ async def admin_save_custom_caption(
 
         return await message.answer(
 
-            "❌ Название не может быть пустым."
+            "Название не может быть пустым."
 
         )
 
@@ -6710,9 +7136,9 @@ async def submit_start(
 
 @dp.message(
 
-    F.document,
+    StateFilter(None),
 
-    StateFilter(None)
+    F.document
 
 )
 
@@ -6723,8 +7149,6 @@ async def user_doc_received(
     state: FSMContext
 
 ):
-
-    # Админы обрабатываются отдельным handler.
 
     if is_admin(
 
@@ -6744,11 +7168,9 @@ async def user_doc_received(
 
         return await message.answer(
 
-            "⚠️ Этот файл уже есть "
+            "⚠️ Этот файл уже есть в каталоге!\n"
 
-            "в каталоге! Спасибо, но второй "
-
-            "такой не нужен 😉"
+            "Спасибо, но второй такой не нужен 😉"
 
         )
 
@@ -6761,10 +7183,6 @@ async def user_doc_received(
         else doc.file_name
 
     )
-
-    if not default_name:
-
-        default_name = "Без названия"
 
     await state.update_data(
 
@@ -6786,13 +7204,11 @@ async def user_doc_received(
 
     await message.answer(
 
-        f"📥 Файл получен: "
+        f"📥 Файл получен:\n"
 
         f"`{default_name}`\n\n"
 
-        "Подскажи раздел "
-
-        "(необязательно):",
+        "Подскажи раздел (необязательно):",
 
         reply_markup=build_user_categories_kb(
 
@@ -6825,16 +7241,6 @@ async def usub_toggle(
         1
 
     )[1]
-
-    if cat_key not in DATABASE["categories"]:
-
-        return await callback.answer(
-
-            "Категория не найдена.",
-
-            show_alert=True
-
-        )
 
     data = await state.get_data()
 
@@ -6920,14 +7326,6 @@ async def usub_done(
 
     data = await state.get_data()
 
-    selected = data.get(
-
-        "selected",
-
-        []
-
-    )
-
     sub_id = uuid.uuid4().hex[:8]
 
     sub_data = {
@@ -6952,23 +7350,17 @@ async def usub_done(
 
         ),
 
-        "title": data.get(
+        "title": data["default_name"],
 
-            "default_name",
+        "categories": data.get(
 
-            "Без названия"
+            "selected",
+
+            []
 
         ),
 
-        "categories": selected,
-
-        "status": "pending",
-
-        "created_at": datetime.now(
-
-            timezone.utc
-
-        ).isoformat()
+        "status": "pending"
 
     }
 
@@ -6984,7 +7376,7 @@ async def usub_done(
 
     await callback.message.edit_text(
 
-        "📤 Файл отправлен админу. "
+        "📤 Файл отправлен админу.\n"
 
         "Спасибо! 🙌"
 
@@ -6996,11 +7388,13 @@ async def usub_done(
 
             DATABASE["categories"][c]["title"]
 
-            for c in selected
+            for c in sub_data["categories"]
+
+            if c in DATABASE["categories"]
 
         )
 
-        if selected
+        if sub_data["categories"]
 
         else "Не указано"
 
@@ -7008,15 +7402,11 @@ async def usub_done(
 
     username = sub_data["username"]
 
-    if not str(username).startswith("@"):
-
-        username = str(username)
-
     caption = (
 
         "📥 **Новый файл**\n"
 
-        f"👤 От: {username}\n"
+        f"👤 От: @{username}\n"
 
         f"📄 {sub_data['title']}\n"
 
@@ -7046,13 +7436,9 @@ async def usub_done(
 
         except Exception as e:
 
-            logger.warning(
+            logger.exception(
 
-                "Не удалось отправить submission "
-
-                "админу %s: %s",
-
-                admin_id,
+                "Ошибка отправки submission админу: %s",
 
                 e
 
@@ -7062,15 +7448,11 @@ async def usub_done(
 
 # =========================================================
 
-# SUBMISSION APPROVE
+# SUBMISSION ADMIN ACTIONS
 
 # =========================================================
 
-@dp.callback_query(
-
-    F.data.startswith("sub_approve:")
-
-)
+@dp.callback_query(F.data.startswith("sub_approve:"))
 
 async def sub_approve(
 
@@ -7126,47 +7508,33 @@ async def sub_approve(
 
         )
 
-    # Avoid duplicate insertion.
+    for cat_key in sub["categories"]:
 
-    existing_file = get_file_by_uid(
+        if cat_key not in DATABASE["categories"]:
 
-        sub.get("file_unique_id")
+            continue
 
-    )
+        DATABASE["categories"][cat_key]["files"].append(
 
-    if not existing_file:
+            {
 
-        for cat_key in sub["categories"]:
+                "file_id": sub["file_id"],
 
-            if cat_key not in DATABASE["categories"]:
+                "file_unique_id": sub["file_unique_id"],
 
-                continue
+                "caption": sub["title"],
 
-            DATABASE["categories"][cat_key]["files"].append(
+                "tags": [],
 
-                {
+                "must_read": False,
 
-                    "file_id": sub["file_id"],
+                "difficulty": None
 
-                    "file_unique_id": sub["file_unique_id"],
-
-                    "caption": sub["title"],
-
-                    "tags": [],
-
-                    "must_read": False,
-
-                    "difficulty": None
-
-                }
-
-            )
-
-        await save_db(
-
-            DATABASE
+            }
 
         )
+
+    await save_db(DATABASE)
 
     sub["status"] = "approved"
 
@@ -7188,25 +7556,17 @@ async def sub_approve(
 
     try:
 
-        old_caption = (
-
-            callback.message.caption
-
-            or ""
-
-        )
-
         await callback.message.edit_caption(
 
             caption=(
 
-                old_caption
+                callback.message.caption
 
-                + "\n\n"
+                or ""
 
-                + "✅ ОДОБРЕНО"
+            )
 
-            ),
+            + "\n\n✅ ОДОБРЕНО",
 
             reply_markup=None
 
@@ -7222,11 +7582,17 @@ async def sub_approve(
 
             sub["user_id"],
 
-            f"✅ Твой файл «{sub['title']}» "
+            (
 
-            "добавлен!\n"
+                f"✅ Твой файл "
 
-            "Спасибо 🙌 (+15 очков)"
+                f"«{sub['title']}» добавлен!\n\n"
+
+                "Спасибо 🙌\n"
+
+                "🏆 +15 очков"
+
+            )
 
         )
 
@@ -7240,11 +7606,7 @@ async def sub_approve(
 
     )
 
-@dp.callback_query(
-
-    F.data.startswith("sub_reject:")
-
-)
+@dp.callback_query(F.data.startswith("sub_reject:"))
 
 async def sub_reject(
 
@@ -7302,25 +7664,17 @@ async def sub_reject(
 
     try:
 
-        old_caption = (
-
-            callback.message.caption
-
-            or ""
-
-        )
-
         await callback.message.edit_caption(
 
             caption=(
 
-                old_caption
+                callback.message.caption
 
-                + "\n\n"
+                or ""
 
-                + "❌ ОТКЛОНЕНО"
+            )
 
-            ),
+            + "\n\n❌ ОТКЛОНЕНО",
 
             reply_markup=None
 
@@ -7346,15 +7700,11 @@ async def sub_reject(
 
     await callback.answer(
 
-        "Файл отклонён."
+        "Файл отклонен."
 
     )
 
-@dp.callback_query(
-
-    F.data.startswith("sub_editcat:")
-
-)
+@dp.callback_query(F.data.startswith("sub_editcat:"))
 
 async def sub_editcat(
 
@@ -7392,13 +7742,7 @@ async def sub_editcat(
 
     ):
 
-        return await callback.answer(
-
-            "Заявка уже обработана.",
-
-            show_alert=True
-
-        )
+        return
 
     await callback.message.edit_reply_markup(
 
@@ -7420,77 +7764,7 @@ async def sub_editcat(
 
     await callback.answer()
 
-@dp.callback_query(
-
-    F.data.startswith("sub_edittitle:")
-
-)
-
-async def sub_edittitle(
-
-    callback: types.CallbackQuery
-
-):
-
-    if not is_admin(
-
-        callback.from_user.id
-
-    ):
-
-        return
-
-    sub_id = callback.data.split(
-
-        ":",
-
-        1
-
-    )[1]
-
-    sub = await get_submission(
-
-        sub_id
-
-    )
-
-    if (
-
-        not sub
-
-        or sub.get("status") != "pending"
-
-    ):
-
-        return await callback.answer(
-
-            "Заявка уже обработана.",
-
-            show_alert=True
-
-        )
-
-    # Simple title editing through FSM.
-
-    # Reusing EditFile.waiting_for_title
-
-    # would conflict with file editing.
-
-    await callback.answer(
-
-        "Функция редактирования названия "
-
-        "заявки пока не подключена.",
-
-        show_alert=True
-
-    )
-
-@dp.callback_query(
-
-    F.data.startswith("subcat_toggle:")
-
-)
+@dp.callback_query(F.data.startswith("subcat_toggle:"))
 
 async def subcat_toggle(
 
@@ -7506,23 +7780,11 @@ async def subcat_toggle(
 
         return
 
-    try:
+    _, sub_id, cat_key = callback.data.split(
 
-        _, sub_id, cat_key = (
+        ":"
 
-            callback.data.split(":")
-
-        )
-
-    except ValueError:
-
-        return await callback.answer(
-
-            "Ошибка.",
-
-            show_alert=True
-
-        )
+    )
 
     sub = await get_submission(
 
@@ -7538,23 +7800,7 @@ async def subcat_toggle(
 
     ):
 
-        return await callback.answer(
-
-            "Заявка уже обработана.",
-
-            show_alert=True
-
-        )
-
-    if cat_key not in DATABASE["categories"]:
-
-        return await callback.answer(
-
-            "Категория не найдена.",
-
-            show_alert=True
-
-        )
+        return
 
     selected = set(
 
@@ -7604,11 +7850,7 @@ async def subcat_toggle(
 
     await callback.answer()
 
-@dp.callback_query(
-
-    F.data.startswith("subcat_done:")
-
-)
+@dp.callback_query(F.data.startswith("subcat_done:"))
 
 async def subcat_done(
 
@@ -7632,28 +7874,6 @@ async def subcat_done(
 
     )[1]
 
-    sub = await get_submission(
-
-        sub_id
-
-    )
-
-    if (
-
-        not sub
-
-        or sub.get("status") != "pending"
-
-    ):
-
-        return await callback.answer(
-
-            "Заявка уже обработана.",
-
-            show_alert=True
-
-        )
-
     await callback.message.edit_reply_markup(
 
         reply_markup=build_submission_action_kb(
@@ -7668,15 +7888,11 @@ async def subcat_done(
 
 # =========================================================
 
-# TELEGRAM COMMAND MENU
+# TELEGRAM COMMANDS
 
 # =========================================================
 
-async def set_main_menu(
-
-    b: Bot
-
-):
+async def set_main_menu(b: Bot):
 
     commands = [
 
@@ -7726,6 +7942,14 @@ async def set_main_menu(
 
             description="Рейтинг 🏆"
 
+        ),
+
+        BotCommand(
+
+            command="cancel",
+
+            description="Отменить действие ❌"
+
         )
 
     ]
@@ -7733,6 +7957,40 @@ async def set_main_menu(
     await b.set_my_commands(
 
         commands
+
+    )
+
+# =========================================================
+
+# GLOBAL CANCEL
+
+# =========================================================
+
+@dp.message(Command("cancel"))
+
+async def global_cancel(
+
+    message: types.Message,
+
+    state: FSMContext
+
+):
+
+    current_state = await state.get_state()
+
+    if current_state is None:
+
+        return await message.answer(
+
+            "Сейчас нечего отменять."
+
+        )
+
+    await state.clear()
+
+    await message.answer(
+
+        "❌ Текущее действие отменено."
 
     )
 
@@ -7746,7 +8004,7 @@ async def run_web_server():
 
     app = web.Application()
 
-    async def health_handler(request):
+    async def health(request):
 
         return web.Response(
 
@@ -7758,7 +8016,7 @@ async def run_web_server():
 
         "/",
 
-        health_handler
+        health
 
     )
 
@@ -7802,8 +8060,6 @@ async def run_web_server():
 
     )
 
-    return runner
-
 # =========================================================
 
 # MAIN
@@ -7814,13 +8070,9 @@ async def main():
 
     global DATABASE
 
-    web_runner = None
+    await run_web_server()
 
     try:
-
-        web_runner = await run_web_server()
-
-        # Mongo connection
 
         await mongo_client.admin.command(
 
@@ -7834,43 +8086,39 @@ async def main():
 
         )
 
-        DATABASE = await load_db()
+    except Exception as e:
 
-        logger.info(
+        logger.exception(
 
-            "📚 Уникальных файлов: %s",
+            "❌ Не удалось подключиться к MongoDB: %s",
 
-            get_unique_file_count()
-
-        )
-
-        logger.info(
-
-            "👥 Пользователей: %s",
-
-            len(DATABASE["users"])
+            e
 
         )
 
-        logger.info(
+        raise
 
-            "🎯 Задач дня: %s",
+    DATABASE = await load_db()
 
-            len(DATABASE["daily_tasks"])
+    logger.info(
 
-        )
+        "📚 База данных загружена"
 
-        await set_main_menu(
+    )
 
-            bot
+    await set_main_menu(
 
-        )
+        bot
 
-        logger.info(
+    )
 
-            "🤖 Бот запущен!"
+    logger.info(
 
-        )
+        "🤖 Бот запущен!"
+
+    )
+
+    try:
 
         await dp.start_polling(
 
@@ -7878,57 +8126,11 @@ async def main():
 
         )
 
-    except asyncio.CancelledError:
-
-        logger.info(
-
-            "🛑 Polling остановлен."
-
-        )
-
-    except Exception:
-
-        logger.exception(
-
-            "💥 Критическая ошибка"
-
-        )
-
-        raise
-
     finally:
 
-        if web_runner:
+        await bot.session.close()
 
-            try:
-
-                await web_runner.cleanup()
-
-            except Exception:
-
-                pass
-
-        try:
-
-            await bot.session.close()
-
-        except Exception:
-
-            pass
-
-        try:
-
-            mongo_client.close()
-
-        except Exception:
-
-            pass
-
-        logger.info(
-
-            "👋 Ресурсы закрыты."
-
-        )
+        mongo_client.close()
 
 # =========================================================
 
