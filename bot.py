@@ -2224,12 +2224,6 @@ async def user_solution_start(callback: types.CallbackQuery, state: FSMContext):
 
     F.text
 
-)@dp.message(
-
-    UserTaskSolution.waiting_for_solution,
-
-    F.text
-
 )
 
 async def user_solution_text(
