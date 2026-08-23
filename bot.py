@@ -824,12 +824,25 @@ async def callback_set_language(callback: types.CallbackQuery):
     await callback.answer()
 
 @dp.callback_query(F.data == "menu:main")
-async def process_back_to_main(callback: types.CallbackQuery):
+async def process_back_to_main(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
     await track_user_activity(callback.from_user.id, callback.from_user.username or "")
-    await callback.message.edit_text(
-        t(callback.from_user.id, "main_menu"),
-        reply_markup=get_main_menu_keyboard(callback.from_user.id)
-    )
+    text = t(callback.from_user.id, "main_menu")
+    kb = get_main_menu_keyboard(callback.from_user.id)
+
+    # Безопасный возврат в меню с фото или текста:
+    if callback.message.photo or callback.message.document:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=kb)
+    else:
+        try:
+            await callback.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            await callback.message.answer(text, reply_markup=kb)
+
     await callback.answer()
 
 @dp.callback_query(F.data == "menu:catalog")
@@ -858,7 +871,7 @@ async def send_daily_task(target, date_str: str = None, task_index: int = 0):
             await target.answer(text, reply_markup=kb)
         else:
             try:
-                if target.message.photo:
+                if target.message.photo or target.message.document:
                     await target.message.delete()
                     await target.message.answer(text, reply_markup=kb)
                 else:
@@ -901,7 +914,7 @@ async def send_daily_task(target, date_str: str = None, task_index: int = 0):
             await target.answer(cap, reply_markup=kb)
         else:
             try:
-                if target.message.photo:
+                if target.message.photo or target.message.document:
                     await target.message.delete()
                     await target.message.answer(cap, reply_markup=kb)
                 else:
@@ -922,10 +935,19 @@ async def callback_task(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "tasks:history")
 async def tasks_history(callback: types.CallbackQuery):
-    await callback.message.edit_text(
-        "📅 **Задачи прошлых дней**\n\nВыбери дату:",
-        reply_markup=get_history_keyboard(callback.from_user.id)
-    )
+    text = "📅 **Задачи прошлых дней**\n\nВыбери дату:"
+    kb = get_history_keyboard(callback.from_user.id)
+    if callback.message.photo or callback.message.document:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=kb)
+    else:
+        try:
+            await callback.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            await callback.message.answer(text, reply_markup=kb)
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("taskdate:"))
@@ -1216,16 +1238,25 @@ async def admin_task_user_solutions(callback: types.CallbackQuery):
         f"⏳ На проверке: {pending}\n"
         f"✅ Проверено: {rated}"
     )
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📨 Показать решения", callback_data=f"tshow:{date_str}:{task_index}")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"taskdate:{date_str}:{task_index}")]
-            ]
-        )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📨 Показать решения", callback_data=f"tshow:{date_str}:{task_index}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"taskdate:{date_str}:{task_index}")]
+        ]
     )
+
+    if callback.message.photo or callback.message.document:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=kb)
+    else:
+        try:
+            await callback.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            await callback.message.answer(text, reply_markup=kb)
+
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("tshow:"))
