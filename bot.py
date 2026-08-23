@@ -1875,34 +1875,51 @@ async def cmd_menu(
     )
 
 @dp.callback_query(F.data == "menu:main")
-
 async def process_back_to_main(
-
     callback: types.CallbackQuery
-
 ):
-
-    await track_user_activity(
-
-        callback.from_user.id,
-
-        callback.from_user.username or ""
-
-    )
-
-    await callback.message.edit_text(
-
-        t(callback.from_user.id, "main_menu"),
-
-        reply_markup=get_main_menu_keyboard(
-
-            callback.from_user.id
-
+    try:
+        await track_user_activity(
+            callback.from_user.id,
+            callback.from_user.username or ""
         )
 
-    )
+        keyboard = get_main_menu_keyboard(
+            callback.from_user.id
+        )
 
-    await callback.answer()
+        # Если это сообщение с фото - меняем caption
+        if callback.message.photo:
+            await callback.message.edit_caption(
+                caption=t(
+                    callback.from_user.id,
+                    "main_menu"
+                ),
+                reply_markup=keyboard
+            )
+
+        # Обычное текстовое сообщение
+        else:
+            await callback.message.edit_text(
+                t(
+                    callback.from_user.id,
+                    "main_menu"
+                ),
+                reply_markup=keyboard
+            )
+
+        await callback.answer()
+
+    except Exception as e:
+        logging.exception(
+            "Ошибка при возврате в главное меню: %s",
+            e
+        )
+
+        await callback.answer(
+            "⚠️ Не удалось открыть меню",
+            show_alert=True
+        )
 
 @dp.callback_query(F.data == "menu:catalog")
 
