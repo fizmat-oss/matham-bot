@@ -314,6 +314,7 @@ async def load_db():
         if key not in data:
             data[key] = copy.deepcopy(value)
 
+    # Categories migration
     for cat_key, default_cat in DEFAULT_STATE["categories"].items():
         if cat_key not in data["categories"]:
             data["categories"][cat_key] = copy.deepcopy(default_cat)
@@ -327,6 +328,18 @@ async def load_db():
             f.setdefault("difficulty", None)
             f.setdefault("must_read", False)
 
+    # Links migration
+    if "links" not in data:
+        data["links"] = copy.deepcopy(DEFAULT_STATE["links"])
+    for sec_key, default_sec in DEFAULT_STATE["links"].items():
+        if sec_key not in data["links"]:
+            data["links"][sec_key] = copy.deepcopy(default_sec)
+        sec_data = data["links"][sec_key]
+        sec_data.setdefault("title", default_sec["title"])
+        sec_data.setdefault("title_en", default_sec["title_en"])
+        sec_data.setdefault("items", [])
+
+    # Users migration
     for uid, user in data["users"].items():
         user.setdefault("username", "")
         user.setdefault("streak", 1)
@@ -336,6 +349,7 @@ async def load_db():
         user.setdefault("opened_tasks", [])
         user.setdefault("language", "ru")
 
+    # Daily task migration
     for date_str, group in list(data["daily_tasks"].items()):
         if isinstance(group, dict) and "tasks" not in group:
             group = {"tasks": [copy.deepcopy(group)]}
@@ -481,6 +495,49 @@ def get_catalog_keyboard(user_id: int):
         ])
     builder.append([
         InlineKeyboardButton(text=t(user_id, "menu"), callback_data="menu:main")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=builder)
+
+def get_links_keyboard(user_id: int):
+    builder = []
+    for sec_key, sec_data in DATABASE.get("links", {}).items():
+        title = sec_data.get("title_en") if get_user_language(user_id) == "en" and sec_data.get("title_en") else sec_data.get("title", sec_key)
+        builder.append([
+            InlineKeyboardButton(
+                text=title,
+                callback_data=f"links:sec:{sec_key}"
+            )
+        ])
+    builder.append([
+        InlineKeyboardButton(text=t(user_id, "menu"), callback_data="menu:main")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=builder)
+
+def get_links_section_keyboard(sec_key: str, user_id: int):
+    sec = DATABASE.get("links", {}).get(sec_key, {})
+    items = sec.get("items", [])
+    builder = []
+    for item in items[:50]:
+        title = item.get("title", "Ссылка")
+        url = item.get("url", "https://t.me")
+        builder.append([
+            InlineKeyboardButton(
+                text=f"🌐 {title}",
+                url=url
+            )
+        ])
+    if is_admin(user_id):
+        builder.append([
+            InlineKeyboardButton(
+                text="➕ Добавить ссылку",
+                callback_data=f"links:add:{sec_key}"
+            )
+        ])
+    builder.append([
+        InlineKeyboardButton(
+            text=t(user_id, "back"),
+            callback_data="links:main"
+        )
     ])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
@@ -830,7 +887,6 @@ async def process_back_to_main(callback: types.CallbackQuery, state: FSMContext)
     text = t(callback.from_user.id, "main_menu")
     kb = get_main_menu_keyboard(callback.from_user.id)
 
-    # Безопасный возврат в меню с фото или текста:
     if callback.message.photo or callback.message.document:
         try:
             await callback.message.delete()
@@ -852,6 +908,114 @@ async def process_catalog(callback: types.CallbackQuery):
         reply_markup=get_catalog_keyboard(callback.from_user.id)
     )
     await callback.answer()
+
+# ============================================================
+# USEFUL LINKS SECTION
+# ============================================================
+
+@dp.message(Command("links"))
+async def cmd_links(message: types.Message):
+    await track_user_activity(message.from_user.id, message.from_user.username or "")
+    await message.answer(
+        f"🔗 **{t(message.from_user.id, 'links')}**\n\nВыбери раздел:",
+        reply_markup=get_links_keyboard(message.from_user.id)
+    )
+
+@dp.callback_query(F.data == "links:main")
+async def cb_links_main(callback: types.CallbackQuery):
+    await track_user_activity(callback.from_user.id, callback.from_user.username or "")
+    text = f"🔗 **{t(callback.from_user.id, 'links')}**\n\nВыбери раздел:"
+    kb = get_links_keyboard(callback.from_user.id)
+
+    if callback.message.photo or callback.message.document:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=kb)
+    else:
+        try:
+            await callback.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            await callback.message.answer(text, reply_markup=kb)
+
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("links:sec:"))
+async def cb_links_section(callback: types.CallbackQuery):
+    sec_key = callback.data.split(":")[2]
+    sec = DATABASE.get("links", {}).get(sec_key)
+    if not sec:
+        return await callback.answer("Раздел не найден", show_alert=True)
+
+    title = sec.get("title_en") if get_user_language(callback.from_user.id) == "en" and sec.get("title_en") else sec.get("title", sec_key)
+    items = sec.get("items", [])
+
+    if not items:
+        text = f"**{title}**\n\n🔗 В этом разделе пока нет ссылок."
+    else:
+        text = f"**{title}**\n\nСписок материалов и ссылок:"
+
+    kb = get_links_section_keyboard(sec_key, callback.from_user.id)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("links:add:"))
+async def cb_admin_add_link_start(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("⛔", show_alert=True)
+
+    sec_key = callback.data.split(":")[2]
+    await state.set_state(AddLink.waiting_for_text)
+    await state.update_data(link_sec=sec_key)
+    await callback.message.answer(
+        "🔗 Отправь данные ссылки в формате:\n\n"
+        "**Название | URL | Описание (необязательно)**\n\n"
+        "Пример:\n`Крутой задачник | https://t.me/matham | Полезно для IMO`\n\n"
+        "Для отмены напиши 'отмена'."
+    )
+    await callback.answer()
+
+@dp.message(AddLink.waiting_for_text, F.text)
+async def admin_add_link_finish(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+
+    if message.text.strip().lower() in ["отмена", "/cancel"]:
+        await state.clear()
+        return await message.answer("❌ Добавление ссылки отменено.")
+
+    parts = [p.strip() for p in message.text.split("|")]
+    if len(parts) < 2 or not parts[1].startswith("http"):
+        return await message.answer(
+            "❌ Неверный формат.\n"
+            "Нужно отправить: **Название | URL**\n"
+            "Пример: `Крутой задачник | https://t.me/matham`"
+        )
+
+    data = await state.get_data()
+    sec_key = data.get("link_sec", "useful_links")
+    await state.clear()
+
+    title = parts[0]
+    url = parts[1]
+    description = parts[2] if len(parts) > 2 else ""
+
+    item = {
+        "title": title,
+        "url": url,
+        "description": description
+    }
+
+    DATABASE["links"].setdefault(sec_key, {"title": "🔗 Ссылки", "items": []})
+    DATABASE["links"][sec_key].setdefault("items", [])
+    DATABASE["links"][sec_key]["items"].append(item)
+
+    await save_db(DATABASE)
+    await message.answer(f"✅ Ссылка «{title}» успешно добавлена в раздел!")
 
 # ============================================================
 # DAILY TASK
@@ -2553,6 +2717,7 @@ async def set_main_menu(b: Bot):
         BotCommand(command="start", description="Главное меню 🚀"),
         BotCommand(command="menu", description="Меню 📂"),
         BotCommand(command="task", description="Задача дня 🧩"),
+        BotCommand(command="links", description="Полезные ссылки 🔗"),
         BotCommand(command="challenge", description="Случайный материал 🎲"),
         BotCommand(command="favorites", description="Избранное ❤️"),
         BotCommand(command="rating", description="Рейтинг 🏆"),
