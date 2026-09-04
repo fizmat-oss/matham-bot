@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import html
+import io
 import json
 import logging
 import os
@@ -27,6 +28,17 @@ from aiogram.types import (
 from aiohttp import ClientSession, ClientTimeout, web
 from motor.motor_asyncio import AsyncIOMotorClient
 
+# Safe import for PDF extraction
+try:
+    from pypdf import PdfReader
+    PYPDF_AVAILABLE = True
+except ImportError:
+    try:
+        from PyPDF2 import PdfReader
+        PYPDF_AVAILABLE = True
+    except ImportError:
+        PYPDF_AVAILABLE = False
+
 # ============================================================
 # CONFIG & LOGGING
 # ============================================================
@@ -49,7 +61,7 @@ MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "matham_bot")
 YEREVAN_TZ = timezone(timedelta(hours=4))
 
-# AI Configuration (Gemini / OpenAI)
+# AI API Keys
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 
@@ -162,7 +174,7 @@ TEXTS = {
         "score": "⭐ Оценка",
         "your_score": "Твои очки",
         "streak": "Твой streak",
-        "ai_prompt": "🤖 <b>AI Помощник по математике</b>\n\nНапиши, что ты ищешь, свой уровень и цель.\n\n<i>Например:</i>\n• <i>«Посоветуй книги по геометрии для подготовки к региону 9 класс»</i>\n• <i>«Нужен базовый задачник по теории чисел для начинающих»</i>\n• <i>«Сложные задачи по комбинаторике уровня IMO»</i>",
+        "ai_prompt": "🤖 <b>AI Помощник по математике</b>\n\nЯ знаю содержание и предназначение всех книг в нашей библиотеке!\nНапиши, что ты ищешь, свой класс/уровень и цель.\n\n<i>Например:</i>\n• <i>«Посоветуй книги по геометрии для подготовки к региону 9 класс»</i>\n• <i>«Нужен базовый задачник по теории чисел для начинающих»</i>\n• <i>«Сложные задачи по комбинаторике уровня IMO»</i>",
         "ai_searching": "🧠 AI анализирует библиотеку и подбирает лучшие материалы...",
     },
     "en": {
@@ -197,7 +209,7 @@ TEXTS = {
         "score": "⭐ Rating",
         "your_score": "Your points",
         "streak": "Your streak",
-        "ai_prompt": "🤖 <b>Math AI Assistant</b>\n\nTell me what you are looking for, your level, and your goals.\n\n<i>For example:</i>\n• <i>\"Recommend geometry books for olympiad prep grade 9\"</i>\n• <i>\"Introductory number theory textbook for beginners\"</i>\n• <i>\"Hard IMO-level combinatorics problems\"</i>",
+        "ai_prompt": "🤖 <b>Math AI Assistant</b>\n\nI have read and indexed all materials in this library!\nTell me what topic you need, your level, and your goals.\n\n<i>For example:</i>\n• <i>\"Recommend geometry books for olympiad prep grade 9\"</i>\n• <i>\"Introductory number theory textbook for beginners\"</i>\n• <i>\"Hard IMO-level combinatorics problems\"</i>",
         "ai_searching": "🧠 AI is analyzing the library catalog to find the best materials for you...",
     }
 }
@@ -327,7 +339,7 @@ async def load_db():
         if key not in data:
             data[key] = copy.deepcopy(value)
 
-    # Categories migration
+    # Categories & files migration
     for cat_key, default_cat in DEFAULT_STATE["categories"].items():
         if cat_key not in data["categories"]:
             data["categories"][cat_key] = copy.deepcopy(default_cat)
@@ -340,6 +352,8 @@ async def load_db():
             f.setdefault("tags", [])
             f.setdefault("difficulty", None)
             f.setdefault("must_read", False)
+            f.setdefault("summary", "")
+            f.setdefault("target_audience", "")
 
     # Links migration
     if "links" not in data:
@@ -401,15 +415,311 @@ async def get_submission(sub_id: str) -> dict:
     return doc if doc else {}
 
 # ============================================================
+# PDF EXTRACTION & AI INSPECTOR
+# ============================================================
+
+def extract_pdf_first_pages_text(file_bytes: bytes, max_pages: int = 6) -> str:
+    """Extracts text from the first N pages of a PDF file using pypdf."""
+    if not PYPDF_AVAILABLE or not file_bytes:
+        return ""
+    try:
+        reader = PdfReader(io.BytesIO(file_bytes))
+        num_pages = len(reader.pages)
+        pages_to_read = min(num_pages, max_pages)
+
+        extracted_text = []
+        for i in range(pages_to_read):
+            page_text = reader.pages[i].extract_text() or ""
+            if page_text.strip():
+                extracted_text.append(f"--- СТРАНИЦА {i+1} ---\n{page_text.strip()}")
+
+        full_text = "\n\n".join(extracted_text)
+        # Truncate text to avoid excessive tokens (~7000 chars)
+        return full_text[:7500]
+    except Exception as e:
+        logger.error("Failed to extract PDF text: %s", e)
+        return ""
+
+async def download_file_bytes(file_id: str) -> bytes:
+    """Downloads Telegram file into memory buffer."""
+    try:
+        tg_file = await bot.get_file(file_id)
+        file_stream = io.BytesIO()
+        await bot.download_file(tg_file.file_path, destination=file_stream)
+        return file_stream.getvalue()
+    except Exception as e:
+        logger.error("Error downloading file %s: %s", file_id, e)
+        return b""
+
+async def fetch_url_bytes(url: str, max_size_mb: int = 15) -> bytes:
+    """Downloads a file from URL into memory."""
+    try:
+        timeout = ClientTimeout(total=20)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    content = await resp.read()
+                    if len(content) <= max_size_mb * 1024 * 1024:
+                        return content
+    except Exception as e:
+        logger.error("Error fetching URL %s: %s", url, e)
+    return b""
+
+async def call_llm_api(prompt: str) -> str:
+    """Calls Gemini or OpenAI LLM API."""
+    if GEMINI_API_KEY:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1000}
+        }
+        timeout = ClientTimeout(total=20)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        return candidates[0]["content"]["parts"][0]["text"].strip()
+    elif OPENAI_API_KEY:
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": "Ты эксперт-библиограф и тренер по олимпиадной математике. Твоя задача — точно анализировать оглавления и предисловия учебных материалов."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.1,
+            "max_tokens": 1000
+        }
+        timeout = ClientTimeout(total=20)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(url, headers=headers, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"].strip()
+    return ""
+
+async def analyze_document_with_ai(file_bytes: bytes, original_name: str) -> dict:
+    """
+    Reads PDF text and analyzes it with AI to extract:
+    - title
+    - summary / purpose
+    - target_audience
+    - categories
+    - difficulty (easy, medium, hard, imo)
+    - tags
+    """
+    pdf_text = extract_pdf_first_pages_text(file_bytes, max_pages=6)
+
+    # Categories guide for prompt
+    available_cats = {
+        "geometry": "Геометрия (планиметрия, стереометрия, тригонометрия)",
+        "number_theory": "Теория чисел (делимость, простые числа, диофантовы уравнения)",
+        "algebra": "Алгебра (многочлены, неравенства, функциональные уравнения, системы)",
+        "combinatorics": "Комбинаторика (графы, инварианты, игры, раскраски, подсчет)",
+        "higher_math": "Матанализ и высшая математика (пределы, интегралы, линал)",
+        "titu": "Книги Титу Андрееску (Titu Andreescu)"
+    }
+
+    clean_name = re.sub(r'[_.]', ' ', original_name).replace("pdf", "").strip()
+
+    prompt = (
+        "Проанализируй первые страницы математической книги/документа и верни СТРОГО JSON-объект.\n\n"
+        f"Имя файла: {original_name}\n\n"
+        f"Текст первых страниц:\n{pdf_text if pdf_text else 'Текст из PDF не удалось извлечь (возможно скан). Ориентируйся по имени файла.'}\n\n"
+        "Доступные категории: " + json.dumps(available_cats, ensure_ascii=False) + "\n\n"
+        "Требования к ответу (ТОЛЬКО валидный JSON без лишнего текста):\n"
+        "{\n"
+        '  "title": "Красивое и точное название книги с автором (на русском или английском)",\n'
+        '  "summary": "Краткое описание (2-3 предложения): о чем книга, какие темы, для чего предназначена",\n'
+        '  "target_audience": "Для кого предназначена (например: 7-9 класс начинающие / 9-11 класс регион / сборная IMO / студенты)",\n'
+        '  "categories": ["geometry"], // список ключей подходящих категорий из доступных выше\n'
+        '  "difficulty": "medium", // строго одно из: "easy", "medium", "hard", "imo"\n'
+        '  "tags": ["#geometry", "#planimetry", "#olympiad"] // 3-6 хештегов\n'
+        "}"
+    )
+
+    ai_raw = await call_llm_api(prompt)
+
+    if ai_raw:
+        try:
+            json_match = re.search(r"\{.*\}", ai_raw, re.DOTALL)
+            if json_match:
+                parsed = json.loads(json_match.group(0))
+                # Validate categories
+                cats = [c for c in parsed.get("categories", []) if c in DATABASE.get("categories", {})]
+                if not cats:
+                    cats = ["algebra"]
+                
+                diff = str(parsed.get("difficulty", "medium")).lower()
+                if diff not in ["easy", "medium", "hard", "imo"]:
+                    diff = "medium"
+
+                return {
+                    "title": parsed.get("title", clean_name),
+                    "summary": parsed.get("summary", "Математический материал"),
+                    "target_audience": parsed.get("target_audience", "Школьники и олимпиадники"),
+                    "categories": cats,
+                    "difficulty": diff,
+                    "tags": [t if t.startswith("#") else f"#{t}" for t in parsed.get("tags", [])]
+                }
+        except Exception as e:
+            logger.error("Failed to parse AI JSON response: %s (Raw: %s)", e, ai_raw)
+
+    # Heuristic fallback if AI fails or no API key is set
+    detected_cats = []
+    text_to_check = (clean_name + " " + pdf_text).lower()
+    if any(k in text_to_check for k in ["геометр", "geometr", "треуголь", "окружн", "планиметр"]):
+        detected_cats.append("geometry")
+    if any(k in text_to_check for k in ["чисел", "делим", "number theory", "прост"]):
+        detected_cats.append("number_theory")
+    if any(k in text_to_check for k in ["алгебр", "algebra", "неравенст", "многочлен"]):
+        detected_cats.append("algebra")
+    if any(k in text_to_check for k in ["комбинат", "combinatorics", "граф", "дирихле"]):
+        detected_cats.append("combinatorics")
+    if any(k in text_to_check for k in ["матанализ", "интеграл", "дифференц", "calculus"]):
+        detected_cats.append("higher_math")
+    if any(k in text_to_check for k in ["titu", "andreescu"]):
+        detected_cats.append("titu")
+
+    if not detected_cats:
+        detected_cats = ["algebra"]
+
+    detected_diff = "medium"
+    if any(k in text_to_check for k in ["imo", "всерос", "межнар", "закл"]):
+        detected_diff = "imo"
+    elif any(k in text_to_check for k in ["сложн", "hard", "продвинут"]):
+        detected_diff = "hard"
+    elif any(k in text_to_check for k in ["начинающ", "прост", "базов", "easy", "с нуля"]):
+        detected_diff = "easy"
+
+    return {
+        "title": clean_name or "Учебный материал",
+        "summary": "Математический сборник для изучения и решения задач.",
+        "target_audience": "Школьники и студенты",
+        "categories": detected_cats,
+        "difficulty": detected_diff,
+        "tags": [f"#{c}" for c in detected_cats] + ["#math"]
+    }
+
+# ============================================================
+# AI RECOMMENDATION ENGINE (CHAT & SEARCH)
+# ============================================================
+
+def get_catalog_files_list() -> list:
+    """Returns a unique flat list of all files with full AI metadata."""
+    files_dict = {}
+    for cat_key, cat_data in DATABASE.get("categories", {}).items():
+        for f in cat_data.get("files", []):
+            uid = f.get("file_unique_id")
+            if uid and uid not in files_dict:
+                files_dict[uid] = {
+                    "uid": uid,
+                    "file_id": f.get("file_id"),
+                    "caption": f.get("caption", "Без названия"),
+                    "category": cat_data.get("title", cat_key),
+                    "summary": f.get("summary", ""),
+                    "target_audience": f.get("target_audience", ""),
+                    "tags": f.get("tags", []),
+                    "difficulty": f.get("difficulty") or "Любой / Не указан",
+                    "must_read": f.get("must_read", False),
+                }
+    return list(files_dict.values())
+
+async def ai_recommend_materials(user_query: str, user_id: int) -> tuple:
+    """Main entrypoint for AI recommendations. Returns (text_response, [file_uids])."""
+    files = get_catalog_files_list()
+    if not files:
+        return "В библиотеке пока нет доступных файлов для рекомендации.", []
+
+    catalog_summary = []
+    for f in files:
+        catalog_summary.append(
+            f"ID: {f['uid']}\n"
+            f"• Название: {f['caption']}\n"
+            f"• Раздел: {f['category']}\n"
+            f"• Описание/Суть: {f['summary']}\n"
+            f"• Аудитория: {f['target_audience']}\n"
+            f"• Уровень: {f['difficulty']} | Теги: {', '.join(f['tags'])}"
+        )
+    catalog_text = "\n\n".join(catalog_summary)
+
+    lang = get_user_language(user_id)
+    lang_instruction = "Ответь на русском языке." if lang == "ru" else "Respond in English."
+
+    prompt = (
+        f"Ты — опытный ИИ-ментор и тренер по олимпиадной математике.\n"
+        f"Пользователь ищет материалы в нашей математической библиотеке.\n\n"
+        f"Каталог всех книг с их реальным содержанием и уровнем:\n{catalog_text}\n\n"
+        f"Запрос пользователя: \"{user_query}\"\n\n"
+        f"Инструкция:\n"
+        f"1. Выбери от 1 до 3 самых подходящих файлов из каталога под уровень, класс, тему и цель пользователя.\n"
+        f"2. {lang_instruction}\n"
+        f"3. Опиши каждую выбранную книгу, объясни почему она идеально подходит под его запрос и как по ней заниматься.\n"
+        f"4. В САМОМ КОНЦЕ ответа обязательно напиши строго строку в формате: MATCHED_UIDS:[id1, id2]\n"
+        f"Пример конца ответа: MATCHED_UIDS:[12345, 67890]"
+    )
+
+    ai_response = await call_llm_api(prompt)
+
+    if ai_response:
+        uids = []
+        uid_match = re.search(r"MATCHED_UIDS:\s*\[(.*?)\]", ai_response)
+        if uid_match:
+            raw_uids = uid_match.group(1).split(",")
+            uids = [u.strip().strip("'\"") for u in raw_uids if u.strip()]
+            ai_response = re.sub(r"MATCHED_UIDS:\s*\[(.*?)\]", "", ai_response).strip()
+
+        valid_uids = [u for u in uids if get_file_by_uid(u)]
+        if not valid_uids:
+            valid_uids = [f["uid"] for f in files[:2]]
+
+        return ai_response, valid_uids
+
+    # Heuristic fallback matching
+    q_lower = user_query.lower()
+    scored = []
+    for f in files:
+        score = 0
+        haystack = f"{f['caption']} {f['category']} {f['summary']} {f['target_audience']} {' '.join(f['tags'])} {f['difficulty']}".lower()
+        for w in q_lower.split():
+            if len(w) > 2 and w in haystack:
+                score += 3
+        if f["must_read"]:
+            score += 2
+        if score > 0:
+            scored.append((score, f))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_matches = [item[1] for item in scored[:3]] or files[:3]
+
+    text = (
+        "🤖 <b>Рекомендация по твоему запросу:</b>\n\n"
+        f"<i>Запрос:</i> «{html.escape(user_query)}»\n\n"
+        "Я проанализировал описания всех материалов библиотеки и подобрал:\n"
+    )
+    for i, f in enumerate(top_matches, 1):
+        text += (
+            f"\n<b>{i}. {html.escape(f['caption'])}</b>\n"
+            f"📌 Раздел: {f['category']} | 📚 Уровень: {f['difficulty']}\n"
+            f"📝 <i>{html.escape(f['summary'] or 'Классический сборник')}</i>\n"
+        )
+    text += "\nНажми на кнопки ниже, чтобы открыть файлы:"
+    return text, [f["uid"] for f in top_matches]
+
+# ============================================================
 # FSM STATES
 # ============================================================
 
 class FileUpload(StatesGroup):
+    confirming_ai_data = State()
     selecting_categories = State()
     waiting_for_caption = State()
 
 class UserSubmit(StatesGroup):
-    selecting_categories = State()
+    confirming_submission = State()
 
 class EditSubmissionTitle(StatesGroup):
     waiting_for_new_title = State()
@@ -435,184 +745,6 @@ class BroadcastAdmin(StatesGroup):
 
 class AIAssistantState(StatesGroup):
     waiting_for_query = State()
-
-# ============================================================
-# AI RECOMMENDATION ENGINE (GEMINI / OPENAI / SMART FALLBACK)
-# ============================================================
-
-def get_catalog_files_list() -> list:
-    """Returns a unique flat list of all files in catalog."""
-    files_dict = {}
-    for cat_key, cat_data in DATABASE.get("categories", {}).items():
-        for f in cat_data.get("files", []):
-            uid = f.get("file_unique_id")
-            if uid and uid not in files_dict:
-                files_dict[uid] = {
-                    "uid": uid,
-                    "file_id": f.get("file_id"),
-                    "caption": f.get("caption", "Без названия"),
-                    "category": cat_data.get("title", cat_key),
-                    "tags": f.get("tags", []),
-                    "difficulty": f.get("difficulty") or "Любой / Не указан",
-                    "must_read": f.get("must_read", False),
-                }
-    return list(files_dict.values())
-
-async def call_gemini_api(prompt: str) -> str:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 800}
-    }
-    timeout = ClientTimeout(total=15)
-    async with ClientSession(timeout=timeout) as session:
-        async with session.post(url, json=payload) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                candidates = data.get("candidates", [])
-                if candidates:
-                    return candidates[0]["content"]["parts"][0]["text"].strip()
-            else:
-                logger.error("Gemini API error status=%s", resp.status)
-    return ""
-
-async def call_openai_api(prompt: str) -> str:
-    url = "https://api.openai.com/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": "Ты профессиональный ИИ-методист олимпиадной математики."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.2,
-        "max_tokens": 800
-    }
-    timeout = ClientTimeout(total=15)
-    async with ClientSession(timeout=timeout) as session:
-        async with session.post(url, headers=headers, json=payload) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data["choices"][0]["message"]["content"].strip()
-            else:
-                logger.error("OpenAI API error status=%s", resp.status)
-    return ""
-
-def smart_fallback_recommend(query: str, files: list) -> tuple:
-    """Smart heuristic matcher when no LLM API key is present."""
-    q_lower = query.lower()
-    
-    # Detect target difficulty
-    target_diff = None
-    if any(k in q_lower for k in ["легк", "начинающ", "прост", "easy", "базов", "с нуля"]):
-        target_diff = "easy"
-    elif any(k in q_lower for k in ["средн", "medium", "опыт"]):
-        target_diff = "medium"
-    elif any(k in q_lower for k in ["сложн", "hard", "продвинут", "тяжел"]):
-        target_diff = "hard"
-    elif any(k in q_lower for k in ["imo", "всерос", "межнар", "закл", "международ"]):
-        target_diff = "imo"
-
-    # Keywords extraction
-    words = [re.sub(r'[^a-zA-Zа-яА-Я0-9]', '', w) for w in q_lower.split()]
-    words = [w for w in words if len(w) > 2]
-
-    scored = []
-    for f in files:
-        score = 0
-        haystack = f"{f['caption']} {f['category']} {' '.join(f['tags'])} {f['difficulty']}".lower()
-
-        # Word matching
-        for w in words:
-            if w in haystack:
-                score += 3
-                if w in f["caption"].lower():
-                    score += 4
-
-        # Difficulty bonus
-        if target_diff and f["difficulty"] and target_diff == f["difficulty"].lower():
-            score += 6
-        if f["must_read"]:
-            score += 2
-
-        if score > 0:
-            scored.append((score, f))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top_matches = [item[1] for item in scored[:3]]
-
-    if not top_matches:
-        top_matches = [f for f in files if f["must_read"]][:3] or files[:3]
-
-    text = (
-        "🤖 <b>Рекомендация ИИ по твоему запросу:</b>\n\n"
-        f"<i>Запрос:</i> «{html.escape(query)}»\n\n"
-        "Я проанализировал библиотеку и подобрал лучшие материалы по твоим критериям:\n"
-    )
-    for i, f in enumerate(top_matches, 1):
-        diff_str = f" | 📚 Уровень: {f['difficulty']}" if f['difficulty'] and f['difficulty'] != "Любой / Не указан" else ""
-        text += f"\n<b>{i}. {html.escape(f['caption'])}</b>\n📌 Раздел: {f['category']}{diff_str}\n"
-
-    text += "\nНажми на кнопки ниже, чтобы открыть нужные файлы:"
-    return text, [f["uid"] for f in top_matches]
-
-async def ai_recommend_materials(user_query: str, user_id: int) -> tuple:
-    """Main entrypoint for AI recommendations. Returns (text_response, [file_uids])."""
-    files = get_catalog_files_list()
-    if not files:
-        return "В библиотеке пока нет доступных файлов для рекомендации.", []
-
-    catalog_summary = []
-    for idx, f in enumerate(files):
-        catalog_summary.append(
-            f"ID: {f['uid']} | Название: {f['caption']} | Раздел: {f['category']} | "
-            f"Теги: {', '.join(f['tags'])} | Уровень: {f['difficulty']} | Must-read: {f['must_read']}"
-        )
-    catalog_text = "\n".join(catalog_summary)
-
-    lang = get_user_language(user_id)
-    lang_instruction = "Ответь на русском языке." if lang == "ru" else "Respond in English."
-
-    prompt = (
-        f"Ты — опытный ИИ-ментор и тренер по олимпиадной математике.\n"
-        f"Пользователь ищет материалы в нашей математической библиотеке.\n\n"
-        f"Каталог доступных файлов:\n{catalog_text}\n\n"
-        f"Запрос пользователя: \"{user_query}\"\n\n"
-        f"Инструкция:\n"
-        f"1. Выбери от 1 до 3 самых подходящих файлов из каталога под уровень, тему и цель пользователя.\n"
-        f"2. {lang_instruction}\n"
-        f"3. Кратко и доброжелательно объясни, почему эти материалы подходят и как по ним заниматься.\n"
-        f"4. В САМОМ КОНЦЕ ответа обязательно напиши строго строку в формате: MATCHED_UIDS:[id1, id2]\n"
-        f"Пример конца ответа: MATCHED_UIDS:[12345, 67890]"
-    )
-
-    ai_response = ""
-    try:
-        if GEMINI_API_KEY:
-            ai_response = await call_gemini_api(prompt)
-        elif OPENAI_API_KEY:
-            ai_response = await call_openai_api(prompt)
-    except Exception as e:
-        logger.error("Error in AI recommendation call: %s", e)
-
-    if ai_response:
-        # Extract matched UIDs
-        uids = []
-        uid_match = re.search(r"MATCHED_UIDS:\s*\[(.*?)\]", ai_response)
-        if uid_match:
-            raw_uids = uid_match.group(1).split(",")
-            uids = [u.strip().strip("'\"") for u in raw_uids if u.strip()]
-            ai_response = re.sub(r"MATCHED_UIDS:\s*\[(.*?)\]", "", ai_response).strip()
-
-        # Validate UIDs exist
-        valid_uids = [u for u in uids if get_file_by_uid(u)]
-        if not valid_uids:
-            valid_uids = [f["uid"] for f in files[:2]]
-
-        return ai_response, valid_uids
-
-    # Fallback to local heuristic engine
-    return smart_fallback_recommend(user_query, files)
 
 # ============================================================
 # KEYBOARDS
@@ -732,28 +864,10 @@ def build_admin_categories_kb(selected: set):
     ])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
-def build_user_categories_kb(selected: set):
-    builder = []
-    for cat_key, cat_data in DATABASE["categories"].items():
-        mark = "☑️" if cat_key in selected else "▫️"
-        builder.append([
-            InlineKeyboardButton(
-                text=f"{mark} {cat_data['title']}",
-                callback_data=f"usub_toggle:{cat_key}"
-            )
-        ])
-    builder.append([
-        InlineKeyboardButton(text=f"✅ Отправить ({len(selected)})", callback_data="usub_done")
-    ])
-    builder.append([
-        InlineKeyboardButton(text="❌ Отмена", callback_data="usub_cancel")
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=builder)
-
 def build_submission_action_kb(sub_id: str):
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"sub_approve:{sub_id}")],
+            [InlineKeyboardButton(text="✅ Одобрить и опубликовать", callback_data=f"sub_approve:{sub_id}")],
             [InlineKeyboardButton(text="📁 Изменить разделы", callback_data=f"sub_editcat:{sub_id}")],
             [InlineKeyboardButton(text="✏️ Изменить название", callback_data=f"sub_edittitle:{sub_id}")],
             [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"sub_reject:{sub_id}")]
@@ -965,6 +1079,7 @@ async def inline_search(inline_query: InlineQuery):
                 f"{cat_data.get('title', '')} "
                 f"{cat_data.get('title_en', '')} "
                 f"{f.get('caption', '')} "
+                f"{f.get('summary', '')} "
                 + " ".join(f.get("tags", []))
                 + f" {f.get('difficulty', '') or ''}"
             ).lower()
@@ -974,8 +1089,8 @@ async def inline_search(inline_query: InlineQuery):
                     f"📄 <b>{html.escape(f['caption'])}</b>\n"
                     f"📌 Раздел: {html.escape(cat_data['title'])}"
                 )
-                if f.get("tags"):
-                    cap += "\n🏷 Теги: " + " ".join(f["tags"])
+                if f.get("summary"):
+                    cap += f"\n📝 {html.escape(f['summary'])}"
                 if f.get("difficulty"):
                     cap += f"\n📚 Уровень: {f['difficulty']}"
 
@@ -983,6 +1098,7 @@ async def inline_search(inline_query: InlineQuery):
                     InlineQueryResultCachedDocument(
                         id=f["file_unique_id"],
                         title=f["caption"],
+                        description=f.get("summary", ""),
                         document_file_id=f["file_id"],
                         caption=cap,
                         parse_mode=ParseMode.HTML
@@ -1001,10 +1117,10 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await track_user_activity(message.from_user.id, message.from_user.username or "")
     await message.answer(
         "👋 <b>Здарова! Добро пожаловать в библиотеку matham.</b>\n\n"
-        "🤖 <b>AI Помощник</b> — подберёт книгу под твой уровень и тему\n"
+        "🤖 <b>AI Помощник</b> — прочитал все книги и подберёт материал под твой уровень и задачи\n"
         "📚 <b>Каталог</b> — все материалы по разделам\n"
         "🎯 <b>Задача дня</b> — ежедневная олимпиадная задача\n"
-        "⭐ <b>Must-read</b> — обязательная классика",
+        "⭐ <b>Must-read</b> — проверенная классика",
         parse_mode=ParseMode.HTML,
         reply_markup=get_main_menu_keyboard(message.from_user.id)
     )
@@ -1086,12 +1202,12 @@ async def process_back_to_main(callback: types.CallbackQuery, state: FSMContext)
             await callback.message.delete()
         except Exception:
             pass
-        await callback.message.answer(text, reply_markup=kb)
+        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
         try:
-            await callback.message.edit_text(text, reply_markup=kb)
+            await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
         except Exception:
-            await callback.message.answer(text, reply_markup=kb)
+            await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     await callback.answer()
 
@@ -1152,7 +1268,6 @@ async def process_ai_query(message: types.Message, state: FSMContext):
     response_text, matched_uids = await ai_recommend_materials(message.text, message.from_user.id)
     await state.clear()
 
-    # Build download buttons for recommended files
     builder = []
     for uid in matched_uids:
         f = get_file_by_uid(uid)
@@ -2037,13 +2152,16 @@ async def process_random(target, diff: str):
     if selected_file.get("difficulty"):
         text += f"\nСложность: <b>{selected_file['difficulty'].upper()}</b>"
 
-    cap = f"📄 {html.escape(selected_file['caption'])}"
+    cap = f"📄 <b>{html.escape(selected_file['caption'])}</b>"
+    if selected_file.get("summary"):
+        cap += f"\n\n📝 {html.escape(selected_file['summary'])}"
 
     if isinstance(target, types.Message):
         await target.answer(text, parse_mode=ParseMode.HTML)
         await target.answer_document(
             document=selected_file["file_id"],
             caption=cap,
+            parse_mode=ParseMode.HTML,
             reply_markup=get_file_view_keyboard(selected_file["file_unique_id"], target.from_user.id)
         )
     else:
@@ -2055,6 +2173,7 @@ async def process_random(target, diff: str):
         await target.message.answer_document(
             document=selected_file["file_id"],
             caption=cap,
+            parse_mode=ParseMode.HTML,
             reply_markup=get_file_view_keyboard(selected_file["file_unique_id"], target.from_user.id)
         )
 
@@ -2112,13 +2231,15 @@ async def view_file(callback: types.CallbackQuery):
 
     await callback.answer("Отправляю... ⏳")
     cap = f"📄 <b>{html.escape(f['caption'])}</b>"
+    if f.get("summary"):
+        cap += f"\n\n📝 <b>Описание:</b> {html.escape(f['summary'])}"
+    if f.get("target_audience"):
+        cap += f"\n🎯 <b>Аудитория:</b> {html.escape(f['target_audience'])}"
+    if f.get("difficulty"):
+        cap += f"\n📚 <b>Уровень:</b> {f['difficulty'].upper()}"
     tags = f.get("tags", [])
     if tags:
-        cap += "\n🏷 Теги: " + " ".join(tags)
-    if f.get("difficulty"):
-        cap += f"\n📚 Уровень: {f['difficulty']}"
-    if f.get("must_read"):
-        cap += "\n⭐ Must-read"
+        cap += "\n🏷 " + " ".join(tags)
 
     await callback.message.answer_document(
         document=f["file_id"],
@@ -2139,7 +2260,6 @@ async def global_search_handler(message: types.Message, state: FSMContext):
     if q_lower in ["удиви меня", "surprise", "рандом", "challenge"]:
         return await cmd_challenge(message)
 
-    # If the user asks a conversational question or asks for recommendation, route to AI
     conversational_triggers = ["посоветуй", "порекомендуй", "что почитать", "для олимпиады", "какой задачник", "для начинающих", "для 9 класса", "для 10 класса", "для 11 класса", "помоги найти"]
     if any(trigger in q_lower for trigger in conversational_triggers) or len(query.split()) > 3:
         loading = await message.answer("🤖 Секунду, подключаю AI для подбора книги...")
@@ -2174,7 +2294,6 @@ async def global_search_handler(message: types.Message, state: FSMContext):
     if not words:
         return
 
-    # Regular keyword ranked search
     scored_files = []
     for cat_data in DATABASE.get("categories", {}).values():
         for f in cat_data.get("files", []):
@@ -2182,6 +2301,7 @@ async def global_search_handler(message: types.Message, state: FSMContext):
                 f"{cat_data.get('title', '')} "
                 f"{cat_data.get('title_en', '')} "
                 f"{f.get('caption', '')} "
+                f"{f.get('summary', '')} "
                 + " ".join(f.get("tags", []))
                 + f" {f.get('difficulty', '') or ''}"
             ).lower()
@@ -2235,7 +2355,7 @@ async def global_search_handler(message: types.Message, state: FSMContext):
         )
 
 # ============================================================
-# ADMIN PANEL
+# ADMIN PANEL & FILE UPLOAD WITH AI PDF SCAN
 # ============================================================
 
 @dp.callback_query(F.data == "admin:main")
@@ -2245,7 +2365,7 @@ async def admin_panel(callback: types.CallbackQuery):
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Добавить файл", callback_data="admin:upload")],
+            [InlineKeyboardButton(text="📤 Добавить файл (AI авто-анализ)", callback_data="admin:upload")],
             [InlineKeyboardButton(text="✏️ Управление файлами", callback_data="menu:catalog")],
             [InlineKeyboardButton(text="🎯 Задача дня", callback_data="admin:tasks")],
             [InlineKeyboardButton(text="⭐ Управление Must-read", callback_data="mustread:main")],
@@ -2256,6 +2376,400 @@ async def admin_panel(callback: types.CallbackQuery):
     )
     await callback.message.edit_text("👑 <b>Админ-панель</b>\n\nВыбери действие:", parse_mode=ParseMode.HTML, reply_markup=keyboard)
     await callback.answer()
+
+@dp.callback_query(F.data == "admin:upload")
+async def adm_upload_start(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    await state.clear()
+    await callback.message.answer("📥 Отправь PDF документ — <b>ИИ прочитает первые 5-6 страниц</b> и сам определит название, уровень, темы и описание!")
+    await callback.answer()
+
+@dp.message(F.document, StateFilter(None))
+async def global_doc_received(message: types.Message, state: FSMContext):
+    if is_admin(message.from_user.id):
+        await process_admin_document(message, state)
+    else:
+        await process_user_submission_doc(message, state)
+
+async def process_admin_document(message: types.Message, state: FSMContext):
+    doc = message.document
+    if get_file_by_uid(doc.file_unique_id):
+        return await message.answer("⚠️ Этот файл уже есть в базе данных!")
+
+    status_msg = await message.answer("⏳ <i>Скачиваю и читаю первые страницы PDF с помощью ИИ...</i>", parse_mode=ParseMode.HTML)
+
+    file_bytes = await download_file_bytes(doc.file_id)
+    original_name = message.caption or doc.file_name or "Документ"
+    ai_meta = await analyze_document_with_ai(file_bytes, original_name)
+
+    await state.update_data(
+        file_id=doc.file_id,
+        file_unique_id=doc.file_unique_id,
+        title=ai_meta["title"],
+        summary=ai_meta["summary"],
+        target_audience=ai_meta["target_audience"],
+        difficulty=ai_meta["difficulty"],
+        tags=ai_meta["tags"],
+        selected=ai_meta["categories"]
+    )
+    await state.set_state(FileUpload.confirming_ai_data)
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    cats_names = ", ".join(DATABASE["categories"][c]["title"] for c in ai_meta["categories"] if c in DATABASE["categories"])
+    preview_text = (
+        "🤖 <b>ИИ проанализировал PDF:</b>\n\n"
+        f"🏷 <b>Название:</b> {html.escape(ai_meta['title'])}\n"
+        f"📁 <b>Разделы:</b> {cats_names}\n"
+        f"📚 <b>Уровень:</b> {ai_meta['difficulty'].upper()}\n"
+        f"🎯 <b>Аудитория:</b> {html.escape(ai_meta['target_audience'])}\n"
+        f"📝 <b>Описание:</b> {html.escape(ai_meta['summary'])}\n"
+        f"🏷 <b>Теги:</b> {' '.join(ai_meta['tags'])}\n\n"
+        "Сохранить в базу или изменить параметры?"
+    )
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Сохранить в каталог", callback_data="ai_save_confirm")],
+            [InlineKeyboardButton(text="📁 Изменить разделы", callback_data="ai_edit_cats")],
+            [InlineKeyboardButton(text="📝 Изменить название", callback_data="ai_edit_title")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="a_cancel")]
+        ]
+    )
+    await message.answer(preview_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+@dp.callback_query(FileUpload.confirming_ai_data, F.data == "ai_save_confirm")
+async def admin_confirm_ai_save(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected_cats = data.get("selected", ["algebra"])
+    uid = data.get("file_unique_id")
+
+    file_entry = {
+        "file_id": data["file_id"],
+        "file_unique_id": uid,
+        "caption": data.get("title", "Без названия"),
+        "summary": data.get("summary", ""),
+        "target_audience": data.get("target_audience", ""),
+        "tags": data.get("tags", []),
+        "must_read": False,
+        "difficulty": data.get("difficulty", "medium")
+    }
+
+    for cat_key in selected_cats:
+        if cat_key in DATABASE["categories"]:
+            DATABASE["categories"][cat_key]["files"].append(copy.deepcopy(file_entry))
+
+    await save_db(DATABASE)
+    await state.clear()
+    await callback.message.edit_text(f"✅ Файл «{file_entry['caption']}» успешно сохранён в каталог!")
+    await callback.answer()
+
+@dp.callback_query(FileUpload.confirming_ai_data, F.data == "ai_edit_cats")
+async def admin_ai_edit_cats(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = set(data.get("selected", []))
+    await state.set_state(FileUpload.selecting_categories)
+    await callback.message.edit_reply_markup(reply_markup=build_admin_categories_kb(selected))
+    await callback.answer()
+
+@dp.callback_query(FileUpload.selecting_categories, F.data.startswith("a_toggle:"))
+async def admin_toggle_cat(callback: types.CallbackQuery, state: FSMContext):
+    cat_key = callback.data.split(":")[1]
+    data = await state.get_data()
+    selected = set(data.get("selected", []))
+
+    if cat_key in selected:
+        selected.remove(cat_key)
+    else:
+        selected.add(cat_key)
+
+    await state.update_data(selected=list(selected))
+    await callback.message.edit_reply_markup(reply_markup=build_admin_categories_kb(selected))
+    await callback.answer()
+
+@dp.callback_query(FileUpload.selecting_categories, F.data == "a_done")
+async def admin_cat_done_save(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = data.get("selected", [])
+    if not selected:
+        return await callback.answer("Выбери хотя бы один раздел!", show_alert=True)
+    await admin_confirm_ai_save(callback, state)
+
+@dp.callback_query(FileUpload.confirming_ai_data, F.data == "ai_edit_title")
+async def admin_ai_edit_title(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(FileUpload.waiting_for_caption)
+    await callback.message.answer("✏️ Введи новое название для файла:")
+    await callback.answer()
+
+@dp.message(FileUpload.waiting_for_caption, F.text)
+async def admin_ai_save_title(message: types.Message, state: FSMContext):
+    await state.update_data(title=message.text.strip())
+    data = await state.get_data()
+    
+    selected_cats = data.get("selected", ["algebra"])
+    uid = data.get("file_unique_id")
+
+    file_entry = {
+        "file_id": data["file_id"],
+        "file_unique_id": uid,
+        "caption": message.text.strip(),
+        "summary": data.get("summary", ""),
+        "target_audience": data.get("target_audience", ""),
+        "tags": data.get("tags", []),
+        "must_read": False,
+        "difficulty": data.get("difficulty", "medium")
+    }
+
+    for cat_key in selected_cats:
+        if cat_key in DATABASE["categories"]:
+            DATABASE["categories"][cat_key]["files"].append(copy.deepcopy(file_entry))
+
+    await save_db(DATABASE)
+    await state.clear()
+    await message.answer(f"✅ Файл «{file_entry['caption']}» успешно сохранён с новым названием!")
+
+@dp.callback_query(F.data == "a_cancel")
+async def admin_cancel_upload(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("❌ Отменено.")
+
+# ============================================================
+# USER FILE SUBMISSIONS WITH AI SCAN
+# ============================================================
+
+@dp.callback_query(F.data == "submit:start")
+async def submit_start(callback: types.CallbackQuery):
+    await track_user_activity(callback.from_user.id, callback.from_user.username or "")
+    await callback.message.answer("📤 Просто пришли сюда PDF-файл — ИИ сам прочитает его и подготовит заявку для админа.")
+    await callback.answer()
+
+async def process_user_submission_doc(message: types.Message, state: FSMContext):
+    doc = message.document
+    if get_file_by_uid(doc.file_unique_id):
+        return await message.answer("⚠️ Этот файл уже есть в каталоге!")
+
+    status_msg = await message.answer("⏳ <i>ИИ анализирует файл...</i>", parse_mode=ParseMode.HTML)
+
+    file_bytes = await download_file_bytes(doc.file_id)
+    original_name = message.caption or doc.file_name or "Документ"
+    ai_meta = await analyze_document_with_ai(file_bytes, original_name)
+
+    sub_id = uuid.uuid4().hex[:8]
+    sub_data = {
+        "_id": sub_id,
+        "user_id": message.from_user.id,
+        "username": message.from_user.username or message.from_user.full_name,
+        "file_id": doc.file_id,
+        "file_unique_id": doc.file_unique_id,
+        "title": ai_meta["title"],
+        "summary": ai_meta["summary"],
+        "target_audience": ai_meta["target_audience"],
+        "difficulty": ai_meta["difficulty"],
+        "tags": ai_meta["tags"],
+        "categories": ai_meta["categories"],
+        "status": "pending"
+    }
+    await save_submission(sub_id, sub_data)
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    await message.answer(
+        f"📤 <b>Файл получен и проанализирован ИИ!</b>\n\n"
+        f"🏷 <b>Название:</b> {html.escape(ai_meta['title'])}\n"
+        f"📝 <b>Описание:</b> {html.escape(ai_meta['summary'])}\n"
+        f"📚 <b>Уровень:</b> {ai_meta['difficulty'].upper()}\n\n"
+        "Заявка отправлена администраторам на проверку. Спасибо! 🙌",
+        parse_mode=ParseMode.HTML
+    )
+
+    cats_text = ", ".join(DATABASE["categories"][c]["title"] for c in sub_data["categories"] if c in DATABASE["categories"])
+    admin_caption = (
+        f"📥 <b>Новая заявка на добавление файла</b>\n"
+        f"👤 От: @{html.escape(sub_data['username'])}\n"
+        f"📄 <b>{html.escape(sub_data['title'])}</b>\n"
+        f"📁 Разделы: {cats_text}\n"
+        f"📚 Уровень: {sub_data['difficulty'].upper()}\n"
+        f"🎯 Аудитория: {html.escape(sub_data['target_audience'])}\n"
+        f"📝 Описание: {html.escape(sub_data['summary'])}"
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_document(
+                admin_id,
+                document=sub_data["file_id"],
+                caption=admin_caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=build_submission_action_kb(sub_id)
+            )
+        except Exception as e:
+            logger.error("Failed to send submission: %s", e)
+
+# ============================================================
+# SUBMISSION MODERATION
+# ============================================================
+
+@dp.callback_query(F.data.startswith("sub_approve:"))
+async def sub_approve(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+
+    sub_id = callback.data.split(":")[1]
+    sub = await get_submission(sub_id)
+    if not sub or sub.get("status") != "pending":
+        return await callback.answer("Уже обработано.", show_alert=True)
+
+    for cat_key in sub.get("categories", ["algebra"]):
+        if cat_key in DATABASE["categories"]:
+            DATABASE["categories"][cat_key]["files"].append({
+                "file_id": sub["file_id"],
+                "file_unique_id": sub["file_unique_id"],
+                "caption": sub["title"],
+                "summary": sub.get("summary", ""),
+                "target_audience": sub.get("target_audience", ""),
+                "tags": sub.get("tags", []),
+                "must_read": False,
+                "difficulty": sub.get("difficulty", "medium")
+            })
+
+    await save_db(DATABASE)
+    sub["status"] = "approved"
+    await save_submission(sub_id, sub)
+    await award_points(sub["user_id"], 15)
+
+    try:
+        await callback.message.edit_caption(
+            caption=(callback.message.caption or "") + "\n\n✅ <b>ОДОБРЕНО И ДОБАВЛЕНО В КАТАЛОГ</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=None
+        )
+    except Exception:
+        pass
+
+    try:
+        await bot.send_message(
+            sub["user_id"],
+            f"✅ Твой файл «{sub['title']}» одобрен и добавлен в библиотеку!\nСпасибо 🙌\n+15 очков к рейтингу!"
+        )
+    except Exception:
+        pass
+
+    await callback.answer("Одобрено!")
+
+@dp.callback_query(F.data.startswith("sub_reject:"))
+async def sub_reject(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+
+    sub_id = callback.data.split(":")[1]
+    sub = await get_submission(sub_id)
+    if not sub or sub.get("status") != "pending":
+        return
+
+    sub["status"] = "rejected"
+    await save_submission(sub_id, sub)
+
+    try:
+        await callback.message.edit_caption(
+            caption=(callback.message.caption or "") + "\n\n❌ <b>ОТКЛОНЕНО</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=None
+        )
+    except Exception:
+        pass
+
+    try:
+        await bot.send_message(sub["user_id"], "😔 Твой файл не был принят администратором.")
+    except Exception:
+        pass
+
+    await callback.answer("Отклонено")
+
+@dp.callback_query(F.data.startswith("sub_edittitle:"))
+async def sub_edittitle_start(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+
+    sub_id = callback.data.split(":")[1]
+    await state.set_state(EditSubmissionTitle.waiting_for_new_title)
+    await state.update_data(edit_sub_id=sub_id)
+    await callback.message.answer("✏️ Отправь новое название для этого файла:")
+    await callback.answer()
+
+@dp.message(EditSubmissionTitle.waiting_for_new_title, F.text)
+async def sub_edittitle_finish(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+
+    data = await state.get_data()
+    sub_id = data.get("edit_sub_id")
+    new_title = message.text.strip()
+    await state.clear()
+
+    sub = await get_submission(sub_id)
+    if not sub:
+        return await message.answer("❌ Заявка не найдена.")
+
+    sub["title"] = new_title
+    await save_submission(sub_id, sub)
+    await message.answer(f"✅ Название изменено на «{new_title}»!")
+
+@dp.callback_query(F.data.startswith("sub_editcat:"))
+async def sub_editcat(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+
+    sub_id = callback.data.split(":")[1]
+    sub = await get_submission(sub_id)
+    if not sub or sub.get("status") != "pending":
+        return
+
+    await callback.message.edit_reply_markup(
+        reply_markup=build_submission_categories_kb(sub_id, sub.get("categories", []))
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("subcat_toggle:"))
+async def subcat_toggle(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+
+    _, sub_id, cat_key = callback.data.split(":")
+    sub = await get_submission(sub_id)
+    if not sub or sub.get("status") != "pending":
+        return
+
+    selected = set(sub.get("categories", []))
+    if cat_key in selected:
+        selected.remove(cat_key)
+    else:
+        selected.add(cat_key)
+
+    sub["categories"] = list(selected)
+    await save_submission(sub_id, sub)
+    await callback.message.edit_reply_markup(
+        reply_markup=build_submission_categories_kb(sub_id, sub["categories"])
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("subcat_done:"))
+async def subcat_done(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    sub_id = callback.data.split(":")[1]
+    await callback.message.edit_reply_markup(reply_markup=build_submission_action_kb(sub_id))
+    await callback.answer()
+
+# ============================================================
+# ADMIN STATS & BROADCAST & FILE MANAGEMENT
+# ============================================================
 
 @dp.callback_query(F.data == "admin:stats")
 async def admin_stats(callback: types.CallbackQuery):
@@ -2297,10 +2811,6 @@ async def admin_stats(callback: types.CallbackQuery):
         )
     )
     await callback.answer()
-
-# ============================================================
-# ADMIN BROADCAST
-# ============================================================
 
 @dp.callback_query(F.data == "admin:broadcast")
 async def admin_broadcast_start(callback: types.CallbackQuery, state: FSMContext):
@@ -2383,698 +2893,12 @@ async def broadcast_confirm(callback: types.CallbackQuery, state: FSMContext):
     )
 
 # ============================================================
-# ADMIN DAILY TASK MANAGEMENT
-# ============================================================
-
-@dp.callback_query(F.data == "admin:tasks")
-async def admin_tasks_menu(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Добавить задачу", callback_data="adm_t:add")],
-            [InlineKeyboardButton(text="📅 Просмотреть задачи", callback_data="tasks:history")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:main")]
-        ]
-    )
-    await callback.message.edit_text("🎯 <b>Управление задачами дня</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
-    await callback.answer()
-
-@dp.callback_query(F.data == "adm_t:add")
-async def adm_task_add(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        return
-    await state.clear()
-    await state.set_state(TaskOfDayAdmin.waiting_for_photo)
-    await callback.message.answer("🖼 Отправь ФОТО задачи дня.")
-    await callback.answer()
-
-@dp.message(TaskOfDayAdmin.waiting_for_photo, F.photo)
-async def adm_task_photo(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    await state.update_data(photo_id=message.photo[-1].file_id)
-    await state.set_state(TaskOfDayAdmin.waiting_for_solution)
-    await message.answer(
-        "📝 Теперь отправь решение.\n\n"
-        "Можно:\n"
-        "• написать решение текстом\n"
-        "• отправить фото решения\n"
-        "• отправить '-' чтобы оставить без решения."
-    )
-
-@dp.message(TaskOfDayAdmin.waiting_for_solution, F.text)
-async def adm_task_solution_text(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-
-    solution = "" if message.text.strip() == "-" else message.text
-    await state.update_data(solution=solution, solution_photo_file_id=None)
-    await state.set_state(TaskOfDayAdmin.waiting_for_date)
-    today = get_yerevan_date()
-    await message.answer(f"📅 Отправь дату в формате YYYY-MM-DD.\nИли напиши 'сегодня' ({today}).")
-
-@dp.message(TaskOfDayAdmin.waiting_for_solution, F.photo)
-async def adm_task_solution_photo(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-
-    await state.update_data(solution="", solution_photo_file_id=message.photo[-1].file_id)
-    await state.set_state(TaskOfDayAdmin.waiting_for_date)
-    today = get_yerevan_date()
-    await message.answer(
-        f"📅 Решение-фото сохранено.\n\nТеперь отправь дату в формате YYYY-MM-DD.\nИли напиши 'сегодня' ({today})."
-    )
-
-@dp.message(TaskOfDayAdmin.waiting_for_date, F.text)
-async def adm_task_date(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-
-    date_str = message.text.strip()
-    if date_str.lower() == "сегодня":
-        date_str = get_yerevan_date()
-
-    try:
-        datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        return await message.answer("❌ Неверный формат.\nИспользуй YYYY-MM-DD или 'сегодня'.")
-
-    data = await state.get_data()
-    await state.clear()
-
-    group = get_task_group(date_str)
-    if not group:
-        group = {"tasks": []}
-        DATABASE["daily_tasks"][date_str] = group
-
-    group["tasks"].append({
-        "task_id": uuid.uuid4().hex[:10],
-        "photo_file_id": data["photo_id"],
-        "solution": data.get("solution", ""),
-        "solution_photo_file_id": data.get("solution_photo_file_id"),
-        "votes": {},
-        "user_solutions": {},
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    })
-    for i, task_item in enumerate(group["tasks"], 1):
-        task_item["number"] = i
-
-    await save_db(DATABASE)
-    await message.answer(f"✅ Задача на {date_str} успешно сохранена!")
-
-# ============================================================
-# ADMIN FILE EDITING
-# ============================================================
-
-def update_file_everywhere(uid: str, key: str, value):
-    for cat in DATABASE.get("categories", {}).values():
-        for f in cat.get("files", []):
-            if f.get("file_unique_id") == uid:
-                f[key] = value
-
-@dp.callback_query(F.data.startswith("fe_m:"))
-async def fe_menu(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    uid = callback.data.split(":")[1]
-    f = get_file_by_uid(uid)
-    if not f:
-        return await callback.answer("Файл не найден", show_alert=True)
-    await callback.message.edit_reply_markup(reply_markup=get_file_edit_keyboard(uid))
-    await callback.answer()
-
-@dp.callback_query(F.data == "fe_close")
-async def fe_close(callback: types.CallbackQuery):
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-
-@dp.callback_query(F.data.startswith("fe_mr:"))
-async def fe_toggle_mustread(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    uid = callback.data.split(":")[1]
-    f = get_file_by_uid(uid)
-    if not f:
-        return await callback.answer("Ошибка", show_alert=True)
-    new_val = not f.get("must_read", False)
-    update_file_everywhere(uid, "must_read", new_val)
-    await save_db(DATABASE)
-    await callback.message.edit_reply_markup(reply_markup=get_file_edit_keyboard(uid))
-    await callback.answer("Статус Must-read обновлен")
-
-@dp.callback_query(F.data.startswith("fe_df:"))
-async def fe_diff_menu(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    uid = callback.data.split(":")[1]
-    await callback.message.edit_reply_markup(reply_markup=get_difficulty_keyboard(uid))
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("fed_v:"))
-async def fe_set_diff(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    _, uid, diff = callback.data.split(":")
-    if diff == "none":
-        diff = None
-    update_file_everywhere(uid, "difficulty", diff)
-    await save_db(DATABASE)
-    await callback.message.edit_reply_markup(reply_markup=get_file_edit_keyboard(uid))
-    await callback.answer("Сложность обновлена")
-
-@dp.callback_query(F.data.startswith("fe_t:"))
-async def fe_edit_title(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        return
-    uid = callback.data.split(":")[1]
-    await state.set_state(EditFile.waiting_for_title)
-    await state.update_data(edit_uid=uid)
-    await callback.message.answer("Отправь новое название файла:")
-    await callback.answer()
-
-@dp.message(EditFile.waiting_for_title, F.text)
-async def fe_save_title(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    data = await state.get_data()
-    uid = data["edit_uid"]
-    update_file_everywhere(uid, "caption", message.text.strip())
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer("✅ Название обновлено!")
-
-@dp.callback_query(F.data.startswith("fe_tg:"))
-async def fe_edit_tags(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        return
-    uid = callback.data.split(":")[1]
-    await state.set_state(EditFile.waiting_for_tags)
-    await state.update_data(edit_uid=uid)
-    await callback.message.answer("Отправь теги через пробел.\nНапример: #geometry #imo")
-    await callback.answer()
-
-@dp.message(EditFile.waiting_for_tags, F.text)
-async def fe_save_tags(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    data = await state.get_data()
-    uid = data["edit_uid"]
-    tags = [w for w in message.text.split() if w.startswith("#")]
-    update_file_everywhere(uid, "tags", tags)
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer(f"✅ Теги обновлены: {' '.join(tags)}")
-
-@dp.callback_query(F.data.startswith("fe_c:"))
-async def fe_edit_cats(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    uid = callback.data.split(":")[1]
-    current_cats = set(get_file_categories(uid))
-    await callback.message.edit_reply_markup(reply_markup=get_file_edit_categories_kb(uid, current_cats))
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("fec_t:"))
-async def fe_cat_toggle(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    _, uid, cat_key = callback.data.split(":")
-    kb = callback.message.reply_markup
-    selected = set()
-    if kb:
-        for row in kb.inline_keyboard:
-            for btn in row:
-                if btn.callback_data and btn.callback_data.startswith("fec_t:") and "☑️" in btn.text:
-                    selected.add(btn.callback_data.split(":")[2])
-
-    if cat_key in selected:
-        selected.remove(cat_key)
-    else:
-        selected.add(cat_key)
-
-    await callback.message.edit_reply_markup(reply_markup=get_file_edit_categories_kb(uid, selected))
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("fec_s:"))
-async def fe_cat_save(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    uid = callback.data.split(":")[1]
-    kb = callback.message.reply_markup
-    new_cats = set()
-    if kb:
-        for row in kb.inline_keyboard:
-            for btn in row:
-                if btn.callback_data and btn.callback_data.startswith("fec_t:") and "☑️" in btn.text:
-                    new_cats.add(btn.callback_data.split(":")[2])
-
-    if not new_cats:
-        return await callback.answer("Нужна хотя бы одна категория!", show_alert=True)
-
-    f_master = get_file_by_uid(uid)
-    if not f_master:
-        return await callback.answer("Ошибка", show_alert=True)
-
-    f_copy = copy.deepcopy(f_master)
-    for cat_data in DATABASE["categories"].values():
-        cat_data["files"] = [x for x in cat_data.get("files", []) if x.get("file_unique_id") != uid]
-
-    for cat in new_cats:
-        DATABASE["categories"][cat]["files"].append(f_copy)
-
-    await save_db(DATABASE)
-    await callback.message.edit_reply_markup(reply_markup=get_file_edit_keyboard(uid))
-    await callback.answer("Категории обновлены!")
-
-@dp.callback_query(F.data.startswith("fe_doc:"))
-async def fe_doc_start(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        return
-    uid = callback.data.split(":")[1]
-    await state.set_state(EditFile.waiting_for_document)
-    await state.update_data(edit_uid=uid)
-    await callback.message.answer("Отправь новый файл-документ:")
-    await callback.answer()
-
-@dp.message(EditFile.waiting_for_document, F.document)
-async def fe_doc_receive(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    data = await state.get_data()
-    uid = data["edit_uid"]
-    doc = message.document
-    old_uid = uid
-
-    update_file_everywhere(old_uid, "file_id", doc.file_id)
-    update_file_everywhere(old_uid, "file_unique_id", doc.file_unique_id)
-
-    for u_id, u in DATABASE.get("users", {}).items():
-        if old_uid in u.get("favorites", []):
-            u["favorites"].remove(old_uid)
-            u["favorites"].append(doc.file_unique_id)
-            await db_collection.update_one(
-                {"_id": DB_DOC_ID},
-                {"$set": {f"data.users.{u_id}.favorites": u["favorites"]}}
-            )
-
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer("✅ Документ успешно заменен!")
-
-@dp.callback_query(F.data.startswith("fd:"))
-async def fe_delete_file(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    uid = callback.data.split(":")[1]
-
-    for cat_data in DATABASE.get("categories", {}).values():
-        cat_data["files"] = [x for x in cat_data.get("files", []) if x.get("file_unique_id") != uid]
-
-    for user in DATABASE.get("users", {}).values():
-        if uid in user.get("favorites", []):
-            user["favorites"].remove(uid)
-
-    await save_db(DATABASE)
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    await callback.answer("🗑 Файл полностью удален из базы", show_alert=True)
-
-# ============================================================
-# ADMIN FILE UPLOAD
-# ============================================================
-
-@dp.callback_query(F.data == "admin:upload")
-async def adm_upload_start(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        return
-    await state.clear()
-    await callback.message.answer("📥 Отправь документ (PDF и т.д.), чтобы добавить его в базу.")
-    await callback.answer()
-
-@dp.message(FileUpload.selecting_categories, F.document)
-async def admin_doc_received_state(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    await process_admin_document(message, state)
-
-@dp.message(F.document, StateFilter(None))
-async def global_doc_received(message: types.Message, state: FSMContext):
-    if is_admin(message.from_user.id):
-        await process_admin_document(message, state)
-    else:
-        await process_user_submission_doc(message, state)
-
-async def process_admin_document(message: types.Message, state: FSMContext):
-    doc = message.document
-    if get_file_by_uid(doc.file_unique_id):
-        return await message.answer("⚠️ Этот файл уже есть в базе данных!")
-
-    default_name = message.caption if message.caption else (doc.file_name or "Без названия")
-    await state.update_data(
-        file_id=doc.file_id,
-        file_unique_id=doc.file_unique_id,
-        default_name=default_name,
-        selected=[]
-    )
-    await state.set_state(FileUpload.selecting_categories)
-    await message.answer(
-        f"📥 <b>Новый файл:</b> <code>{html.escape(default_name)}</code>\nОтметь разделы:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=build_admin_categories_kb(set())
-    )
-
-@dp.callback_query(FileUpload.selecting_categories, F.data.startswith("a_toggle:"))
-async def admin_toggle_cat(callback: types.CallbackQuery, state: FSMContext):
-    cat_key = callback.data.split(":")[1]
-    data = await state.get_data()
-    selected = set(data.get("selected", []))
-
-    if cat_key in selected:
-        selected.remove(cat_key)
-    else:
-        selected.add(cat_key)
-
-    await state.update_data(selected=list(selected))
-    await callback.message.edit_reply_markup(reply_markup=build_admin_categories_kb(selected))
-    await callback.answer()
-
-@dp.callback_query(FileUpload.selecting_categories, F.data == "a_cancel")
-@dp.callback_query(FileUpload.waiting_for_caption, F.data == "a_cancel")
-async def admin_cancel_upload(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text("❌ Отменено.")
-
-@dp.callback_query(FileUpload.selecting_categories, F.data == "a_done")
-async def admin_categories_done(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    selected = set(data.get("selected", []))
-    if not selected:
-        return await callback.answer("⚠️ Отметь хотя бы один раздел.", show_alert=True)
-
-    await state.set_state(FileUpload.waiting_for_caption)
-    default_name = data.get("default_name", "File")
-    builder = [
-        [InlineKeyboardButton(text=f"📝 Оставить: {default_name[:20]}...", callback_data="a_skip_caption")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="a_cancel")]
-    ]
-    await callback.message.edit_text(
-        "✍️ Введи название файла или нажми оставить:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
-    )
-
-async def _admin_save_file(state: FSMContext, caption: str):
-    data = await state.get_data()
-    selected = data.get("selected", [])
-    uid = data.get("file_unique_id")
-
-    for cat_key in selected:
-        DATABASE["categories"][cat_key]["files"].append({
-            "file_id": data["file_id"],
-            "file_unique_id": uid,
-            "caption": caption,
-            "tags": [],
-            "must_read": False,
-            "difficulty": None
-        })
-
-    await save_db(DATABASE)
-    return selected
-
-@dp.callback_query(FileUpload.waiting_for_caption, F.data == "a_skip_caption")
-async def admin_skip_caption(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    await _admin_save_file(state, data["default_name"])
-    await callback.message.edit_text("✅ Файл сохранён!")
-    await state.clear()
-
-@dp.message(FileUpload.waiting_for_caption, F.text)
-async def admin_save_custom_caption(message: types.Message, state: FSMContext):
-    await _admin_save_file(state, message.text.strip())
-    await message.answer("✅ Файл сохранён!")
-    await state.clear()
-
-# ============================================================
-# USER FILE SUBMISSIONS
-# ============================================================
-
-@dp.callback_query(F.data == "submit:start")
-async def submit_start(callback: types.CallbackQuery):
-    await track_user_activity(callback.from_user.id, callback.from_user.username or "")
-    await callback.message.answer("📤 Просто пришли сюда файл (PDF и т.п.) — я передам его админу.")
-    await callback.answer()
-
-async def process_user_submission_doc(message: types.Message, state: FSMContext):
-    doc = message.document
-    if get_file_by_uid(doc.file_unique_id):
-        return await message.answer("⚠️ Этот файл уже есть в каталоге!")
-
-    default_name = message.caption if message.caption else (doc.file_name or "Без названия")
-    await state.update_data(
-        file_id=doc.file_id,
-        file_unique_id=doc.file_unique_id,
-        default_name=default_name,
-        selected=[]
-    )
-    await state.set_state(UserSubmit.selecting_categories)
-    await message.answer(
-        f"📥 Файл получен: <code>{html.escape(default_name)}</code>\nПодскажи раздел (необязательно):",
-        parse_mode=ParseMode.HTML,
-        reply_markup=build_user_categories_kb(set())
-    )
-
-@dp.callback_query(UserSubmit.selecting_categories, F.data.startswith("usub_toggle:"))
-async def usub_toggle(callback: types.CallbackQuery, state: FSMContext):
-    cat_key = callback.data.split(":")[1]
-    data = await state.get_data()
-    selected = set(data.get("selected", []))
-
-    if cat_key in selected:
-        selected.remove(cat_key)
-    else:
-        selected.add(cat_key)
-
-    await state.update_data(selected=list(selected))
-    await callback.message.edit_reply_markup(reply_markup=build_user_categories_kb(selected))
-    await callback.answer()
-
-@dp.callback_query(UserSubmit.selecting_categories, F.data == "usub_cancel")
-async def usub_cancel(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text("❌ Отправка отменена.")
-
-@dp.callback_query(UserSubmit.selecting_categories, F.data == "usub_done")
-async def usub_done(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    sub_id = uuid.uuid4().hex[:8]
-    sub_data = {
-        "_id": sub_id,
-        "user_id": callback.from_user.id,
-        "username": callback.from_user.username or callback.from_user.full_name,
-        "file_id": data["file_id"],
-        "file_unique_id": data.get("file_unique_id"),
-        "title": data["default_name"],
-        "categories": data.get("selected", []),
-        "status": "pending"
-    }
-    await save_submission(sub_id, sub_data)
-    await state.clear()
-    await callback.message.edit_text("📤 Файл отправлен админу. Спасибо! 🙌")
-
-    cats_text = (
-        ", ".join(DATABASE["categories"][c]["title"] for c in sub_data["categories"])
-        if sub_data["categories"]
-        else "Не указано"
-    )
-    caption = (
-        f"📥 <b>Новый файл от пользователя</b>\n"
-        f"👤 От: @{html.escape(sub_data['username'])}\n"
-        f"📄 {html.escape(sub_data['title'])}\n"
-        f"📁 {cats_text}"
-    )
-
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_document(
-                admin_id,
-                document=sub_data["file_id"],
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=build_submission_action_kb(sub_id)
-            )
-        except Exception as e:
-            logger.error("Failed to send submission: %s", e)
-
-# ============================================================
-# SUBMISSION APPROVE / REJECT / EDIT TITLE & CATS
-# ============================================================
-
-@dp.callback_query(F.data.startswith("sub_approve:"))
-async def sub_approve(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-
-    sub_id = callback.data.split(":")[1]
-    sub = await get_submission(sub_id)
-    if not sub or sub.get("status") != "pending":
-        return await callback.answer("Уже обработано.", show_alert=True)
-
-    if not sub.get("categories"):
-        return await callback.answer("Сначала выбери разделы через кнопку 'Изменить разделы'.", show_alert=True)
-
-    for cat_key in sub["categories"]:
-        DATABASE["categories"][cat_key]["files"].append({
-            "file_id": sub["file_id"],
-            "file_unique_id": sub["file_unique_id"],
-            "caption": sub["title"],
-            "tags": [],
-            "must_read": False,
-            "difficulty": None
-        })
-
-    await save_db(DATABASE)
-    sub["status"] = "approved"
-    await save_submission(sub_id, sub)
-    await award_points(sub["user_id"], 15)
-
-    try:
-        await callback.message.edit_caption(
-            caption=(callback.message.caption or "") + "\n\n✅ <b>ОДОБРЕНО</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=None
-        )
-    except Exception:
-        pass
-
-    try:
-        await bot.send_message(
-            sub["user_id"],
-            f"✅ Твой файл «{sub['title']}» добавлен в каталог!\nСпасибо 🙌\n+15 очков к рейтингу!"
-        )
-    except Exception:
-        pass
-
-    await callback.answer("Одобрено!")
-
-@dp.callback_query(F.data.startswith("sub_reject:"))
-async def sub_reject(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-
-    sub_id = callback.data.split(":")[1]
-    sub = await get_submission(sub_id)
-    if not sub or sub.get("status") != "pending":
-        return
-
-    sub["status"] = "rejected"
-    await save_submission(sub_id, sub)
-
-    try:
-        await callback.message.edit_caption(
-            caption=(callback.message.caption or "") + "\n\n❌ <b>ОТКЛОНЕНО</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=None
-        )
-    except Exception:
-        pass
-
-    try:
-        await bot.send_message(sub["user_id"], "😔 Твой файл не был принят администратором.")
-    except Exception:
-        pass
-
-    await callback.answer("Отклонено")
-
-@dp.callback_query(F.data.startswith("sub_edittitle:"))
-async def sub_edittitle_start(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        return
-
-    sub_id = callback.data.split(":")[1]
-    await state.set_state(EditSubmissionTitle.waiting_for_new_title)
-    await state.update_data(edit_sub_id=sub_id, edit_msg_id=callback.message.message_id)
-    await callback.message.answer("✏️ Отправь новое название для этого файла:")
-    await callback.answer()
-
-@dp.message(EditSubmissionTitle.waiting_for_new_title, F.text)
-async def sub_edittitle_finish(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-
-    data = await state.get_data()
-    sub_id = data.get("edit_sub_id")
-    new_title = message.text.strip()
-    await state.clear()
-
-    sub = await get_submission(sub_id)
-    if not sub:
-        return await message.answer("❌ Заявка не найдена.")
-
-    sub["title"] = new_title
-    await save_submission(sub_id, sub)
-    await message.answer(f"✅ Название изменено на «{new_title}»!")
-
-@dp.callback_query(F.data.startswith("sub_editcat:"))
-async def sub_editcat(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-
-    sub_id = callback.data.split(":")[1]
-    sub = await get_submission(sub_id)
-    if not sub or sub.get("status") != "pending":
-        return
-
-    await callback.message.edit_reply_markup(
-        reply_markup=build_submission_categories_kb(sub_id, sub.get("categories", []))
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("subcat_toggle:"))
-async def subcat_toggle(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-
-    _, sub_id, cat_key = callback.data.split(":")
-    sub = await get_submission(sub_id)
-    if not sub or sub.get("status") != "pending":
-        return
-
-    selected = set(sub.get("categories", []))
-    if cat_key in selected:
-        selected.remove(cat_key)
-    else:
-        selected.add(cat_key)
-
-    sub["categories"] = list(selected)
-    await save_submission(sub_id, sub)
-    await callback.message.edit_reply_markup(
-        reply_markup=build_submission_categories_kb(sub_id, sub["categories"])
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("subcat_done:"))
-async def subcat_done(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    sub_id = callback.data.split(":")[1]
-    await callback.message.edit_reply_markup(reply_markup=build_submission_action_kb(sub_id))
-    await callback.answer()
-
-# ============================================================
-# NOOP
+# NOOP & BOT MENU
 # ============================================================
 
 @dp.callback_query(F.data == "noop")
 async def noop(callback: types.CallbackQuery):
     await callback.answer()
-
-# ============================================================
-# BOT COMMANDS MENU
-# ============================================================
 
 async def set_main_menu(b: Bot):
     commands = [
@@ -3091,14 +2915,14 @@ async def set_main_menu(b: Bot):
     await b.set_my_commands(commands)
 
 # ============================================================
-# WEB SERVER (HEALTH CHECK FOR HOSTING)
+# WEB SERVER & MAIN
 # ============================================================
 
 async def run_web_server():
     app = web.Application()
 
     async def health(request):
-        return web.Response(text="Matham Bot is running happily!")
+        return web.Response(text="Matham Bot with AI PDF Reader is active!")
 
     app.router.add_get("/", health)
     runner = web.AppRunner(app)
@@ -3107,10 +2931,6 @@ async def run_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logger.info("🌐 Web server started on port %s", port)
-
-# ============================================================
-# MAIN
-# ============================================================
 
 async def main():
     global DATABASE
@@ -3127,7 +2947,7 @@ async def main():
 
     DATABASE = await load_db()
     await set_main_menu(bot)
-    logger.info("🤖 Bot started! Admin IDs: %s", ADMIN_IDS)
+    logger.info("🤖 Bot started! Admin IDs: %s | pypdf available: %s", ADMIN_IDS, PYPDF_AVAILABLE)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
