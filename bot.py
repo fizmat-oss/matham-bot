@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher, F, types
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command, StateFilter
@@ -1787,14 +1788,88 @@ async def on_startup():
     ]
     await bot.set_my_commands(commands)
 
-async def main():
-    dp.startup.register(on_startup)
-    logger.info("Starting Telegram Bot listener...")
+
+async def on_shutdown():
+    logger.info("Shutting down Telegram webhook service...")
     try:
-        await dp.start_polling(bot)
+        await bot.delete_webhook(drop_pending_updates=False)
+    except Exception:
+        logger.exception("Failed to delete Telegram webhook")
+    await bot.session.close()
+    mongo_client.close()
+
+
+def get_webhook_url() -> str:
+    # Render exposes the public service URL as RENDER_EXTERNAL_URL.
+    # WEBHOOK_URL can override it when using a custom domain/path.
+    base_url = os.environ.get("WEBHOOK_URL", "").strip().rstrip("/")
+    if not base_url:
+        base_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    if not base_url:
+        raise RuntimeError(
+            "WEBHOOK_URL or RENDER_EXTERNAL_URL must be configured for webhook mode"
+        )
+    if not re.match(r"^https://[^\s]+$", base_url, re.IGNORECASE):
+        raise RuntimeError("WEBHOOK_URL must be a valid HTTPS URL")
+    return f"{base_url}/telegram/webhook"
+
+
+async def health(request: web.Request) -> web.Response:
+    return web.json_response({"status": "ok"})
+
+
+async def main():
+    port_raw = os.environ.get("PORT", "10000")
+    try:
+        port = int(port_raw)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid PORT value: {port_raw!r}") from exc
+
+    webhook_url = get_webhook_url()
+    secret_token = os.environ.get("WEBHOOK_SECRET", "").strip()
+    if secret_token and not re.match(r"^[A-Za-z0-9_-]{1,256}$", secret_token):
+        raise RuntimeError("WEBHOOK_SECRET must contain only A-Z, a-z, 0-9, '_' or '-'")
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+
+    handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+        secret_token=secret_token or None,
+    )
+    handler.register(app, path="/telegram/webhook")
+    setup_application(app, dp, bot=bot)
+
+    async def app_startup(app_instance: web.Application):
+        await on_startup()
+        await bot.set_webhook(
+            url=webhook_url,
+            secret_token=secret_token or None,
+            drop_pending_updates=False,
+            allowed_updates=dp.resolve_used_update_types(),
+        )
+        logger.info("Telegram webhook configured: %s", webhook_url)
+        logger.info("Starting Render Web Service on 0.0.0.0:%d", port)
+
+    async def app_shutdown(app_instance: web.Application):
+        await on_shutdown()
+
+    app.on_startup.append(app_startup)
+    app.on_shutdown.append(app_shutdown)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    logger.info("Web service is listening on 0.0.0.0:%d", port)
+    try:
+        await asyncio.Event().wait()
     finally:
-        await bot.session.close()
-        mongo_client.close()
+        await runner.cleanup()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
