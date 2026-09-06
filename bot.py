@@ -50,6 +50,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN is not configured")
+
 ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = [
     int(x.strip())
@@ -318,6 +321,12 @@ async def load_db():
             task.setdefault("created_at", get_yerevan_date())
             task["number"] = i + 1
 
+    # Persist migrations/defaults immediately so generated IDs and missing fields survive restart.
+    await db_collection.update_one(
+        {"_id": DB_DOC_ID},
+        {"$set": {"data": data}},
+        upsert=True
+    )
     return data
 
 async def save_db(db_data):
@@ -378,9 +387,9 @@ async def download_file_bytes(file_id: str) -> bytes:
 async def call_llm_api(prompt: str, system_prompt: str = "") -> str:
     """Calls Gemini or OpenAI LLM API with automatic retry on rate limits (429)."""
     if GEMINI_API_KEY:
-        models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
+        models = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
         for m in models:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={GEMINI_API_KEY}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent"
             payload = {
                 "contents": [{"parts": [{"text": (f"{system_prompt}\n\n" if system_prompt else "") + prompt}]}],
                 "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1500}
@@ -390,7 +399,11 @@ async def call_llm_api(prompt: str, system_prompt: str = "") -> str:
                 try:
                     timeout = ClientTimeout(total=25)
                     async with ClientSession(timeout=timeout) as session:
-                        async with session.post(url, json=payload) as resp:
+                        async with session.post(
+                            url,
+                            headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+                            json=payload,
+                        ) as resp:
                             if resp.status == 200:
                                 data = await resp.json()
                                 candidates = data.get("candidates", [])
@@ -717,6 +730,7 @@ class EditFile(StatesGroup):
 
 class TaskOfDayAdmin(StatesGroup):
     waiting_for_photo = State()
+    waiting_for_task_text = State()
     waiting_for_solution = State()
     waiting_for_date = State()
 
@@ -955,7 +969,7 @@ async def cb_ai_ask_start(callback: types.CallbackQuery, state: FSMContext):
     await safe_send_or_edit(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="ai:menu")]]))
     await callback.answer()
 
-@dp.message(AIAssistantState.waiting_for_math_question)
+@dp.message(AIAssistantState.waiting_for_math_question, F.text)
 async def process_ai_question(message: types.Message, state: FSMContext):
     await state.clear()
     wait_msg = await message.answer("🧠 <i>Размышляю над решением...</i>", parse_mode=ParseMode.HTML)
@@ -973,7 +987,7 @@ async def cb_ai_books_start(callback: types.CallbackQuery, state: FSMContext):
     await safe_send_or_edit(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="ai:menu")]]))
     await callback.answer()
 
-@dp.message(AIAssistantState.waiting_for_book_recommendation)
+@dp.message(AIAssistantState.waiting_for_book_recommendation, F.text)
 async def process_ai_books(message: types.Message, state: FSMContext):
     await state.clear()
     wait_msg = await message.answer("🔍 <i>Анализирую библиотеку и подбираю книги...</i>", parse_mode=ParseMode.HTML)
@@ -1127,9 +1141,29 @@ async def cb_challenge_main(callback: types.CallbackQuery):
         await callback.answer("Каталог пуст.", show_alert=True)
         return
 
-    random_file = random.choice(files)
-    uid = random_file["uid"]
-    await cb_view_file(types.CallbackQuery(id=callback.id, from_user=callback.from_user, message=callback.message, data=f"file:view:{uid}"))
+    f = random.choice(files)
+    uid = f["uid"]
+    diff_str = DIFF_NAMES.get(f.get("difficulty", "medium"), "🟡 Medium")
+    tags_str = " ".join(f.get("tags", []))
+    caption_text = (
+        f"📖 <b>{html.escape(f.get('caption', 'Без названия'))}</b>\n\n"
+        f"📝 <b>Описание:</b> {html.escape(f.get('summary', '—'))}\n"
+        f"🎯 <b>Целевая аудитория:</b> {html.escape(f.get('target_audience', '—'))}\n"
+        f"📊 <b>Сложность:</b> {diff_str}\n"
+        f"🏷 <b>Теги:</b> {html.escape(tags_str)}"
+    )
+    try:
+        await callback.message.answer_document(
+            document=f["file_id"],
+            caption=caption_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_file_view_keyboard(uid, callback.from_user.id)
+        )
+    except Exception as e:
+        logger.error("Failed to send random document: %s", e)
+        await callback.answer("Ошибка при отправке файла.", show_alert=True)
+        return
+    await callback.answer()
 
 # ============================================================
 # ROUTE HANDLERS: LINKS & RATING
@@ -1227,7 +1261,15 @@ async def show_daily_task(target, date_str: str, task_idx: int):
 async def cb_task_view(callback: types.CallbackQuery):
     parts = callback.data.split(":")
     date_str = parts[2]
-    task_idx = int(parts[3])
+    try:
+        task_idx = int(parts[3])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректная задача.", show_alert=True)
+        return
+    tasks = DATABASE.get("daily_tasks", {}).get(date_str, {}).get("tasks", [])
+    if task_idx < 0 or task_idx >= len(tasks):
+        await callback.answer("Задача не найдена.", show_alert=True)
+        return
     await show_daily_task(callback, date_str, task_idx)
     await callback.answer()
 
@@ -1256,11 +1298,25 @@ async def process_user_task_solution(message: types.Message, state: FSMContext):
     task_idx = data["task_idx"]
     uid_str = str(message.from_user.id)
 
-    task = DATABASE["daily_tasks"][date_str]["tasks"][task_idx]
-    task["user_solutions"][uid_str] = {
-        "text": message.text or message.caption or "Решение в виде фото/файла",
+    tasks = DATABASE.get("daily_tasks", {}).get(date_str, {}).get("tasks", [])
+    if task_idx < 0 or task_idx >= len(tasks):
+        await message.answer("❌ Задача не найдена.")
+        return
+
+    task = tasks[task_idx]
+    if uid_str in task.setdefault("user_solutions", {}):
+        await message.answer("ℹ️ Вы уже отправляли решение этой задачи.")
+        return
+
+    solution = {
+        "text": message.text or message.caption or "Решение в виде файла/фото",
         "submitted_at": get_yerevan_date()
     }
+    if message.photo:
+        solution["photo_file_id"] = message.photo[-1].file_id
+    elif message.document:
+        solution["document_file_id"] = message.document.file_id
+    task["user_solutions"][uid_str] = solution
 
     await award_points(message.from_user.id, 10)
     await save_db(DATABASE)
@@ -1410,7 +1466,13 @@ async def process_admin_upload_doc(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "admin:upload_confirm")
 async def cb_admin_upload_confirm(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
     data = await state.get_data()
+    if not data.get("ai_meta") or not data.get("file_id"):
+        await callback.answer("Сессия загрузки устарела. Начните загрузку заново.", show_alert=True)
+        return
     await state.clear()
 
     ai_meta = data["ai_meta"]
@@ -1430,7 +1492,7 @@ async def cb_admin_upload_confirm(callback: types.CallbackQuery, state: FSMConte
 
     for cat_key in ai_meta["categories"]:
         if cat_key in DATABASE["categories"]:
-            DATABASE["categories"][cat_key]["files"].append(file_obj)
+            DATABASE["categories"][cat_key]["files"].append(copy.deepcopy(file_obj))
 
     await save_db(DATABASE)
     await safe_send_or_edit(callback, f"🎉 <b>Материал «{html.escape(ai_meta['title'])}» успешно сохранен в библиотеку!</b>", reply_markup=get_admin_menu_keyboard())
@@ -1438,10 +1500,16 @@ async def cb_admin_upload_confirm(callback: types.CallbackQuery, state: FSMConte
 
 @dp.callback_query(F.data.startswith("admin:sub_approve:"))
 async def cb_admin_sub_approve(callback: types.CallbackQuery):
-    sub_id = callback.data.split(":")[2]
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+    sub_id = callback.data.split(":", 2)[2]
     sub = await get_submission(sub_id)
     if not sub:
         await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+    if sub.get("status") != "pending":
+        await callback.answer("Заявка уже обработана.", show_alert=True)
         return
 
     file_bytes = await download_file_bytes(sub["file_id"])
@@ -1478,9 +1546,12 @@ async def cb_admin_sub_approve(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("admin:sub_reject:"))
 async def cb_admin_sub_reject(callback: types.CallbackQuery):
-    sub_id = callback.data.split(":")[2]
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+    sub_id = callback.data.split(":", 2)[2]
     sub = await get_submission(sub_id)
-    if sub:
+    if sub and sub.get("status") == "pending":
         sub["status"] = "rejected"
         await save_submission(sub_id, sub)
         try:
@@ -1509,32 +1580,72 @@ async def cb_admin_add_task_start(callback: types.CallbackQuery, state: FSMConte
 
 @dp.message(TaskOfDayAdmin.waiting_for_photo)
 async def process_admin_task_photo(message: types.Message, state: FSMContext):
-    photo_id = message.photo[-1].file_id if message.photo else None
-    await state.update_data(photo_file_id=photo_id)
-    await state.set_state(TaskOfDayAdmin.waiting_for_solution)
-    await message.answer("📝 <b>Теперь введите текст задачи и авторское решение:</b>", parse_mode=ParseMode.HTML)
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
 
-@dp.message(TaskOfDayAdmin.waiting_for_solution)
+    if message.photo:
+        photo_id = message.photo[-1].file_id
+    elif message.text and message.text.strip().lower() == "/skip":
+        photo_id = None
+    else:
+        await message.answer("Пришлите фото задачи или отправьте /skip.")
+        return
+
+    await state.update_data(photo_file_id=photo_id)
+    await state.set_state(TaskOfDayAdmin.waiting_for_task_text)
+    await message.answer("📌 <b>Введите текст задачи:</b>", parse_mode=ParseMode.HTML)
+
+
+@dp.message(TaskOfDayAdmin.waiting_for_task_text, F.text)
+async def process_admin_task_text(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    task_text = message.text.strip()
+    if not task_text:
+        await message.answer("Текст задачи не должен быть пустым.")
+        return
+
+    await state.update_data(task_text=task_text)
+    await state.set_state(TaskOfDayAdmin.waiting_for_solution)
+    await message.answer("💡 <b>Теперь введите авторское решение задачи:</b>", parse_mode=ParseMode.HTML)
+
+
+@dp.message(TaskOfDayAdmin.waiting_for_solution, F.text)
 async def process_admin_task_solution(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
     data = await state.get_data()
-    await state.clear()
+    solution = message.text.strip()
+    if not solution:
+        await message.answer("Решение не должно быть пустым.")
+        return
 
     today = get_yerevan_date()
     group = DATABASE["daily_tasks"].setdefault(today, {"tasks": []})
 
     new_task = {
         "task_id": uuid.uuid4().hex[:10],
-        "text": message.text or "Задача дня",
+        "text": data.get("task_text", "Задача дня"),
         "photo_file_id": data.get("photo_file_id"),
-        "solution": message.text,
+        "solution": solution,
         "solution_photo_file_id": None,
+        "votes": {},
         "user_solutions": {},
         "created_at": today
     }
-    group["tasks"].append(new_task)
+    group.setdefault("tasks", []).append(new_task)
     await save_db(DATABASE)
 
-    await message.answer("✅ <b>Задача дня успешно добавлена и опубликована!</b>", reply_markup=get_admin_menu_keyboard(), parse_mode=ParseMode.HTML)
+    await state.clear()
+    await message.answer(
+        "✅ <b>Задача дня успешно добавлена и опубликована!</b>",
+        reply_markup=get_admin_menu_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
 
 # ============================================================
 # ROUTE HANDLERS: BROADCAST & LINKS MANAGEMENT
@@ -1554,15 +1665,25 @@ async def cb_admin_broadcast_start(callback: types.CallbackQuery, state: FSMCont
 
 @dp.message(BroadcastAdmin.waiting_for_message)
 async def process_admin_broadcast(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
     await state.clear()
     users = DATABASE.get("users", {})
     count = 0
 
-    for uid_str in users.keys():
+    for uid_str in list(users.keys()):
         try:
             await message.copy_to(int(uid_str))
             count += 1
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.1)
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 0.5)
+            try:
+                await message.copy_to(int(uid_str))
+                count += 1
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1599,21 +1720,27 @@ async def cb_links_add_start(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-@dp.message(AddLink.waiting_for_text)
+@dp.message(AddLink.waiting_for_text, F.text)
 async def process_add_link(message: types.Message, state: FSMContext):
     data = await state.get_data()
     await state.clear()
     sec_key = data["sec_key"]
 
-    if "-" in message.text:
-        parts = message.text.split("-", 1)
-        title = parts[0].strip()
-        url = parts[1].strip()
+    raw = message.text.strip()
+    match = re.match(r"^(.+?)\s*-\s*(https?://\S+)$", raw, re.IGNORECASE)
+    if match:
+        title, url = match.group(1).strip(), match.group(2).strip()
+    elif re.match(r"^https?://\S+$", raw, re.IGNORECASE):
+        title, url = "Ресурс", raw
     else:
-        title = "Ресурс"
-        url = message.text.strip()
+        await message.answer("❌ Некорректная ссылка. Используйте: Название - https://example.com")
+        return
 
-    DATABASE["links"][sec_key]["items"].append({"title": title, "url": url})
+    if sec_key not in DATABASE.get("links", {}):
+        await message.answer("❌ Раздел ссылок не найден.")
+        return
+
+    DATABASE["links"][sec_key]["items"].append({"title": title[:100], "url": url[:2000]})
     await save_db(DATABASE)
 
     await message.answer("✅ <b>Ссылка добавлена!</b>", reply_markup=get_links_section_keyboard(sec_key, message.from_user.id), parse_mode=ParseMode.HTML)
@@ -1663,7 +1790,11 @@ async def on_startup():
 async def main():
     dp.startup.register(on_startup)
     logger.info("Starting Telegram Bot listener...")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+        mongo_client.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
