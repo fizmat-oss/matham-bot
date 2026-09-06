@@ -61,7 +61,7 @@ MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "matham_bot")
 YEREVAN_TZ = timezone(timedelta(hours=4))
 
-# AI API Keys (Gemini / OpenAI)
+# AI API Keys
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 
@@ -163,7 +163,6 @@ async def safe_send_or_edit(target, text: str, reply_markup=None, photo_id=None,
             return await target.answer_photo(photo=photo_id, caption=text, parse_mode=parse_mode, reply_markup=reply_markup)
         return await target.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
 
-    # If target is CallbackQuery
     msg = target.message
     if photo_id:
         try:
@@ -340,7 +339,7 @@ async def get_submission(sub_id: str) -> dict:
     return doc if doc else {}
 
 # ============================================================
-# PDF EXTRACTION & DEEP AI INSPECTOR
+# PDF EXTRACTION & LLM API WITH RETRY LOGIC
 # ============================================================
 
 def extract_pdf_first_pages_text(file_bytes: bytes, max_pages: int = 6) -> str:
@@ -377,26 +376,36 @@ async def download_file_bytes(file_id: str) -> bytes:
         return b""
 
 async def call_llm_api(prompt: str, system_prompt: str = "") -> str:
-    """Calls Gemini or OpenAI LLM API with high reliability."""
+    """Calls Gemini or OpenAI LLM API with automatic retry on rate limits (429)."""
     if GEMINI_API_KEY:
         models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
         for m in models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={GEMINI_API_KEY}"
             payload = {
                 "contents": [{"parts": [{"text": (f"{system_prompt}\n\n" if system_prompt else "") + prompt}]}],
-                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500}
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1500}
             }
-            try:
-                timeout = ClientTimeout(total=20)
-                async with ClientSession(timeout=timeout) as session:
-                    async with session.post(url, json=payload) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            candidates = data.get("candidates", [])
-                            if candidates:
-                                return candidates[0]["content"]["parts"][0]["text"].strip()
-            except Exception as e:
-                logger.error("Gemini model %s error: %s", m, e)
+            # Retry up to 3 times on 429
+            for attempt in range(3):
+                try:
+                    timeout = ClientTimeout(total=25)
+                    async with ClientSession(timeout=timeout) as session:
+                        async with session.post(url, json=payload) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                candidates = data.get("candidates", [])
+                                if candidates:
+                                    return candidates[0]["content"]["parts"][0]["text"].strip()
+                            elif resp.status == 429:
+                                logger.warning("Gemini 429 Rate limit hit, sleeping %s s (attempt %s)", 3 * (attempt + 1), attempt + 1)
+                                await asyncio.sleep(3 * (attempt + 1))
+                                continue
+                            else:
+                                logger.error("Gemini API error %s on model %s", resp.status, m)
+                                break
+                except Exception as e:
+                    logger.error("Gemini model %s error: %s", m, e)
+                    await asyncio.sleep(2)
 
     if OPENAI_API_KEY:
         url = "https://api.openai.com/v1/chat/completions"
@@ -404,14 +413,14 @@ async def call_llm_api(prompt: str, system_prompt: str = "") -> str:
         payload = {
             "model": "gpt-4o-mini",
             "messages": [
-                {"role": "system", "content": system_prompt or "Ты ведущий профессор и методист олимпиадной математики."},
+                {"role": "system", "content": system_prompt or "Ты профессор и библиограф математической литературы."},
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.2,
+            "temperature": 0.1,
             "max_tokens": 1500
         }
         try:
-            timeout = ClientTimeout(total=20)
+            timeout = ClientTimeout(total=25)
             async with ClientSession(timeout=timeout) as session:
                 async with session.post(url, headers=headers, json=payload) as resp:
                     if resp.status == 200:
@@ -429,46 +438,40 @@ def clean_filename_title(raw_name: str) -> str:
     name = re.sub(r'\b(pdf|djvu|book|scan|final|v\d+|\d{4})\b', '', name, flags=re.IGNORECASE)
     return re.sub(r'\s+', ' ', name).strip().title()
 
-def generate_smart_individual_summary(title: str, text: str, cat_key: str) -> str:
-    """Generates unique, rich fallback descriptions for books when LLM is offline."""
+def generate_smart_fallback_description(title: str, text: str, cat_key: str) -> str:
+    """Accurate fallback descriptions per specific author/subject without generic repeats."""
     t_lower = (title + " " + text).lower()
     
     if "прасолов" in t_lower:
-        if "планиметр" in t_lower or "геометр" in t_lower:
-            return "Легендарный задачник В. В. Прасолова по планиметрии. Содержит подробную теорию, методы геометрических преобразований и свыше 1000 олимпиадных задач с полными решениями."
-        if "алгебр" in t_lower or "многочлен" in t_lower:
-            return "Фундаментальный труд В. В. Прасолова по алгебре, многочленам и теории чисел для углубленного изучения и подготовки к олимпиадам высшего уровня."
+        if any(k in t_lower for k in ["планиметр", "геометр", "треуголь"]):
+            return "Задачник В. В. Прасолова по планиметрии: классические теоремы, геометрические преобразования и задачи с полными решениями."
+        if any(k in t_lower for k in ["алгебр", "многочлен", "чисел"]):
+            return "Труд В. В. Прасолова по многочленам, алгебре и теории чисел для олимпиадников старших классов."
     
     if "шарыгин" in t_lower:
-        return "Классическое пособие И. Ф. Шарыгина по геометрии. Учит нестандартному геометрическому мышлению, дополнительным построениям и ключевым конфигурациям."
+        return "Пособие И. Ф. Шарыгина по геометрии: развитие наглядного мышления, ключевые олимпиадные леммы и конструкции."
         
     if "titu" in t_lower or "andreescu" in t_lower:
-        if "number theory" in t_lower or "чисел" in t_lower:
-            return "Знаменитый олимпиадный задачник Титу Андрееску по теории чисел: диофантовы уравнения, свойства простых чисел, модульная арифметика и задачи уровня IMO."
-        return "Олимпиадный сборник Титу Андрееску: передовые методы решения сложных алгебраических и комбинаторных задач международных олимпиад."
+        return "Сборник задач Титу Андрееску: методы решения олимпиадных задач международного уровня (IMO)."
 
     if "гордин" in t_lower:
-        return "Качественное олимпиадное пособие Р. К. Гордина по планиметрии для 7-9 классов: пошаговое освоение от базовых теорем до уровня финала Всероса."
-
-    if "мерзляк" in t_lower or "полонский" in t_lower:
-        return "Учебное пособие А. Г. Мерзляка: систематизированный курс с большим количеством разноуровневых упражнений и доказательств."
+        return "Пособие Р. К. Гордина по планиметрии: систематический курс от базовых теорем до уровня финала Всероса."
 
     if "сканави" in t_lower:
-        return "Сборник задач под редакцией М. И. Сканави: эталонный задачник для глубокой отработки алгебры, тригонометрии и уравнений."
+        return "Сборник под редакцией М. И. Сканави: фундаментальная отработка алгебры, тригонометрии и уравнений."
 
-    # Subject-based dynamic description
     if cat_key == "geometry":
-        return f"Сборник по геометрии «{title}»: теоретические основы, свойства фигур, ключевые леммы и олимпиадные задачи на доказательство и построение."
+        return f"Книга по геометрии «{title}»: теоремы планиметрии, свойства фигур и методы доказательств."
     elif cat_key == "number_theory":
-        return f"Задачник по теории чисел «{title}»: свойства делимости, алгоритм Евклида, простые числа, сравнения и диофантовы уравнения."
+        return f"Книга по теории чисел «{title}»: делимость, простые числа, модульная арифметика и диофантовы уравнения."
     elif cat_key == "algebra":
-        return f"Пособие по алгебре «{title}»: методы решения систем, многочлены, классические неравенства (Коши, Коши-Буняковского) и функциональные уравнения."
+        return f"Книга по алгебре «{title}»: неравенства Коши-Буняковского, многочлены и функциональные уравнения."
     elif cat_key == "combinatorics":
-        return f"Сборник по комбинаторике «{title}»: принцип Дирихле, инварианты, теория графов, комбинаторная геометрия и турниры."
+        return f"Книга по комбинаторике «{title}»: принцип Дирихле, графы, инварианты и комбинаторные задачи."
     elif cat_key == "higher_math":
-        return f"Курс высшей математики «{title}»: математический анализ, дифференциальное и интегральное исчисление для олимпиадников и студентов."
+        return f"Курс высшей математики «{title}»: математический анализ, дифференциальное и интегральное исчисление."
     
-    return f"Учебный материал «{title}»: детальный разбор олимпиадных тем, теоретические справки и задачи для самостоятельного решения."
+    return f"Учебный материал «{title}»: разбор олимпиадных тем и подборка задач с решениями."
 
 async def analyze_document_with_ai(file_bytes: bytes, original_name: str) -> dict:
     """
@@ -485,10 +488,10 @@ async def analyze_document_with_ai(file_bytes: bytes, original_name: str) -> dic
 {pdf_text if pdf_text else 'Текст не извлечен (скан). Ориентируйся строго по названию файла: ' + original_name}
 
 Инструкция:
-1. "title": Найди официальное название книги и автора в формате: "Автор — Название" (например: "В. В. Прасолов — Задачи по планиметрии" или "Titu Andreescu — 104 Number Theory Problems").
-   - НЕ пиши "Документ", "Книга", "Математический сборник" без автора.
+1. "title": Найди официальное название книги и автора в формате: "Автор — Название" (например: "В. В. Прасолов — Задачи по планиметрии").
+   - НЕ пиши "Документ", "Книга", "Математический сборник" если есть реальное название.
 2. "summary": Напиши индивидуальное емкое описание книги (2-3 предложения): конкретные темы, какие разделы охвачены, чем полезна книга.
-3. "target_audience": Целевая аудитория (например: "7-9 класс начинающие", "10-11 класс регион и Всерос", "Сборная IMO").
+3. "target_audience": Для кого предназначена (например: "7-9 класс начинающие", "10-11 класс регион и Всерос", "Студенты").
 4. "categories": Список ключей категорий из: ["geometry", "number_theory", "algebra", "combinatorics", "higher_math", "titu"].
 5. "difficulty": Выбери строго одно: "easy", "medium", "hard", "imo".
 6. "tags": 3-5 хештегов (например: ["#geometry", "#planimetry", "#olympiad"]).
@@ -529,7 +532,7 @@ async def analyze_document_with_ai(file_bytes: bytes, original_name: str) -> dic
 
                 return {
                     "title": title,
-                    "summary": parsed.get("summary", generate_smart_individual_summary(title, pdf_text, cats[0])),
+                    "summary": parsed.get("summary", generate_smart_fallback_description(title, pdf_text, cats[0])),
                     "target_audience": parsed.get("target_audience", "Школьники и олимпиадники"),
                     "categories": cats,
                     "difficulty": diff,
@@ -565,7 +568,7 @@ async def analyze_document_with_ai(file_bytes: bytes, original_name: str) -> dic
     elif any(k in text_to_check for k in ["начинающ", "прост", "базов", "easy", "с нуля"]):
         detected_diff = "easy"
 
-    individual_summary = generate_smart_individual_summary(fallback_title, pdf_text, detected_cats[0])
+    individual_summary = generate_smart_fallback_description(fallback_title, pdf_text, detected_cats[0])
 
     return {
         "title": fallback_title or "Математический сборник",
@@ -577,7 +580,7 @@ async def analyze_document_with_ai(file_bytes: bytes, original_name: str) -> dic
     }
 
 # ============================================================
-# MATH CHATGPT ENGINE
+# MATH CHATGPT & BOOK RECOMMENDER
 # ============================================================
 
 def get_catalog_files_list() -> list:
@@ -600,70 +603,72 @@ def get_catalog_files_list() -> list:
                 }
     return list(files_dict.values())
 
-async def answer_math_chatgpt_query(user_query: str, user_id: int) -> tuple:
-    """
-    Universal Math AI engine (acts like Math ChatGPT + Recommender).
-    Returns (response_text, [matched_uids]).
-    """
+async def answer_pure_math_question(question: str) -> str:
+    """Pure Math ChatGPT: answers any math question, proves theorems, solves problems."""
+    system_prompt = (
+        "Ты — выдающийся профессор математики и тренер олимпиадной сборной IMO (как ChatGPT).\n"
+        "Отвечай на любые вопросы пользователей по математике: объясняй формулы, давай строгие и понятные доказательства, разбирай задачи шаг за шагом.\n"
+        "Пиши красиво и понятно на русском языке, используя HTML теги (<b>жирный</b>, <i>курсив</i>, <code>формулы/код</code>)."
+    )
+    user_prompt = f"Вопрос пользователя: {question}\n\nДай полный, понятный и математически грамотный ответ:"
+    
+    response = await call_llm_api(user_prompt, system_prompt)
+    if response:
+        return response
+
+    # Fallback built-in answers
+    q_lower = question.lower()
+    if "эйлер" in q_lower or "euler" in q_lower:
+        return (
+            "🧠 <b>Формулы Эйлера в математике:</b>\n\n"
+            "<b>1. В комплексном анализе:</b>\n"
+            "<code>e^(i*x) = cos(x) + i*sin(x)</code>\n"
+            "При x = π получается прекрасное тождество: <code>e^(i*π) + 1 = 0</code>.\n\n"
+            "<b>2. В геометрии и теории графов (для многогранников):</b>\n"
+            "<code>V - E + F = 2</code> (вершины − рёбра + грани = 2).\n\n"
+            "<b>3. В теории чисел (теорема Эйлера):</b>\n"
+            "Если НОД(a, m) = 1, то <code>a^φ(m) ≡ 1 (mod m)</code>, где φ(m) — функция Эйлера."
+        )
+    if "пифагор" in q_lower:
+        return "📐 <b>Теорема Пифагора:</b>\nВ прямоугольном треугольнике: <code>a² + b² = c²</code> (квадрат гипотенузы равен сумме квадратов катетов)."
+
+    return f"🧠 <b>Математический ответ на тему «{html.escape(question)}»:</b>\n\nДля детального разбора этой темы воспользуйтесь литературой из каталога или уточните вопрос."
+
+async def recommend_books_by_criteria(user_query: str) -> tuple:
+    """Recommends matching books from catalog based on topic, grade and goals."""
     files = get_catalog_files_list()
+    if not files:
+        return "В библиотеке пока нет доступных книг.", []
+
     catalog_summary = []
-    for f in files[:40]:
+    for f in files[:45]:
         catalog_summary.append(
-            f"ID:{f['uid']} | «{f['caption']}» | Раздел:{f['category']} | Уровень:{f['difficulty']} | Теги:{', '.join(f['tags'])}"
+            f"ID:{f['uid']} | «{f['caption']}» | Раздел:{f['category']} | Описание:{f['summary']} | Уровень:{f['difficulty']} | Теги:{', '.join(f['tags'])}"
         )
     catalog_text = "\n".join(catalog_summary)
 
     system_prompt = (
-        "Ты — выдающийся ИИ-математик и преподаватель олимпиадной математики уровня профессора МГУ и тренера сборной IMO.\n"
-        "Твоя задача — давать понятные, математически строгие, красивые и подробные ответы на любые вопросы пользователей (теоремы, формулы, доказательства, разбор задач, понятия высшей и школьной математики).\n"
-        "Если в твоей библиотеке есть подходящие книги по теме вопроса, порекомендуй 1-3 книги и в самом конце выведи строку MATCHED_UIDS:[id1, id2].\n"
-        "Форматируй ответ красиво с использованием HTML тегов (<b>жирный</b>, <i>курсив</i>, <code>код/формулы</code>)."
+        "Ты эксперт-библиограф олимпиадной математики.\n"
+        "Подбери от 1 до 3 самых лучших книг из каталога под запрос пользователя (класс, тема, уровень сложности).\n"
+        "Объясни для каждой книги, почему она подходит и как по ней заниматься.\n"
+        "В САМОМ КОНЦЕ ответа строго добавь строку: MATCHED_UIDS:[id1, id2]"
     )
+    user_prompt = f"Запрос пользователя: \"{user_query}\"\n\nКаталог книг:\n{catalog_text}\n\nДай рекомендации с MATCHED_UIDS в конце:"
 
-    user_prompt = (
-        f"Вопрос пользователя: \"{user_query}\"\n\n"
-        f"Каталог книг в нашей библиотеке:\n{catalog_text}\n\n"
-        "Ответь на вопрос подробно, объясни суть, формулу или доказательство. Если уместно, укажи подходящие книги из каталога. В конце добавь MATCHED_UIDS:[id1, id2] (или MATCHED_UIDS:[] если книг по теме нет)."
-    )
-
-    ai_response = await call_llm_api(user_prompt, system_prompt)
-
-    if ai_response:
+    response = await call_llm_api(user_prompt, system_prompt)
+    if response:
         uids = []
-        uid_match = re.search(r"MATCHED_UIDS:\s*\[(.*?)\]", ai_response)
+        uid_match = re.search(r"MATCHED_UIDS:\s*\[(.*?)\]", response)
         if uid_match:
             raw_uids = uid_match.group(1).split(",")
             uids = [u.strip().strip("'\"") for u in raw_uids if u.strip()]
-            ai_response = re.sub(r"MATCHED_UIDS:\s*\[(.*?)\]", "", ai_response).strip()
+            response = re.sub(r"MATCHED_UIDS:\s*\[(.*?)\]", "", response).strip()
 
         valid_uids = [u for u in uids if get_file_by_uid(u)]
-        return ai_response, valid_uids
+        return response, valid_uids
 
-    # Fallback built-in answers for common math queries if LLM is offline
+    # Fallback keyword match
     q_lower = user_query.lower()
-    
-    if "эйлер" in q_lower or "euler" in q_lower:
-        ans = (
-            "🧠 <b>Формулы Эйлера в математике:</b>\n\n"
-            "<b>1. Для комплексных чисел:</b>\n"
-            "<code>e^(i*x) = cos(x) + i*sin(x)</code>\n"
-            "При x = π получается знаменитое тождество Эйлера:\n"
-            "<code>e^(i*π) + 1 = 0</code> (связывает 5 фундаментальных констант).\n\n"
-            "<b>2. Для планарных графов и многогранников:</b>\n"
-            "<code>V - E + F = 2</code>\n"
-            "где V — вершины, E — рёбра, F — грани.\n\n"
-            "<b>3. Функция Эйлера φ(n):</b>\n"
-            "Количество чисел от 1 до n, взаимно простых с n. Теорема Эйлера: <code>a^φ(m) ≡ 1 (mod m)</code>."
-        )
-        geom_files = [f["uid"] for f in files if "geometry" in f["category"].lower() or "number" in f["category"].lower()][:2]
-        return ans, geom_files
-
-    if "пифагор" in q_lower:
-        ans = "📐 <b>Теорема Пифагора:</b>\nВ прямоугольном треугольнике квадрат длины гипотенузы равен сумме квадратов длин катетов:\n<code>a² + b² = c²</code>."
-        geom_files = [f["uid"] for f in files if "geometry" in f["category"].lower()][:2]
-        return ans, geom_files
-
-    # Fallback catalog search
     scored = []
     for f in files:
         score = 0
@@ -677,13 +682,10 @@ async def answer_math_chatgpt_query(user_query: str, user_id: int) -> tuple:
     scored.sort(key=lambda x: x[0], reverse=True)
     top_matches = [item[1] for item in scored[:3]] or files[:3]
 
-    text = (
-        f"🤖 <b>Ответ по запросу «{html.escape(user_query)}»:</b>\n\n"
-        "Я нашёл подходящие теоретические и практические материалы в нашей библиотеке:\n"
-    )
+    text = f"📚 <b>Рекомендованные книги по запросу «{html.escape(user_query)}»:</b>\n"
     for i, f in enumerate(top_matches, 1):
         text += f"\n<b>{i}. {html.escape(f['caption'])}</b>\n📝 <i>{html.escape(f['summary'])}</i>\n"
-    
+
     return text, [f["uid"] for f in top_matches]
 
 # ============================================================
@@ -725,7 +727,8 @@ class BroadcastAdmin(StatesGroup):
     waiting_for_message = State()
 
 class AIAssistantState(StatesGroup):
-    waiting_for_query = State()
+    waiting_for_math_question = State()
+    waiting_for_book_recommendation = State()
 
 # ============================================================
 # KEYBOARDS
@@ -741,7 +744,7 @@ DIFF_NAMES = {
 def get_main_menu_keyboard(user_id: int):
     builder = [
         [
-            InlineKeyboardButton(text="🤖 AI Математик (ChatGPT)", callback_data="ai:ask"),
+            InlineKeyboardButton(text="🤖 AI Математик", callback_data="ai:menu"),
             InlineKeyboardButton(text="📚 Каталог", callback_data="menu:catalog"),
         ],
         [
@@ -765,6 +768,15 @@ def get_main_menu_keyboard(user_id: int):
             InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin:main")
         ])
     return InlineKeyboardMarkup(inline_keyboard=builder)
+
+def get_ai_choice_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❓ Задать вопрос по математике (ChatGPT)", callback_data="ai:ask_question")],
+            [InlineKeyboardButton(text="📚 Подобрать книгу / задачник", callback_data="ai:find_books")],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:main")]
+        ]
+    )
 
 def get_catalog_keyboard():
     builder = []
@@ -1183,7 +1195,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await track_user_activity(message.from_user.id, message.from_user.username or "")
     await message.answer(
         "👋 <b>Добро пожаловать в библиотеку matham!</b>\n\n"
-        "🤖 <b>AI Математик (ChatGPT)</b> — ответит на любой математический вопрос, объяснит формулы и подберёт книги\n"
+        "🤖 <b>AI Математик</b> — режим ChatGPT (ответы на вопросы) и умный подбор книг\n"
         "📚 <b>Каталог</b> — учебники и сборники по разделам\n"
         "🎯 <b>Задача дня</b> — ежедневная олимпиадная задача\n"
         "⭐ <b>Must-read</b> — обязательная классика",
@@ -1241,87 +1253,112 @@ async def process_catalog(callback: types.CallbackQuery):
     await callback.answer()
 
 # ============================================================
-# AI ASSISTANT (MATH CHATGPT)
+# AI ASSISTANT (MODE CHOICE: CHATGPT vs BOOK MATCHER)
 # ============================================================
 
 @dp.message(Command("ai"))
 @dp.message(Command("ask"))
-@dp.callback_query(F.data == "ai:ask")
-async def start_ai_assistant(event: types.Message | types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "ai:menu")
+async def open_ai_menu(event: types.Message | types.CallbackQuery, state: FSMContext):
     user_id = event.from_user.id
     await track_user_activity(user_id, event.from_user.username or "")
-    await state.set_state(AIAssistantState.waiting_for_query)
+    await state.clear()
 
     text = (
-        "🤖 <b>AI Математик (ChatGPT + Библиотека)</b>\n\n"
-        "Задай мне <b>любой вопрос</b> по математике или попроси подобрать книги!\n\n"
-        "<i>Примеры запросов:</i>\n"
-        "• <i>«Какая формула Эйлера и где она применяется?»</i>\n"
-        "• <i>«Докажи теорему Чевы простыми словами»</i>\n"
-        "• <i>«Посоветуй книги по планиметрии для 9 класса для региона»</i>\n"
-        "• <i>«Как решать диофантовы уравнения в целых числах?»</i>"
+        "🤖 <b>AI Математик: выбери режим</b>\n\n"
+        "1️⃣ <b>Задать вопрос по математике (ChatGPT):</b>\n"
+        "• Объяснение формул, доказательства теорем, помощь с решением задач.\n\n"
+        "2️⃣ <b>Подобрать книгу / задачник:</b>\n"
+        "• Подбор олимпиадной литературы под твой класс, тему и уровень с кнопками для скачивания."
     )
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="ai:cancel")]
-        ]
-    )
-
+    await safe_send_or_edit(event, text, reply_markup=get_ai_choice_keyboard())
     if isinstance(event, types.CallbackQuery):
-        await event.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
         await event.answer()
-    else:
-        await event.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-@dp.callback_query(AIAssistantState.waiting_for_query, F.data == "ai:cancel")
-async def cancel_ai_assistant(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text(
-        "📂 Главное меню",
-        reply_markup=get_main_menu_keyboard(callback.from_user.id)
+@dp.callback_query(F.data == "ai:ask_question")
+async def start_ai_math_question(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AIAssistantState.waiting_for_math_question)
+    text = (
+        "❓ <b>Режим математических вопросов (ChatGPT)</b>\n\n"
+        "Напиши свой вопрос по математике, теорему или задачу.\n\n"
+        "<i>Примеры:</i>\n"
+        "• <i>«Какая формула Эйлера и где она применяется?»</i>\n"
+        "• <i>«Как доказать теорему Чевы?»</i>\n"
+        "• <i>«Объясни малую теорему Ферма простыми словами»</i>\n\n"
+        "❌ Напиши /cancel для отмены."
     )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="ai:cancel")]])
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     await callback.answer()
 
-@dp.message(AIAssistantState.waiting_for_query, F.text)
-async def process_ai_query(message: types.Message, state: FSMContext):
+@dp.callback_query(F.data == "ai:find_books")
+async def start_ai_book_recommend(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AIAssistantState.waiting_for_book_recommendation)
+    text = (
+        "📚 <b>Режим подбора литературы</b>\n\n"
+        "Опиши, какие книги тебе нужны, свой класс и уровень подготовки.\n\n"
+        "<i>Примеры:</i>\n"
+        "• <i>«Посоветуй задачник по планиметрии для 9 класса для подготовки к региону»</i>\n"
+        "• <i>«Нужен базовый сборник по теории чисел для начинающих»</i>\n"
+        "• <i>«Сложная комбинаторика уровня финала Всероса и IMO»</i>\n\n"
+        "❌ Напиши /cancel для отмены."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="ai:cancel")]])
+    await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(AIAssistantState.waiting_for_math_question, F.data == "ai:cancel")
+@dp.callback_query(AIAssistantState.waiting_for_book_recommendation, F.data == "ai:cancel")
+async def cancel_ai_state(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await open_ai_menu(callback, state)
+
+@dp.message(AIAssistantState.waiting_for_math_question, F.text)
+async def process_math_question_msg(message: types.Message, state: FSMContext):
     if message.text.lower() in ["отмена", "/cancel"]:
         await state.clear()
-        return await message.answer(
-            "❌ Отменено.",
-            reply_markup=get_main_menu_keyboard(message.from_user.id)
-        )
+        return await open_ai_menu(message, state)
 
-    await track_user_activity(message.from_user.id, message.from_user.username or "")
-    loading_msg = await message.answer("🧠 <i>AI думает над ответом...</i>", parse_mode=ParseMode.HTML)
-
-    response_text, matched_uids = await answer_math_chatgpt_query(message.text, message.from_user.id)
+    loading = await message.answer("🧠 <i>AI готовит ответ на вопрос...</i>", parse_mode=ParseMode.HTML)
+    ans = await answer_pure_math_question(message.text)
     await state.clear()
-
-    builder = []
-    for uid in matched_uids:
-        f = get_file_by_uid(uid)
-        if f:
-            builder.append([
-                InlineKeyboardButton(
-                    text=f"📥 Скачать: {f['caption'][:30]}",
-                    callback_data=f"fv:{uid}"
-                )
-            ])
-    builder.append([
-        InlineKeyboardButton(text="🔄 Задать ещё вопрос", callback_data="ai:ask"),
-        InlineKeyboardButton(text="⬅️ Меню", callback_data="menu:main")
-    ])
-
     try:
-        await loading_msg.delete()
+        await loading.delete()
     except Exception:
         pass
 
-    await message.answer(
-        response_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Задать ещё вопрос", callback_data="ai:ask_question")],
+            [InlineKeyboardButton(text="📚 Подобрать книги по этой теме", callback_data="ai:find_books")],
+            [InlineKeyboardButton(text="⬅️ Меню AI", callback_data="ai:menu")]
+        ]
     )
+    await message.answer(ans, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+@dp.message(AIAssistantState.waiting_for_book_recommendation, F.text)
+async def process_book_recommend_msg(message: types.Message, state: FSMContext):
+    if message.text.lower() in ["отмена", "/cancel"]:
+        await state.clear()
+        return await open_ai_menu(message, state)
+
+    loading = await message.answer("🔍 <i>AI анализирует каталог и подбирает лучшие книги...</i>", parse_mode=ParseMode.HTML)
+    ans, uids = await recommend_books_by_criteria(message.text)
+    await state.clear()
+    try:
+        await loading.delete()
+    except Exception:
+        pass
+
+    builder = []
+    for uid in uids:
+        f = get_file_by_uid(uid)
+        if f:
+            builder.append([InlineKeyboardButton(text=f"📥 Скачать: {f['caption'][:30]}", callback_data=f"fv:{uid}")])
+    builder.append([InlineKeyboardButton(text="🔄 Подобрать другие книги", callback_data="ai:find_books")])
+    builder.append([InlineKeyboardButton(text="⬅️ Меню AI", callback_data="ai:menu")])
+
+    await message.answer(ans, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
 
 # ============================================================
 # FIXED DAILY TASK SYSTEM
@@ -1344,15 +1381,8 @@ async def send_daily_task(target, date_str: str = None, task_index: int = 0):
             current_date = latest_date or today
 
     if not task:
-        text = (
-            "🎯 <b>Задача дня</b>\n\n"
-            "Задач пока нет в базе. Администраторы скоро добавят первую задачу!"
-        )
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Меню", callback_data="menu:main")]
-            ]
-        )
+        text = "🎯 <b>Задача дня</b>\n\nЗадач пока нет в базе. Администраторы скоро добавят первую задачу!"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Меню", callback_data="menu:main")]])
         return await safe_send_or_edit(target, text, reply_markup=kb)
 
     if current_date == get_yerevan_date():
@@ -1407,10 +1437,6 @@ async def previous_task(callback: types.CallbackQuery):
     task_index = int(parts[2]) if len(parts) > 2 else 0
     await send_daily_task(callback, date_str, task_index)
     await callback.answer()
-
-# ============================================================
-# DAILY TASK VOTING & SOLUTION
-# ============================================================
 
 @dp.callback_query(F.data.startswith("tv:"))
 async def task_vote_handler(callback: types.CallbackQuery):
@@ -1503,16 +1529,13 @@ async def user_solution_text(message: types.Message, state: FSMContext):
     if message.text.lower() == "/cancel":
         await state.clear()
         return await message.answer("❌ Отмена.")
-
     data = await state.get_data()
-    date_str = data.get("solution_date")
-    await save_user_daily_solution(message, state, date_str, solution_type="text", text=message.text)
+    await save_user_daily_solution(message, state, data.get("solution_date"), solution_type="text", text=message.text)
 
 @dp.message(UserTaskSolution.waiting_for_solution, F.photo)
 async def user_solution_photo(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    date_str = data.get("solution_date")
-    await save_user_daily_solution(message, state, date_str, solution_type="photo", photo_id=message.photo[-1].file_id)
+    await save_user_daily_solution(message, state, data.get("solution_date"), solution_type="photo", photo_id=message.photo[-1].file_id)
 
 async def save_user_daily_solution(message: types.Message, state: FSMContext, date_str: str, solution_type: str, text: str = "", photo_id: str = None):
     data = await state.get_data()
@@ -1654,14 +1677,13 @@ async def process_random_material(target, diff: str = None):
                     all_files.append((f, cat_data["title"]))
 
     if not all_files:
-        # Fallback to any file if specific difficulty empty
         for cat_key, cat_data in DATABASE.get("categories", {}).items():
             for f in cat_data.get("files", []):
                 if not any(x[0]["file_unique_id"] == f["file_unique_id"] for x in all_files):
                     all_files.append((f, cat_data["title"]))
 
     if not all_files:
-        return await safe_send_or_edit(target, "📭 В библиотеке пока нет доступных файлов.", reply_markup=get_main_menu_keyboard(target.from_user.id))
+        return await safe_send_or_edit(target, "📭 В библиотеке пока нет файлов.", reply_markup=get_main_menu_keyboard(target.from_user.id))
 
     selected_file, cat_title = random.choice(all_files)
     await award_points(target.from_user.id, 1)
@@ -1695,7 +1717,7 @@ async def process_random_material(target, diff: str = None):
         )
 
 # ============================================================
-# CATEGORY VIEW & FILE VIEW
+# CATEGORY & FILE VIEW
 # ============================================================
 
 @dp.callback_query(F.data.startswith("cat:"))
@@ -1720,16 +1742,12 @@ async def process_category_click(callback: types.CallbackQuery):
         btn_text = f"📄 {item['caption'][:35]}"
         if len(item["caption"]) > 35:
             btn_text += "..."
-        builder.append([
-            InlineKeyboardButton(text=btn_text, callback_data=f"fv:{item['file_unique_id']}")
-        ])
-    builder.append([
-        InlineKeyboardButton(text="⬅️ Назад в каталог", callback_data="menu:catalog")
-    ])
+        builder.append([InlineKeyboardButton(text=btn_text, callback_data=f"fv:{item['file_unique_id']}")])
+    builder.append([InlineKeyboardButton(text="⬅️ Назад в каталог", callback_data="menu:catalog")])
 
     await safe_send_or_edit(
         callback,
-        f"<b>{html.escape(cat_data['title'])}</b> (всего: {len(files)})\n\n⬇️ Выбери интересующий материал:",
+        f"<b>{html.escape(cat_data['title'])}</b> (всего: {len(files)})\n\n⬇️ Выбери материал:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
     )
     await callback.answer()
@@ -1761,7 +1779,7 @@ async def view_file(callback: types.CallbackQuery):
     )
 
 # ============================================================
-# MUST READ & FAVORITES & RATING & USEFUL LINKS
+# MUST READ & FAVORITES & RATING & LINKS
 # ============================================================
 
 @dp.callback_query(F.data == "mustread:main")
@@ -1784,9 +1802,7 @@ async def mustread_main(callback: types.CallbackQuery):
 
     builder = []
     for f in files[:80]:
-        builder.append([
-            InlineKeyboardButton(text=f"📄 {f['caption'][:35]}", callback_data=f"fv:{f['file_unique_id']}")
-        ])
+        builder.append([InlineKeyboardButton(text=f"📄 {f['caption'][:35]}", callback_data=f"fv:{f['file_unique_id']}")])
     builder.append([InlineKeyboardButton(text="⬅️ Меню", callback_data="menu:main")])
 
     await safe_send_or_edit(
@@ -1896,113 +1912,6 @@ async def cb_links_section(callback: types.CallbackQuery):
     await callback.answer()
 
 # ============================================================
-# GLOBAL SEARCH & CHATGPT NATURAL QUERIES
-# ============================================================
-
-@dp.message(StateFilter(None), F.text & ~F.text.startswith("/"))
-async def global_search_and_chat_handler(message: types.Message, state: FSMContext):
-    query = message.text.strip()
-    q_lower = query.lower()
-
-    if q_lower in ["удиви меня", "surprise", "рандом", "challenge", "случайная книга"]:
-        return await cb_challenge(message)
-
-    # Conversational math questions -> Route to Math ChatGPT
-    math_chat_triggers = [
-        "что такое", "какая формула", "как решить", "объясни", "докажи", "теорема", "формула",
-        "посоветуй", "порекомендуй", "что почитать", "для олимпиады", "для 9 класса", "для 10 класса", "для 11 класса"
-    ]
-    if any(trigger in q_lower for trigger in math_chat_triggers) or len(query.split()) > 3:
-        loading = await message.answer("🧠 <i>AI анализирует математический запрос...</i>", parse_mode=ParseMode.HTML)
-        response_text, matched_uids = await answer_math_chatgpt_query(query, message.from_user.id)
-        try:
-            await loading.delete()
-        except Exception:
-            pass
-
-        builder = []
-        for uid in matched_uids:
-            f = get_file_by_uid(uid)
-            if f:
-                builder.append([
-                    InlineKeyboardButton(
-                        text=f"📥 Скачать: {f['caption'][:30]}",
-                        callback_data=f"fv:{uid}"
-                    )
-                ])
-        builder.append([
-            InlineKeyboardButton(text="🤖 Задать ещё вопрос", callback_data="ai:ask"),
-            InlineKeyboardButton(text="⬅️ Меню", callback_data="menu:main")
-        ])
-
-        return await message.answer(
-            response_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=builder)
-        )
-
-    # Google-style keywords search
-    words = [w for w in q_lower.split() if w]
-    scored_files = []
-
-    for cat_data in DATABASE.get("categories", {}).values():
-        for f in cat_data.get("files", []):
-            title_text = f.get("caption", "").lower()
-            summary_text = f.get("summary", "").lower()
-            tags_text = " ".join(f.get("tags", [])).lower()
-            cat_text = cat_data.get("title", "").lower()
-
-            haystack = f"{title_text} {summary_text} {tags_text} {cat_text}"
-            score = 0
-
-            if q_lower in title_text:
-                score += 100
-            elif q_lower in haystack:
-                score += 50
-
-            for w in words:
-                if w in title_text:
-                    score += 30
-                elif w in tags_text:
-                    score += 20
-                elif w in haystack:
-                    score += 10
-
-            if score > 0:
-                if not any(x[0]["file_unique_id"] == f["file_unique_id"] for x in scored_files):
-                    scored_files.append((f, cat_data["title"], score))
-
-    scored_files.sort(key=lambda x: x[2], reverse=True)
-
-    if not scored_files:
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🤖 Спросить у AI Математика", callback_data="ai:ask")],
-                [InlineKeyboardButton(text="⬅️ Меню", callback_data="menu:main")]
-            ]
-        )
-        return await message.answer(
-            "🔍 По прямому поиску ничего не найдено.\nПопробуй спросить у <b>AI Математика</b> или открой каталог:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb
-        )
-
-    await message.answer(f"🔍 <b>Найдено материалов: {len(scored_files)}</b>", parse_mode=ParseMode.HTML)
-    for f, cat_title, _ in scored_files[:5]:
-        cap = f"📄 <b>{html.escape(f['caption'])}</b>\n📌 {html.escape(cat_title)}"
-        if f.get("summary"):
-            cap += f"\n📝 {html.escape(f['summary'])}"
-        if f.get("difficulty"):
-            cap += f"\n📚 Уровень: {f['difficulty'].upper()}"
-
-        await message.answer_document(
-            document=f["file_id"],
-            caption=cap,
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_file_view_keyboard(f["file_unique_id"], message.from_user.id)
-        )
-
-# ============================================================
 # BATCH AI RE-INDEX OF ALL FILES (/reindex)
 # ============================================================
 
@@ -2061,7 +1970,9 @@ async def admin_reindex_catalog(event: types.Message | types.CallbackQuery):
                             f["target_audience"] = ai_meta["target_audience"]
                             f["difficulty"] = ai_meta["difficulty"]
                             f["tags"] = ai_meta["tags"]
-            await asyncio.sleep(0.5)
+            
+            # Safe 2.5s delay to strictly avoid Gemini RPM limits
+            await asyncio.sleep(2.5)
         except Exception as e:
             logger.error("Error reindexing file %s: %s", uid, e)
             errors += 1
@@ -2436,7 +2347,7 @@ async def noop(callback: types.CallbackQuery):
 async def set_main_menu(b: Bot):
     commands = [
         BotCommand(command="start", description="Главное меню 🚀"),
-        BotCommand(command="ai", description="AI Математик (ChatGPT) 🤖"),
+        BotCommand(command="ai", description="AI Математик (ChatGPT / Поиск книг) 🤖"),
         BotCommand(command="menu", description="Меню 📂"),
         BotCommand(command="task", description="Задача дня 🧩"),
         BotCommand(command="challenge", description="Случайный материал 🎲"),
@@ -2454,7 +2365,7 @@ async def run_web_server():
     app = web.Application()
 
     async def health(request):
-        return web.Response(text="Matham Bot with Math ChatGPT is fully active!")
+        return web.Response(text="Matham Bot with High-Level AI and Dual Modes is running!")
 
     app.router.add_get("/", health)
     runner = web.AppRunner(app)
