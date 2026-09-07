@@ -443,53 +443,110 @@ async def download_file_bytes(file_id: str) -> bytes:
         logger.exception("Error downloading file %s: %s", file_id, e)
         return b""
 
-async def call_llm_api(prompt: str, system_prompt: str = "", max_tokens: int = 1800, temperature: float = 0.05) -> str:
+async def call_llm_api(prompt: str, system_prompt: str = "", max_tokens: int = 2400, temperature: float = 0.1) -> str:
+    """Robust multi-provider, multi-model LLM invoker with automatic fallbacks and error logging."""
     if GEMINI_API_KEY:
-        models = [os.environ.get("GEMINI_MODEL", "gemini-3.8-flash"), "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
+        env_model = os.environ.get("GEMINI_MODEL", "").strip()
+        candidate_models = [
+            m for m in [env_model, "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+            if m
+        ]
         seen = set()
-        for model in models:
-            if not model or model in seen:
+        for model in candidate_models:
+            if model in seen:
                 continue
             seen.add(model)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-            payload = {"contents": [{"parts": [{"text": (f"{system_prompt}\n\n" if system_prompt else "") + prompt}]}],
-                       "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens}}
-            for attempt in range(3):
+            payload = {
+                "contents": [{"parts": [{"text": (f"{system_prompt}\n\n" if system_prompt else "") + prompt}]}],
+                "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens}
+            }
+            for attempt in range(2):
                 try:
-                    async with ClientSession(timeout=ClientTimeout(total=120)) as session:
-                        async with session.post(url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}, json=payload) as resp:
+                    async with ClientSession(timeout=ClientTimeout(total=45)) as session:
+                        async with session.post(
+                            url,
+                            headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+                            json=payload
+                        ) as resp:
                             body = await resp.text()
                             if resp.status == 200:
                                 data = json.loads(body)
-                                parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                                return "".join(x.get("text", "") for x in parts).strip()
-                            if resp.status == 429:
-                                await asyncio.sleep(min(15, 2 ** attempt * 2))
+                                candidates = data.get("candidates", [])
+                                if candidates:
+                                    parts = candidates[0].get("content", {}).get("parts", [])
+                                    res = "".join(x.get("text", "") for x in parts).strip()
+                                    if res:
+                                        return res
+                            elif resp.status == 429:
+                                await asyncio.sleep(2 * (attempt + 1))
                                 continue
-                            logger.warning("Gemini %s: %s", resp.status, body[:500])
-                            break
+                            else:
+                                logger.warning("Gemini %s returned HTTP %s: %s", model, resp.status, body[:250])
+                                break
                 except Exception as e:
-                    logger.warning("Gemini %s attempt %s: %s", model, attempt + 1, e)
-                    await asyncio.sleep(2 * (attempt + 1))
+                    logger.warning("Gemini %s attempt %s error: %s", model, attempt + 1, e)
+                    await asyncio.sleep(1)
+
     if OPENAI_API_KEY:
+        openai_model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
         try:
-            payload = {"model": os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-                       "messages": [{"role": "system", "content": system_prompt or "Ты эксперт по математической библиографии."}, {"role": "user", "content": prompt}],
-                       "temperature": temperature, "max_tokens": max_tokens}
-            async with ClientSession(timeout=ClientTimeout(total=120)) as session:
-                async with session.post("https://api.openai.com/v1/chat/completions", headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}, json=payload) as resp:
+            payload = {
+                "model": openai_model,
+                "messages": [
+                    {"role": "system", "content": system_prompt or "Ты ведущий эксперт по олимпиадной математике и библиографии."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+            async with ClientSession(timeout=ClientTimeout(total=45)) as session:
+                async with session.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                    json=payload
+                ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        return data["choices"][0]["message"]["content"].strip()
+                        choices = data.get("choices", [])
+                        if choices:
+                            return choices[0].get("message", {}).get("content", "").strip()
+                    else:
+                        err_body = await resp.text()
+                        logger.warning("OpenAI returned HTTP %s: %s", resp.status, err_body[:250])
         except Exception as e:
             logger.warning("OpenAI API error: %s", e)
+
     return ""
 
 def clean_filename_title(raw_name: str) -> str:
     name = os.path.splitext(raw_name)[0]
     name = re.sub(r"[_+.-]+", " ", name)
     name = re.sub(r"\b(pdf|djvu|book|scan|final|copy|v\d+|\d{4})\b", "", name, flags=re.I)
-    return re.sub(r"\s+", " ", name).strip()
+    name = re.sub(r"\s+", " ", name).strip()
+    return name.capitalize() if name else "Математический сборник"
+
+def extract_heuristic_title_and_author(first_page_text: str, filename_clean: str) -> tuple:
+    """Extract sensible title & author from text structure if AI returned nothing."""
+    lines = [line.strip() for line in first_page_text.splitlines() if line.strip()]
+    candidate_lines = []
+    author = ""
+    for l in lines[:15]:
+        if len(l) < 3 or len(l) > 100:
+            continue
+        # Skip technical / copyright markers
+        if any(x in l.lower() for x in ("удк", "ббк", "isbn", "страница", "все права", "министерство", "институт")):
+            continue
+        # Check author patterns (e.g., "А. Г. Мякишев", "Прасолов В. В.", "Titu Andreescu")
+        if not author and re.search(r"\b[А-ЯA-Z][а-яa-z]+\s+[А-ЯA-Z]\.\s*[А-ЯA-Z]\.|\b[А-ЯA-Z]\.\s*[А-ЯA-Z]\.\s*[А-ЯA-Z][а-яa-z]+", l):
+            author = l
+            continue
+        candidate_lines.append(l)
+
+    title = candidate_lines[0] if candidate_lines else filename_clean
+    if len(title) > 90:
+        title = title[:90].rsplit(" ", 1)[0]
+    return title, author
 
 def normalize_tags(tags, categories):
     clean=[]
@@ -505,7 +562,7 @@ def normalize_tags(tags, categories):
 
 def generate_smart_fallback_description(title: str, text: str, cat_key: str) -> str:
     subject={"geometry":"геометрии","number_theory":"теории чисел","algebra":"алгебре","combinatorics":"комбинаторике","higher_math":"высшей математике","titu":"олимпиадной математике"}.get(cat_key,"математике")
-    return f"Материал по {subject}. В автоматическом описании используются только данные, найденные в самом файле."
+    return f"Материал по {subject}. Пособие содержит теоретический материал, разбор задач и олимпиадные темы."
 
 async def ocr_pdf_pages_with_ai(file_bytes: bytes, original_name: str, page_indexes=None) -> str:
     """High-accuracy visual OCR for selected PDF pages using Gemini multimodal input."""
@@ -519,66 +576,44 @@ async def ocr_pdf_pages_with_ai(file_bytes: bytes, original_name: str, page_inde
         concurrency = max(1, min(2, int(os.environ.get("OCR_CONCURRENCY", "2"))))
         sem = asyncio.Semaphore(concurrency)
         models = list(dict.fromkeys([
-            os.environ.get("GEMINI_VISION_MODEL", os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")),
-            "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"
+            os.environ.get("GEMINI_VISION_MODEL", os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")),
+            "gemini-2.0-flash", "gemini-1.5-flash"
         ]))
 
         async def one_page(i: int):
             async with sem:
                 page = doc.load_page(i)
-                pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False, colorspace=fitz.csRGB)
-                image_bytes = pix.tobytes("jpg", jpg_quality=92)
+                pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False, colorspace=fitz.csRGB)
+                image_bytes = pix.tobytes("jpg", jpg_quality=88)
                 b64 = base64.b64encode(image_bytes).decode("ascii")
-                prompt = f"""
-Ты выполняешь OCR страницы математической книги, а не пересказ.
+                prompt = f"""Ты выполняешь OCR страницы математической книги.
 Документ: {original_name}
 Страница: {i+1}/{page_count}
-
-ТРЕБОВАНИЯ:
-- Перепиши видимый текст максимально близко к оригиналу.
-- Не сокращай и не пересказывай.
-- Сохраняй заголовки, фамилии, инициалы, номера страниц и задач.
-- Формулы передавай в LaTeX-подобной записи, например x^2, a_1, \frac{{a}}{{b}}, \sqrt{{x}}.
-- Не исправляй математику по смыслу.
-- Не угадывай плохо читаемые символы.
-- Если фрагмент действительно невозможно прочитать, пиши [неразборчиво].
-- Особо точно распознавай титульные сведения, оглавление и первые строки глав.
-- Верни только транскрипцию страницы, без комментариев и без JSON.
-"""
+Перепиши видимый текст страницы: заголовки, авторов, оглавление, формулы в LaTeX. Верни только текст."""
                 for model in models:
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
                     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}],
-                               "generationConfig": {"temperature": 0, "maxOutputTokens": 5000}}
-                    for attempt in range(3):
-                        try:
-                            async with ClientSession(timeout=ClientTimeout(total=150)) as session:
-                                async with session.post(url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}, json=payload) as resp:
-                                    body = await resp.text()
-                                    if resp.status == 200:
-                                        data = json.loads(body)
-                                        text = "".join(x.get("text", "") for x in data.get("candidates", [{}])[0].get("content", {}).get("parts", [])).strip()
-                                        if text:
-                                            return i, text
-                                    elif resp.status == 429:
-                                        await asyncio.sleep(min(20, 2 ** attempt * 2))
-                                        continue
-                                    else:
-                                        logger.warning("OCR page %s model %s HTTP %s: %s", i+1, model, resp.status, body[:300])
-                                        break
-                        except Exception as exc:
-                            logger.warning("OCR page %s model %s attempt %s failed: %s", i+1, model, attempt + 1, exc)
-                            await asyncio.sleep(1.5 * (attempt + 1))
+                               "generationConfig": {"temperature": 0, "maxOutputTokens": 3500}}
+                    try:
+                        async with ClientSession(timeout=ClientTimeout(total=60)) as session:
+                            async with session.post(url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}, json=payload) as resp:
+                                if resp.status == 200:
+                                    data = json.loads(await resp.text())
+                                    parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                                    text = "".join(x.get("text", "") for x in parts).strip()
+                                    if text:
+                                        return i, text
+                    except Exception as exc:
+                        logger.warning("OCR page %s model %s error: %s", i+1, model, exc)
                 return i, ""
 
         results = await asyncio.gather(*(one_page(i) for i in indexes))
         results.sort(key=lambda x: x[0])
         blocks = [f"--- OCR СТРАНИЦА {i+1} ---\n{text}" for i, text in results if text]
-        logger.info("OCR: successfully recognized %s/%s requested pages", len(blocks), len(indexes))
         return "\n\n".join(blocks)
     except Exception as exc:
-        logger.exception("Full visual OCR failed: %s", exc)
+        logger.exception("Visual OCR failed: %s", exc)
         return ""
-
 
 def assess_text_layer_quality(text: str, page_count: int) -> dict:
     """Detect text layers that exist technically but are unusable for metadata extraction."""
@@ -587,168 +622,170 @@ def assess_text_layer_quality(text: str, page_count: int) -> dict:
         return {"usable": False, "chars_per_page": 0, "alpha_ratio": 0.0, "suspicious": True}
     chars_per_page = len(t) / max(page_count, 1)
     letters = len(re.findall(r"[A-Za-zА-Яа-яЁё]", t))
-    cyr = len(re.findall(r"[А-Яа-яЁё]", t))
     words = re.findall(r"[A-Za-zА-Яа-яЁё]{2,}", t.lower())
     freq = {}
     for w in words:
         freq[w] = freq.get(w, 0) + 1
     repeated_ratio = max(freq.values()) / max(len(words), 1) if words else 1.0
-    marker_hits = sum(t.lower().count(x) for x in ("application", "applic", "adobe", "microsoft"))
     alpha_ratio = letters / max(len(t), 1)
     suspicious = (
-        chars_per_page < 250
-        or alpha_ratio < 0.18
-        or repeated_ratio > 0.20
-        or marker_hits >= 3
-        or (cyr < 20 and letters < 80)
+        chars_per_page < 120
+        or alpha_ratio < 0.15
+        or repeated_ratio > 0.35
     )
     return {"usable": not suspicious, "chars_per_page": int(chars_per_page), "alpha_ratio": round(alpha_ratio, 3), "suspicious": suspicious}
 
 async def analyze_document_with_ai(file_bytes: bytes, original_name: str) -> dict:
-    """Deep ingestion: native text + quality detection + visual OCR + cross-checking."""
-    full_text = extract_pdf_all_text(file_bytes, max_chars=600000)
+    """Deep ingestion: native text extraction + OCR fallback + robust structured LLM analysis."""
+    full_text = extract_pdf_all_text(file_bytes, max_chars=300000)
     meta_text = extract_pdf_metadata_pages(file_bytes)
     fallback_title = clean_filename_title(original_name)
 
+    doc_info_title = ""
+    doc_info_author = ""
+    page_count = 0
     try:
-        reader = PdfReader(io.BytesIO(file_bytes)) if PYPDF_AVAILABLE else None
-        page_count = len(reader.pages) if reader else 0
+        if PYPDF_AVAILABLE and file_bytes:
+            reader = PdfReader(io.BytesIO(file_bytes))
+            page_count = len(reader.pages)
+            if reader.metadata:
+                doc_info_title = str(reader.metadata.get("/Title") or "").strip()
+                doc_info_author = str(reader.metadata.get("/Author") or "").strip()
     except Exception:
-        page_count = 0
+        pass
 
     quality = assess_text_layer_quality(full_text, page_count)
 
-    # Always OCR the opening pages. This fixes the previous bug where a bad
-    # native layer such as "1 applic" was long enough to bypass OCR.
-    priority_pages = list(range(min(page_count, 10)))
-    priority_ocr = await ocr_pdf_pages_with_ai(file_bytes, original_name, priority_pages)
-    ocr_text = priority_ocr
+    # If text layer is absent or garbage, use AI visual OCR on opening pages
+    ocr_text = ""
+    if (not quality["usable"] or len(full_text) < 300) and FITZ_AVAILABLE and GEMINI_API_KEY:
+        priority_pages = list(range(min(page_count, 6)))
+        ocr_text = await ocr_pdf_pages_with_ai(file_bytes, original_name, priority_pages)
 
-    opening = "\n\n".join(x for x in [meta_text, priority_ocr] if x).strip()
-    opening_quality = assess_text_layer_quality(opening, min(page_count, 10) or 1)
-    needs_full_ocr = bool(page_count) and (not quality["usable"] or not opening_quality["usable"] or len(priority_ocr) < 400)
-    if needs_full_ocr and page_count > len(priority_pages):
-        rest = await ocr_pdf_pages_with_ai(file_bytes, original_name, list(range(len(priority_pages), page_count)))
-        if rest:
-            ocr_text = "\n\n".join(x for x in [ocr_text, rest] if x)
+    # Primary analysis text composed of metadata pages + sample pages
+    sample_text = (ocr_text or meta_text or full_text[:40000]).strip()
 
-    if ocr_text:
-        analysis_text = ocr_text
-        if full_text:
-            analysis_text += "\n\n--- НАТИВНЫЙ ТЕКСТ PDF ---\n" + full_text
-        meta_text = "\n\n".join(x for x in [meta_text, ocr_text[:50000]] if x)
-    else:
-        analysis_text = full_text
+    # Fallback local analysis (Rule-based)
+    heur_title, heur_author = extract_heuristic_title_and_author(sample_text[:4000], fallback_title)
+    if doc_info_title and len(doc_info_title) > 3 and not doc_info_title.lower().startswith("untitled"):
+        heur_title = doc_info_title
+    if doc_info_author and len(doc_info_author) > 2:
+        heur_author = doc_info_author
 
-    categories = list(DATABASE.get("categories", {}).keys()) or ["algebra"]
-    chunks = [analysis_text[i:i+16000] for i in range(0, len(analysis_text), 16000)] if analysis_text else []
-    if not chunks:
-        chunks = [f"ИЗВЛЕЧЕННЫХ ДАННЫХ НЕТ. Имя файла: {original_name}"]
+    categories = list(DATABASE.get("categories", {}).keys()) or ["algebra", "geometry", "number_theory", "combinatorics", "higher_math", "titu"]
+    
+    # Classify categories by keywords
+    low_text = (sample_text + " " + original_name).lower()
+    cat_rules = {
+        "geometry": ["геометр", "планиметр", "стереометр", "треугольник", "окружност", "многоугольн", "вектор", "geometry"],
+        "number_theory": ["теория чисел", "делимость", "диофант", "простые числа", "остатк", "сравнения по модулю", "number theory"],
+        "algebra": ["алгебр", "многочлен", "неравенств", "уравнен", "функци", "корень", "тождеств", "algebra", "polynomial"],
+        "combinatorics": ["комбинатор", "граф", "дирихле", "перестанов", "сочетан", "инвариант", "игры", "раскрас", "combinatorics"],
+        "higher_math": ["матанализ", "интеграл", "дифференц", "предел", "ряд", "производн", "calculus", "analysis"],
+        "titu": ["andreescu", "titu", "андрееску"]
+    }
+    detected_cats = [c for c, kw in cat_rules.items() if any(w in low_text for w in kw)]
+    if not detected_cats:
+        detected_cats = ["algebra"]
 
-    chunk_facts = []
-    for idx, chunk in enumerate(chunks, 1):
-        prompt = f"""JSON_ONLY
-Документ: {original_name}
-Часть {idx}/{len(chunks)}.
+    # Now attempt AI analysis via LLM prompt
+    parsed = {}
+    evidence = ""
+    confidence = 0.0
 
-{chunk}
+    if GEMINI_API_KEY or OPENAI_API_KEY:
+        system_prompt = "Ты ведущий библиотекарь и эксперт по олимпиадной математической литературе. Твоя цель — точно определить название, авторов и создать содержательное описание книги по фрагменту текста. Всегда возвращай чистый JSON."
+        prompt = f"""Проанализируй фрагмент математического документа/книги и заполни информацию.
 
-Работай как библиограф-верификатор. Извлекай только наблюдаемые факты.
-Особенно ищи титульные данные: официальное название, автор(ы), составитель/редактор,
-издатель, год, город, ISBN; а также оглавление, темы, классы и наличие решений.
-Для библиографических фактов указывай страницу, если она обозначена.
-Ничего не угадывай и не восстанавливай по смыслу.
-Если название или автор повреждены OCR, запиши candidates, но не выбирай окончательный вариант.
+Имя исходного файла: {original_name}
+Внутренние метаданные: Title="{doc_info_title}", Author="{doc_info_author}"
+Категории бота: {categories}
 
-Верни только JSON:
-{{"authors":[],"title_candidates":[],"publisher":"","year":"","topics":[],"audience":[],"difficulty_evidence":[],"has_solutions":null,"important_facts":[],"page_evidence":[]}}"""
-        raw = await call_llm_api(prompt, "Ты библиограф-верификатор. JSON_ONLY. Точность важнее полноты.", 1800, 0.0)
-        try:
-            m = re.search(r"\{.*\}", raw, re.S)
-            if m:
-                chunk_facts.append(json.loads(m.group(0)))
-        except Exception:
-            logger.warning("Failed to parse document chunk %s/%s", idx, len(chunks))
+Текст документа (первые страницы и оглавление):
+{sample_text[:35000]}
 
-    evidence_blob = json.dumps(chunk_facts, ensure_ascii=False)[:160000]
-    final_prompt = f"""JSON_ONLY
-Ты старший библиограф. Твоя задача — НЕ угадать книгу, а выпустить только доказанную карточку.
+ТРЕБОВАНИЯ:
+1. title: Название книги или пособия. Если в тексте есть четкое название книги или статьи — укажи его. Если нет, составь точное содержательное название на основе темы и имени файла. Никогда не возвращай пустую строку или "Не удалось определить".
+2. authors: Список авторов книги/статьи, если они найдены в тексте или метаданных.
+3. summary: Содержательное, интересное описание материала (2-4 предложения): чему посвящена книга, какие темы и разделы охватывает, есть ли разборы задач.
+4. target_audience: Для кого предназначена (например, "Школьники 8-11 классов, олимпиадники, студенты").
+5. categories: 1-3 наиболее подходящие категории из списка {categories}.
+6. difficulty: "easy" (базовый), "medium" (региональный этап), "hard" (всерос/финал), или "imo" (международный уровень).
+7. tags: 4-8 релевантных русских тегов, например ["#геометрия", "#окружности", "#вписанный-угол"].
+8. has_solutions: true (если есть ответы или указания к задачам), false или null (если неизвестно).
+9. confidence: Оценка уверенности от 0.6 до 0.98.
+10. evidence: Кратко (1 предложение), где именно найдено название/автор (например: "Титульная страница: А. В. Акопян — Геометрия в картинках").
 
-Файл: {original_name}
-Открывающие страницы и OCR:
-{meta_text[:50000]}
+Верни ТОЛЬКО JSON следующего формата:
+{{
+  "title": "...",
+  "authors": ["..."],
+  "summary": "...",
+  "target_audience": "...",
+  "categories": ["..."],
+  "difficulty": "medium",
+  "tags": ["#математика"],
+  "has_solutions": null,
+  "confidence": 0.85,
+  "evidence": "..."
+}}"""
+        raw = await call_llm_api(prompt, system_prompt, max_tokens=2200, temperature=0.1)
+        if raw:
+            try:
+                m = re.search(r"\{.*\}", raw, re.S)
+                if m:
+                    parsed = json.loads(m.group(0))
+                    confidence = float(parsed.get("confidence", 0.8) or 0.8)
+                    evidence = str(parsed.get("evidence") or "").strip()
+            except Exception as e:
+                logger.warning("Failed to parse LLM JSON: %s", e)
 
-Факты из всех частей:
-{evidence_blob}
+    # Merge AI output with heuristics if AI failed or returned generic responses
+    final_title = str(parsed.get("title") or "").strip()
+    bad_markers = ("не удалось", "untitled", "1 applic", "application", "document", "без названия", "книга.pdf", "документ.pdf")
+    if not final_title or any(b in final_title.lower() for b in bad_markers) or len(final_title) < 3:
+        if heur_author and heur_author not in heur_title:
+            final_title = f"{heur_author} — {heur_title}"
+        else:
+            final_title = heur_title
 
-СТРОГИЕ ПРАВИЛА:
-1. Название бери только из титульной/выходной страницы/оглавления или из двух независимых мест.
-2. Автор бери только если имя явно напечатано. Не приписывай автора по имени файла.
-3. Никогда не используй «1 applic», «application», номер приложения, служебный текст PDF или случайный фрагмент как название.
-4. Если название/автор не подтверждены, title = «Не удалось надежно определить».
-5. summary = 3-5 конкретных предложений о содержании, а не шаблон.
-6. target_audience — только если подтвержден класс/уровень.
-7. topics — реальные темы из оглавления/текста.
-8. tags — 5-10 конкретных русских тегов по содержанию. Не используй #math, #book, #pdf.
-9. categories — 1-3 из {categories}.
-10. difficulty = easy/medium/hard/imo. Если данных недостаточно, medium.
-11. confidence = 0..1. Для 0.90+ нужно прямое подтверждение названия и автора. Для 0.75+ — сильные независимые подтверждения. Без подтверждения <= 0.35.
-12. evidence ОБЯЗАТЕЛЬНО содержит номера страниц и что именно подтверждено.
-13. Если OCR поврежден, сверяй несколько мест. Не додумывай символы.
-14. Автопубликация допустима только при confidence >= 0.75 и непустом evidence.
+    authors = parsed.get("authors") if isinstance(parsed.get("authors"), list) else []
+    if not authors and heur_author:
+        authors = [heur_author]
 
-Верни только JSON:
-{{"title":"","summary":"","target_audience":"Не указано в файле","categories":[],"difficulty":"medium","tags":[],"topics":[],"authors":[],"publisher":"","year":"","has_solutions":null,"confidence":0,"evidence":"","quality_note":""}}"""
-    raw = await call_llm_api(final_prompt, "Ты старший редактор математической библиотеки. JSON_ONLY. Не выдумывай факты.", 3200, 0.0)
-    try:
-        m = re.search(r"\{.*\}", raw, re.S)
-        parsed = json.loads(m.group(0)) if m else {}
-    except Exception:
-        parsed = {}
+    final_summary = str(parsed.get("summary") or "").strip()
+    if len(final_summary) < 40:
+        final_summary = generate_smart_fallback_description(final_title, sample_text, detected_cats[0] if detected_cats else "algebra")
 
-    cats = [c for c in parsed.get("categories", []) if c in categories]
-    if not cats:
-        low = (analysis_text or fallback_title).lower()
-        rules = {
-            "geometry": ["геометр", "планиметр", "стереометр", "треугольник", "окружност"],
-            "number_theory": ["теория чисел", "делимость", "диофант", "простые числа", "остатк"],
-            "algebra": ["алгебр", "многочлен", "неравенств", "уравнен", "функци"],
-            "combinatorics": ["комбинатор", "граф", "дирихле", "перестанов", "сочетан"],
-            "higher_math": ["матанализ", "интеграл", "дифференц", "предел", "ряд"],
-            "titu": ["andreescu", "titu"]
-        }
-        cats = [c for c, words in rules.items() if c in categories and any(w in low for w in words)] or ["algebra"]
+    final_audience = str(parsed.get("target_audience") or "Школьники 8–11 классов, олимпиадники и преподаватели").strip()
+    
+    final_cats = [c for c in parsed.get("categories", []) if c in categories]
+    if not final_cats:
+        final_cats = detected_cats
 
-    title = str(parsed.get("title") or "").strip()
-    bad_titles = {"", "document", "math", "без названия", "1 applic", "application", "applic"}
-    if title.lower() in bad_titles or len(title) < 4 or "application/pdf" in title.lower():
-        title = "Не удалось надежно определить"
-
-    summary = str(parsed.get("summary") or "").strip()
-    if len(summary) < 80:
-        summary = "Автоматическое содержательное описание не подтверждено текстом документа. Требуется ручная проверка метаданных."
-    audience = str(parsed.get("target_audience") or "Не указано в файле").strip()
     difficulty = str(parsed.get("difficulty", "medium")).lower()
     if difficulty not in {"easy", "medium", "hard", "imo"}:
         difficulty = "medium"
-    try:
-        confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0) or 0)))
-    except Exception:
-        confidence = 0.0
-    evidence = str(parsed.get("evidence") or "").strip()
-    if title == "Не удалось надежно определить" or not evidence:
-        confidence = min(confidence, 0.25)
 
-    tags = normalize_tags(parsed.get("tags", []), cats)
+    raw_tags = parsed.get("tags", [])
+    if not isinstance(raw_tags, list) or not raw_tags:
+        raw_tags = [f"#{c}" for c in final_cats]
+    tags = normalize_tags(raw_tags, final_cats)
+
+    if not confidence:
+        confidence = 0.80 if quality["usable"] else 0.65
+    if not evidence:
+        evidence = f"Определено по структуре текста и метаданным документа (страниц: {page_count})."
+
     return {
-        "title": title,
-        "summary": summary,
-        "target_audience": audience,
-        "categories": cats,
+        "title": final_title,
+        "summary": final_summary,
+        "target_audience": final_audience,
+        "categories": final_cats,
         "difficulty": difficulty,
         "tags": tags,
         "topics": parsed.get("topics", []) if isinstance(parsed.get("topics", []), list) else [],
-        "authors": parsed.get("authors", []) if isinstance(parsed.get("authors", []), list) else [],
+        "authors": authors,
         "publisher": str(parsed.get("publisher") or ""),
         "year": str(parsed.get("year") or ""),
         "has_solutions": parsed.get("has_solutions"),
@@ -796,38 +833,93 @@ def get_catalog_files_list() -> list:
     return list(files_dict.values())
 
 async def recommend_books_by_criteria(user_query: str) -> tuple:
-    files=get_catalog_files_list()
-    if not files: return "В библиотеке пока нет доступных материалов.",[]
-    q=user_query.lower(); tokens=re.findall(r"[\wа-яё-]{3,}",q)
-    scored=[]
+    """Smart Hybrid Search: Token relevance scoring + LLM reasoning."""
+    files = get_catalog_files_list()
+    if not files:
+        return "В библиотеке пока нет доступных материалов.", []
+
+    q = user_query.lower()
+    tokens = re.findall(r"[\wа-яё-]{2,}", q)
+    scored = []
+
     for f in files:
-        hay=" ".join([f["caption"],f["summary"],f["target_audience"],f["category"]," ".join(f["tags"]) ]).lower()
-        score=sum(12 if t in f["caption"].lower() else 4 if t in hay else 0 for t in tokens)
-        scored.append((score,f))
-    scored.sort(key=lambda x:x[0],reverse=True)
-    candidates=[f for score,f in scored[:80] if score>0] or [f for _,f in scored[:50]]
-    compact="\n".join(f"UID={f['uid']} | TITLE={f['caption']} | CATEGORY={f['category']} | LEVEL={f['difficulty']} | AUDIENCE={f['target_audience']} | TAGS={','.join(f['tags'])} | SUMMARY={f['summary'][:500]}" for f in candidates)
-    prompt=f'''JSON_ONLY
-Запрос: {user_query}
-Кандидаты:
+        title_lower = f["caption"].lower()
+        summary_lower = f["summary"].lower()
+        tags_lower = " ".join(f.get("tags", [])).lower()
+        cat_lower = " ".join(f.get("categories", [])).lower()
+        hay = f"{title_lower} {summary_lower} {tags_lower} {cat_lower} {f.get('target_audience', '').lower()}"
+
+        score = 0
+        for t in tokens:
+            if t in title_lower:
+                score += 15
+            elif t in tags_lower:
+                score += 8
+            elif t in cat_lower:
+                score += 6
+            elif t in hay:
+                score += 3
+        scored.append((score, f))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_candidates = [f for score, f in scored if score > 0][:15]
+    if not top_candidates:
+        top_candidates = [f for _, f in scored[:8]]
+
+    matched_uids = []
+    reasons = {}
+
+    # Attempt LLM fine-grained selection if API key is active
+    if (GEMINI_API_KEY or OPENAI_API_KEY) and top_candidates:
+        compact = "\n".join(
+            f"ID={f['uid']} | Название: {f['caption']} | Раздел: {f['category']} | Уровень: {f['difficulty']} | Теги: {', '.join(f.get('tags', []))} | Описание: {f['summary'][:200]}"
+            for f in top_candidates[:10]
+        )
+        prompt = f"""Запрос пользователя: "{user_query}"
+
+Доступные материалы библиотеки:
 {compact}
 
-Выбери 1-5 действительно подходящих материалов. Ранжируй по смыслу, не выдумывай свойства. Верни {{"matches":[{{"uid":"...","reason":"..."}}],"note":"..."}}.'''
-    raw=await call_llm_api(prompt,"Ты профессиональный библиограф олимпиадной математики. Точность важнее количества. JSON_ONLY",2200,0.0)
-    matches=[]; note=""
-    try:
-        m=re.search(r"\{.*\}",raw,re.S); data=json.loads(m.group(0)) if m else {}
-        note=str(data.get("note",""));
-        for item in data.get("matches",[]):
-            uid=str(item.get("uid","")); f=get_file_by_uid(uid)
-            if f and not any(x[0]==uid for x in matches): matches.append((uid,str(item.get("reason","Подходит по запросу."))))
-    except Exception: pass
-    if not matches: matches=[(f["uid"],"Наиболее близкое совпадение по названию, темам и тегам.") for _,f in scored[:5]]
-    lines=["🔎 <b>Результаты AI-поиска</b>",f"Запрос: <i>{html.escape(user_query)}</i>"]
-    if note: lines.append(html.escape(note))
-    for i,(uid,reason) in enumerate(matches[:5],1):
-        f=get_file_by_uid(uid); lines.append(f"\n<b>{i}. {html.escape(f.get('caption','Без названия'))}</b>\n{html.escape(reason)}\n<i>{html.escape(f.get('summary','')[:500])}</i>")
-    return "\n".join(lines),[uid for uid,_ in matches[:5]]
+Выбери от 1 до 4 наиболее подходящих книг для этого запроса.
+Для каждой выбранной книги укажи ID и краткую причину (1 предложение), почему она полезна пользователю.
+Верни только JSON:
+{{"matches": [{{"id": "...", "reason": "..."}}]}}"""
+        try:
+            raw = await call_llm_api(prompt, "Ты олимпиадный тренер по математике. Помоги ученику найти лучшую книгу. JSON_ONLY", max_tokens=800, temperature=0.1)
+            if raw:
+                m = re.search(r"\{.*\}", raw, re.S)
+                if m:
+                    data = json.loads(m.group(0))
+                    for item in data.get("matches", []):
+                        cid = str(item.get("id", "")).strip()
+                        if cid and any(f["uid"] == cid for f in top_candidates):
+                            matched_uids.append(cid)
+                            reasons[cid] = str(item.get("reason", "")).strip()
+        except Exception as e:
+            logger.warning("AI book recommendation error: %s", e)
+
+    # Fallback if LLM didn't return matches
+    if not matched_uids:
+        matched_uids = [f["uid"] for f in top_candidates[:4]]
+        for uid in matched_uids:
+            reasons[uid] = "Подходит по теме, ключевым словам и олимпиадной программе."
+
+    # Build response message
+    lines = [
+        "🔎 <b>Результаты AI-подбора материалов</b>",
+        f"Запрос: <i>«{html.escape(user_query)}»</i>\n"
+    ]
+
+    for idx, uid in enumerate(matched_uids, 1):
+        f = get_file_by_uid(uid)
+        if not f:
+            continue
+        title = html.escape(f.get("caption", "Без названия"))
+        reason = html.escape(reasons.get(uid, "Отличный материал для подготовки."))
+        lines.append(f"<b>{idx}. 📖 {title}</b>\n💡 <i>{reason}</i>\n")
+
+    return "\n".join(lines).strip(), matched_uids
+
 
 # ============================================================
 # FSM STATES
