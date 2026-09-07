@@ -445,7 +445,7 @@ async def download_file_bytes(file_id: str) -> bytes:
 
 async def call_llm_api(prompt: str, system_prompt: str = "", max_tokens: int = 1800, temperature: float = 0.05) -> str:
     if GEMINI_API_KEY:
-        models = [os.environ.get("GEMINI_MODEL", "gemini-3.7-flash"), "gemini-3.6-flash", "gemini-3.5-flash"]
+        models = [os.environ.get("GEMINI_MODEL", "gemini-3.8-flash"), "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
         seen = set()
         for model in models:
             if not model or model in seen:
@@ -507,107 +507,162 @@ def generate_smart_fallback_description(title: str, text: str, cat_key: str) -> 
     subject={"geometry":"геометрии","number_theory":"теории чисел","algebra":"алгебре","combinatorics":"комбинаторике","higher_math":"высшей математике","titu":"олимпиадной математике"}.get(cat_key,"математике")
     return f"Материал по {subject}. В автоматическом описании используются только данные, найденные в самом файле."
 
-async def ocr_pdf_pages_with_ai(file_bytes: bytes, original_name: str) -> str:
-    """
-    OCR/vision pass for scanned PDFs. Every page is rendered and sent to the
-    vision-capable Gemini model. This is intentionally slow: accuracy is more
-    important than latency for library ingestion.
-    """
+async def ocr_pdf_pages_with_ai(file_bytes: bytes, original_name: str, page_indexes=None) -> str:
+    """High-accuracy visual OCR for selected PDF pages using Gemini multimodal input."""
     if not FITZ_AVAILABLE or not file_bytes or not GEMINI_API_KEY:
         return ""
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         page_count = len(doc)
-        logger.info("OCR: rendering %s pages for %s", page_count, original_name)
-        concurrency = max(1, min(3, int(os.environ.get("OCR_CONCURRENCY", "2"))))
+        indexes = sorted({i for i in (range(page_count) if page_indexes is None else page_indexes) if 0 <= i < page_count})
+        logger.info("OCR: rendering %s/%s pages for %s", len(indexes), page_count, original_name)
+        concurrency = max(1, min(2, int(os.environ.get("OCR_CONCURRENCY", "2"))))
         sem = asyncio.Semaphore(concurrency)
+        models = list(dict.fromkeys([
+            os.environ.get("GEMINI_VISION_MODEL", os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")),
+            "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"
+        ]))
 
         async def one_page(i: int):
             async with sem:
                 page = doc.load_page(i)
-                # 150-170 DPI is a good compromise for printed math text and equations.
-                pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False, colorspace=fitz.csRGB)
-                image_bytes = pix.tobytes("jpg", jpg_quality=88)
+                pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False, colorspace=fitz.csRGB)
+                image_bytes = pix.tobytes("jpg", jpg_quality=92)
                 b64 = base64.b64encode(image_bytes).decode("ascii")
-                prompt = (
-                    f"Документ: {original_name}. Страница {i+1}/{page_count}.\n"
-                    "Распознай страницу максимально точно. Сохраняй математические формулы, "
-                    "индексы, степени, номера задач, имена авторов и заголовки. Не додумывай "
-                    "нечитаемый текст. Верни только распознанный текст страницы, без комментариев."
-                )
-                models = [os.environ.get("GEMINI_MODEL", "gemini-3.7-flash"), "gemini-3.6-flash", "gemini-3.5-flash"]
-                for model in dict.fromkeys(models):
+                prompt = f"""
+Ты выполняешь OCR страницы математической книги, а не пересказ.
+Документ: {original_name}
+Страница: {i+1}/{page_count}
+
+ТРЕБОВАНИЯ:
+- Перепиши видимый текст максимально близко к оригиналу.
+- Не сокращай и не пересказывай.
+- Сохраняй заголовки, фамилии, инициалы, номера страниц и задач.
+- Формулы передавай в LaTeX-подобной записи, например x^2, a_1, \frac{{a}}{{b}}, \sqrt{{x}}.
+- Не исправляй математику по смыслу.
+- Не угадывай плохо читаемые символы.
+- Если фрагмент действительно невозможно прочитать, пиши [неразборчиво].
+- Особо точно распознавай титульные сведения, оглавление и первые строки глав.
+- Верни только транскрипцию страницы, без комментариев и без JSON.
+"""
+                for model in models:
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-                    payload = {
-                        "contents": [{"parts": [
-                            {"text": prompt},
-                            {"inline_data": {"mime_type": "image/jpeg", "data": b64}}
-                        ]}],
-                        "generationConfig": {"temperature": 0, "maxOutputTokens": 3500}
-                    }
-                    try:
-                        async with ClientSession(timeout=ClientTimeout(total=120)) as session:
-                            async with session.post(url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}, json=payload) as resp:
-                                if resp.status == 200:
-                                    data = await resp.json()
-                                    text = "".join(x.get("text", "") for x in data.get("candidates", [{}])[0].get("content", {}).get("parts", []))
-                                    if text.strip():
-                                        return i, text.strip()
-                                elif resp.status == 429:
-                                    await asyncio.sleep(3)
-                    except Exception as exc:
-                        logger.warning("OCR page %s model %s failed: %s", i+1, model, exc)
+                    payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}],
+                               "generationConfig": {"temperature": 0, "maxOutputTokens": 5000}}
+                    for attempt in range(3):
+                        try:
+                            async with ClientSession(timeout=ClientTimeout(total=150)) as session:
+                                async with session.post(url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}, json=payload) as resp:
+                                    body = await resp.text()
+                                    if resp.status == 200:
+                                        data = json.loads(body)
+                                        text = "".join(x.get("text", "") for x in data.get("candidates", [{}])[0].get("content", {}).get("parts", [])).strip()
+                                        if text:
+                                            return i, text
+                                    elif resp.status == 429:
+                                        await asyncio.sleep(min(20, 2 ** attempt * 2))
+                                        continue
+                                    else:
+                                        logger.warning("OCR page %s model %s HTTP %s: %s", i+1, model, resp.status, body[:300])
+                                        break
+                        except Exception as exc:
+                            logger.warning("OCR page %s model %s attempt %s failed: %s", i+1, model, attempt + 1, exc)
+                            await asyncio.sleep(1.5 * (attempt + 1))
                 return i, ""
 
-        results = await asyncio.gather(*(one_page(i) for i in range(page_count)))
+        results = await asyncio.gather(*(one_page(i) for i in indexes))
         results.sort(key=lambda x: x[0])
         blocks = [f"--- OCR СТРАНИЦА {i+1} ---\n{text}" for i, text in results if text]
-        logger.info("OCR: successfully recognized %s/%s pages", len(blocks), page_count)
+        logger.info("OCR: successfully recognized %s/%s requested pages", len(blocks), len(indexes))
         return "\n\n".join(blocks)
     except Exception as exc:
         logger.exception("Full visual OCR failed: %s", exc)
         return ""
 
+
+def assess_text_layer_quality(text: str, page_count: int) -> dict:
+    """Detect text layers that exist technically but are unusable for metadata extraction."""
+    t = re.sub(r"\s+", " ", text or "").strip()
+    if not t or not page_count:
+        return {"usable": False, "chars_per_page": 0, "alpha_ratio": 0.0, "suspicious": True}
+    chars_per_page = len(t) / max(page_count, 1)
+    letters = len(re.findall(r"[A-Za-zА-Яа-яЁё]", t))
+    cyr = len(re.findall(r"[А-Яа-яЁё]", t))
+    words = re.findall(r"[A-Za-zА-Яа-яЁё]{2,}", t.lower())
+    freq = {}
+    for w in words:
+        freq[w] = freq.get(w, 0) + 1
+    repeated_ratio = max(freq.values()) / max(len(words), 1) if words else 1.0
+    marker_hits = sum(t.lower().count(x) for x in ("application", "applic", "adobe", "microsoft"))
+    alpha_ratio = letters / max(len(t), 1)
+    suspicious = (
+        chars_per_page < 250
+        or alpha_ratio < 0.18
+        or repeated_ratio > 0.20
+        or marker_hits >= 3
+        or (cyr < 20 and letters < 80)
+    )
+    return {"usable": not suspicious, "chars_per_page": int(chars_per_page), "alpha_ratio": round(alpha_ratio, 3), "suspicious": suspicious}
+
 async def analyze_document_with_ai(file_bytes: bytes, original_name: str) -> dict:
-    'Deep, slow-first analysis: every extracted page is considered before metadata is published.'
+    """Deep ingestion: native text + quality detection + visual OCR + cross-checking."""
     full_text = extract_pdf_all_text(file_bytes, max_chars=600000)
     meta_text = extract_pdf_metadata_pages(file_bytes)
     fallback_title = clean_filename_title(original_name)
 
-    # A scanned PDF may have almost no text layer. In that case, run a real
-    # page-by-page vision OCR pass instead of guessing from the filename.
     try:
         reader = PdfReader(io.BytesIO(file_bytes)) if PYPDF_AVAILABLE else None
         page_count = len(reader.pages) if reader else 0
     except Exception:
         page_count = 0
-    text_density = (len(full_text.strip()) / max(page_count, 1)) if page_count else 0
-    ocr_text = ""
-    if page_count and (text_density < 120 or not full_text.strip()):
-        ocr_text = await ocr_pdf_pages_with_ai(file_bytes, original_name)
-        if ocr_text:
-            full_text = (full_text + "\n\n" + ocr_text).strip()
-            # OCR is particularly valuable for title/contents pages.
-            meta_text = (meta_text + "\n\n" + ocr_text[:50000]).strip()
-    categories = list(DATABASE.get("categories", {}).keys()) or ["algebra"]
 
-    # Pass 1: inspect the entire document in chunks. This prevents a long book's
-    # contents from being decided from only the cover/first six pages.
-    chunks = [full_text[i:i+18000] for i in range(0, len(full_text), 18000)] if full_text else []
+    quality = assess_text_layer_quality(full_text, page_count)
+
+    # Always OCR the opening pages. This fixes the previous bug where a bad
+    # native layer such as "1 applic" was long enough to bypass OCR.
+    priority_pages = list(range(min(page_count, 10)))
+    priority_ocr = await ocr_pdf_pages_with_ai(file_bytes, original_name, priority_pages)
+    ocr_text = priority_ocr
+
+    opening = "\n\n".join(x for x in [meta_text, priority_ocr] if x).strip()
+    opening_quality = assess_text_layer_quality(opening, min(page_count, 10) or 1)
+    needs_full_ocr = bool(page_count) and (not quality["usable"] or not opening_quality["usable"] or len(priority_ocr) < 400)
+    if needs_full_ocr and page_count > len(priority_pages):
+        rest = await ocr_pdf_pages_with_ai(file_bytes, original_name, list(range(len(priority_pages), page_count)))
+        if rest:
+            ocr_text = "\n\n".join(x for x in [ocr_text, rest] if x)
+
+    if ocr_text:
+        analysis_text = ocr_text
+        if full_text:
+            analysis_text += "\n\n--- НАТИВНЫЙ ТЕКСТ PDF ---\n" + full_text
+        meta_text = "\n\n".join(x for x in [meta_text, ocr_text[:50000]] if x)
+    else:
+        analysis_text = full_text
+
+    categories = list(DATABASE.get("categories", {}).keys()) or ["algebra"]
+    chunks = [analysis_text[i:i+16000] for i in range(0, len(analysis_text), 16000)] if analysis_text else []
     if not chunks:
-        chunks = [f"ИЗВЛЕЧЕННОГО ТЕКСТА НЕТ. Имя файла: {original_name}"]
+        chunks = [f"ИЗВЛЕЧЕННЫХ ДАННЫХ НЕТ. Имя файла: {original_name}"]
 
     chunk_facts = []
     for idx, chunk in enumerate(chunks, 1):
-        prompt = f'''JSON_ONLY
+        prompt = f"""JSON_ONLY
 Документ: {original_name}
 Часть {idx}/{len(chunks)}.
 
 {chunk}
 
-Извлеки только факты, реально подтверждаемые этой частью: авторы, название, издатель/год, темы и главы, целевая аудитория/класс, уровень, тип материала, наличие решений, конкурсы/олимпиады. Не угадывай. Если факта нет — оставь пустым. Верни JSON:
-{{"authors":[],"titles":[],"publisher":"","year":"","topics":[],"audience":[],"difficulty_evidence":[],"has_solutions":null,"important_facts":[],"page_evidence":""}}'''
-        raw = await call_llm_api(prompt, "Ты библиограф-исследователь. Извлекай факты строго из данного фрагмента. JSON_ONLY", 1400, 0.0)
+Работай как библиограф-верификатор. Извлекай только наблюдаемые факты.
+Особенно ищи титульные данные: официальное название, автор(ы), составитель/редактор,
+издатель, год, город, ISBN; а также оглавление, темы, классы и наличие решений.
+Для библиографических фактов указывай страницу, если она обозначена.
+Ничего не угадывай и не восстанавливай по смыслу.
+Если название или автор повреждены OCR, запиши candidates, но не выбирай окончательный вариант.
+
+Верни только JSON:
+{{"authors":[],"title_candidates":[],"publisher":"","year":"","topics":[],"audience":[],"difficulty_evidence":[],"has_solutions":null,"important_facts":[],"page_evidence":[]}}"""
+        raw = await call_llm_api(prompt, "Ты библиограф-верификатор. JSON_ONLY. Точность важнее полноты.", 1800, 0.0)
         try:
             m = re.search(r"\{.*\}", raw, re.S)
             if m:
@@ -615,33 +670,36 @@ async def analyze_document_with_ai(file_bytes: bytes, original_name: str) -> dic
         except Exception:
             logger.warning("Failed to parse document chunk %s/%s", idx, len(chunks))
 
-    evidence_blob = json.dumps(chunk_facts, ensure_ascii=False)[:120000]
-    final_prompt = f'''JSON_ONLY
-Сформируй окончательную карточку математического материала.
+    evidence_blob = json.dumps(chunk_facts, ensure_ascii=False)[:160000]
+    final_prompt = f"""JSON_ONLY
+Ты старший библиограф. Твоя задача — НЕ угадать книгу, а выпустить только доказанную карточку.
 
-Имя файла: {original_name}
-Титульные страницы/оглавление:
-{meta_text[:30000]}
+Файл: {original_name}
+Открывающие страницы и OCR:
+{meta_text[:50000]}
 
-Факты, извлеченные из ВСЕХ частей документа:
+Факты из всех частей:
 {evidence_blob}
 
-Правила качества:
-1. Название и автор должны быть взяты из подтвержденных данных. Не угадывай по имени файла, если внутри есть более надежные данные.
-2. Если автор не подтвержден, не приписывай автора.
-3. summary — 3-5 конкретных предложений: реальные темы/главы, структура, уровень и наличие решений. Не рекламный шаблон.
-4. target_audience — только если подтверждено; иначе "Не указано в файле".
-5. categories — 1-3 из {categories}.
-6. difficulty — easy/medium/hard/imo; если данных недостаточно — medium.
-7. tags — 5-8 конкретных русских/английских тегов по реальному содержанию, без #math/#book/#pdf.
-8. confidence — 0..1. Это НЕ субъективная оценка: 0.90+ только при прямом подтверждении названия и автора на титульной/выходной странице; 0.75-0.89 при сильном подтверждении из нескольких мест; ниже 0.75 при неполных или противоречивых данных.
-9. evidence — укажи конкретные номера страниц, где подтверждены название и автор.
-10. Если есть OCR-ошибки, сверяй имя/название по нескольким страницам и выбирай только согласованный вариант.
-11. Никогда не выдумывай год, издателя, автора, уровень или наличие решений.
+СТРОГИЕ ПРАВИЛА:
+1. Название бери только из титульной/выходной страницы/оглавления или из двух независимых мест.
+2. Автор бери только если имя явно напечатано. Не приписывай автора по имени файла.
+3. Никогда не используй «1 applic», «application», номер приложения, служебный текст PDF или случайный фрагмент как название.
+4. Если название/автор не подтверждены, title = «Не удалось надежно определить».
+5. summary = 3-5 конкретных предложений о содержании, а не шаблон.
+6. target_audience — только если подтвержден класс/уровень.
+7. topics — реальные темы из оглавления/текста.
+8. tags — 5-10 конкретных русских тегов по содержанию. Не используй #math, #book, #pdf.
+9. categories — 1-3 из {categories}.
+10. difficulty = easy/medium/hard/imo. Если данных недостаточно, medium.
+11. confidence = 0..1. Для 0.90+ нужно прямое подтверждение названия и автора. Для 0.75+ — сильные независимые подтверждения. Без подтверждения <= 0.35.
+12. evidence ОБЯЗАТЕЛЬНО содержит номера страниц и что именно подтверждено.
+13. Если OCR поврежден, сверяй несколько мест. Не додумывай символы.
+14. Автопубликация допустима только при confidence >= 0.75 и непустом evidence.
 
 Верни только JSON:
-{{"title":"","summary":"","target_audience":"","categories":[],"difficulty":"medium","tags":[],"confidence":0,"evidence":""}}'''
-    raw = await call_llm_api(final_prompt, "Ты старший редактор библиотеки олимпиадной математики. Точность важнее скорости. JSON_ONLY", 2600, 0.0)
+{{"title":"","summary":"","target_audience":"Не указано в файле","categories":[],"difficulty":"medium","tags":[],"topics":[],"authors":[],"publisher":"","year":"","has_solutions":null,"confidence":0,"evidence":"","quality_note":""}}"""
+    raw = await call_llm_api(final_prompt, "Ты старший редактор математической библиотеки. JSON_ONLY. Не выдумывай факты.", 3200, 0.0)
     try:
         m = re.search(r"\{.*\}", raw, re.S)
         parsed = json.loads(m.group(0)) if m else {}
@@ -650,23 +708,25 @@ async def analyze_document_with_ai(file_bytes: bytes, original_name: str) -> dic
 
     cats = [c for c in parsed.get("categories", []) if c in categories]
     if not cats:
-        low = (fallback_title + " " + full_text).lower()
+        low = (analysis_text or fallback_title).lower()
         rules = {
-            "geometry": ["геометр", "планиметр", "стереометр"],
-            "number_theory": ["теория чисел", "делимость", "диофант", "простые числа"],
-            "algebra": ["алгебр", "многочлен", "неравенств", "уравнен"],
-            "combinatorics": ["комбинатор", "граф", "дирихле", "перестанов"],
-            "higher_math": ["матанализ", "интеграл", "дифференц", "предел"],
+            "geometry": ["геометр", "планиметр", "стереометр", "треугольник", "окружност"],
+            "number_theory": ["теория чисел", "делимость", "диофант", "простые числа", "остатк"],
+            "algebra": ["алгебр", "многочлен", "неравенств", "уравнен", "функци"],
+            "combinatorics": ["комбинатор", "граф", "дирихле", "перестанов", "сочетан"],
+            "higher_math": ["матанализ", "интеграл", "дифференц", "предел", "ряд"],
             "titu": ["andreescu", "titu"]
         }
         cats = [c for c, words in rules.items() if c in categories and any(w in low for w in words)] or ["algebra"]
 
     title = str(parsed.get("title") or "").strip()
-    if not title or title.lower() in {"document", "math", "без названия"}:
-        title = fallback_title or "Математический материал"
+    bad_titles = {"", "document", "math", "без названия", "1 applic", "application", "applic"}
+    if title.lower() in bad_titles or len(title) < 4 or "application/pdf" in title.lower():
+        title = "Не удалось надежно определить"
+
     summary = str(parsed.get("summary") or "").strip()
-    if len(summary) < 100:
-        summary = generate_smart_fallback_description(title, full_text, cats[0])
+    if len(summary) < 80:
+        summary = "Автоматическое содержательное описание не подтверждено текстом документа. Требуется ручная проверка метаданных."
     audience = str(parsed.get("target_audience") or "Не указано в файле").strip()
     difficulty = str(parsed.get("difficulty", "medium")).lower()
     if difficulty not in {"easy", "medium", "hard", "imo"}:
@@ -675,10 +735,11 @@ async def analyze_document_with_ai(file_bytes: bytes, original_name: str) -> dic
         confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0) or 0)))
     except Exception:
         confidence = 0.0
-    tags = normalize_tags(parsed.get("tags", []), cats)
-    if len(tags) < 3:
-        tags = normalize_tags(tags + [f"#{c}" for c in cats], cats)
+    evidence = str(parsed.get("evidence") or "").strip()
+    if title == "Не удалось надежно определить" or not evidence:
+        confidence = min(confidence, 0.25)
 
+    tags = normalize_tags(parsed.get("tags", []), cats)
     return {
         "title": title,
         "summary": summary,
@@ -686,10 +747,17 @@ async def analyze_document_with_ai(file_bytes: bytes, original_name: str) -> dic
         "categories": cats,
         "difficulty": difficulty,
         "tags": tags,
+        "topics": parsed.get("topics", []) if isinstance(parsed.get("topics", []), list) else [],
+        "authors": parsed.get("authors", []) if isinstance(parsed.get("authors", []), list) else [],
+        "publisher": str(parsed.get("publisher") or ""),
+        "year": str(parsed.get("year") or ""),
+        "has_solutions": parsed.get("has_solutions"),
         "confidence": confidence,
-        "evidence": str(parsed.get("evidence") or "").strip(),
+        "evidence": evidence,
+        "quality_note": str(parsed.get("quality_note") or "").strip(),
         "ocr_used": bool(ocr_text),
         "page_count": page_count,
+        "text_layer_quality": quality,
     }
 
 def get_catalog_files_list() -> list:
@@ -1609,8 +1677,9 @@ async def process_admin_upload_doc(message: types.Message, state: FSMContext):
         f"📂 <b>Разделы:</b> {', '.join(ai_meta['categories'])}\n"
         f"🎯 <b>Уверенность AI:</b> {ai_meta.get('confidence', 0):.0%}\n"
         f"🔎 <b>Основание:</b> {html.escape(ai_meta.get('evidence', '')[:700])}\n"
-        f"👁 <b>OCR:</b> {'использован для скана' if ai_meta.get('ocr_used') else 'не потребовался'}\n"
-        f"📄 <b>Страниц:</b> {ai_meta.get('page_count', 0)}\n\n"
+        f"👁 <b>OCR:</b> {'использован' if ai_meta.get('ocr_used') else 'не доступен/не сработал'}\n"
+        f"📄 <b>Страниц:</b> {ai_meta.get('page_count', 0)}\n"
+        f"🧪 <b>Качество текстового слоя:</b> {html.escape(str(ai_meta.get('text_layer_quality', {}).get('chars_per_page', 0)))} симв./стр.\n\n"
         f"Публикуем или изменим данные?"
     )
 
