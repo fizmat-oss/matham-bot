@@ -2394,6 +2394,23 @@ async def run_polling():
     register_middlewares()
     dp.startup.register(on_startup)
     await bot.delete_webhook(drop_pending_updates=True)
+
+    # PaaS-хостинги (Render и т.п.) ждут, что веб-сервис откроет порт.
+    # Поднимаем лёгкий health-check сервер рядом с polling.
+    port = os.environ.get("PORT")
+    if port:
+        async def health(request: web.Request) -> web.Response:
+            return web.json_response({"status": "ok", "bot": BOT_USERNAME})
+
+        app = web.Application()
+        app.router.add_get("/", health)
+        app.router.add_get("/health", health)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host="0.0.0.0", port=int(port))
+        await site.start()
+        logger.info("Health-check server listening on 0.0.0.0:%s", port)
+
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 def run_webhook():
