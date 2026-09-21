@@ -1,4 +1,3 @@
-
 import asyncio
 import copy
 import html
@@ -18,19 +17,15 @@ from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    BotCommand,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InlineQuery,
-    InlineQueryResultArticle,
-    InlineQueryResultCachedDocument,
+    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup,
+    InlineQuery, InlineQueryResultArticle, InlineQueryResultCachedDocument,
     InputTextMessageContent,
 )
 from aiohttp import web
 from motor.motor_asyncio import AsyncIOMotorClient
 
 # ============================================================
-# CONFIG & LOGGING
+# CONFIG
 # ============================================================
 
 logging.basicConfig(
@@ -49,15 +44,10 @@ ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdig
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "matham_bot")
 YEREVAN_TZ = timezone(timedelta(hours=4))
-MSK_TZ = timezone(timedelta(hours=3))  # Moscow
+MSK_TZ = timezone(timedelta(hours=3))
 
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@matham123456").strip() or "@matham123456"
-
 TG_TEXT_LIMIT = 4000
-
-# ============================================================
-# BOT + DATABASE
-# ============================================================
 
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 mongo_db = mongo_client[MONGO_DB_NAME]
@@ -229,6 +219,7 @@ TEXTS = {
         "admin_subs": "📥 Заявки на файлы",
         "admin_pending": "🧩 Решения на проверку",
         "admin_bcast": "📢 Рассылка",
+        "admin_reminder": "⏰ Напоминание",
         "admin_upload_ask": "📤 Отправьте файл (PDF):",
         "admin_upload_title": "✏️ Отправьте название материала:",
         "admin_upload_desc": "📝 Отправьте описание (необязательно) или напишите «пропустить»:",
@@ -305,6 +296,32 @@ TEXTS = {
         "rating_medal_2": "🥈",
         "rating_medal_3": "🥉",
         "reminder": "День {n}/365 (Ежедневное напоминание о ваших целях)🥳",
+        # Reminder admin
+        "rem_title": "⏰ <b>Настройки напоминания</b>\n\n⏱ Время (МСК): <b>{time}</b>\n📢 Канал: <b>{channel}</b>\n🎯 Режим: <b>{target}</b>\n📆 Стартовый день: <b>{start_day}</b>\n🗓 Стартовая дата: <b>{start_date}</b>\n\n🇷🇺 Текст (RU):\n<code>{text_ru}</code>\n\n🇬🇧 Text (EN):\n<code>{text_en}</code>\n\n💡 Сегодня пользователям придёт: <b>{preview}</b>",
+        "rem_edit_time": "⏱ Изменить время",
+        "rem_edit_text_ru": "🇷🇺 Изменить текст (RU)",
+        "rem_edit_text_en": "🇬🇧 Change text (EN)",
+        "rem_edit_start": "📆 Стартовый день и дата",
+        "rem_edit_channel": "📢 Канал",
+        "rem_edit_target": "🎯 Режим отправки",
+        "rem_test": "🚀 Отправить сейчас",
+        "rem_ask_time": "⏱ Отправьте время в формате <code>ЧЧ:ММ</code> (МСК), например <code>19:00</code>:",
+        "rem_ask_text_ru": "🇷🇺 Отправьте новый текст (используйте <code>{n}</code> для номера дня):",
+        "rem_ask_text_en": "🇬🇧 Send new text (use <code>{n}</code> for the day number):",
+        "rem_ask_start": "📆 Отправьте в формате <code>СТАРТОВЫЙ_ДЕНЬ YYYY-MM-DD</code>\nНапример: <code>19 2026-09-21</code>\n\nЕсли дата не нужна (считать с сегодня) — просто <code>19</code>.",
+        "rem_ask_channel": "📢 Отправьте @username канала или -100... ID. Пример: <code>@matham123456</code>",
+        "rem_bad_time": "⚠️ Неверный формат времени. Отправьте <code>ЧЧ:ММ</code>.",
+        "rem_bad_start": "⚠️ Неверный формат. Отправьте <code>19</code> или <code>19 2026-09-21</code>.",
+        "rem_bad_date": "⚠️ Неверная дата. Формат: <code>YYYY-MM-DD</code>.",
+        "rem_saved": "✅ Сохранено.",
+        "rem_target_channel": "📢 только канал",
+        "rem_target_users": "👥 только пользователи",
+        "rem_target_both": "📢+👥 канал и пользователи",
+        "rem_target_pick": "🎯 Куда отправлять напоминание?",
+        "rem_test_ok": "🚀 Тестовое напоминание отправлено.",
+        "rem_test_fail": "⚠️ Ошибка отправки в канал: {err}",
+        "rem_preview_day_unknown": "—",
+        "rem_back": "⬅️ Настройки напоминания",
     },
     "en": {
         "welcome_back": "👋 <b>Welcome back, {nick}!</b>",
@@ -459,6 +476,7 @@ TEXTS = {
         "admin_subs": "📥 File submissions",
         "admin_pending": "🧩 Solutions for review",
         "admin_bcast": "📢 Broadcast",
+        "admin_reminder": "⏰ Reminder",
         "admin_upload_ask": "📤 Send a file (PDF):",
         "admin_upload_title": "✏️ Send a title:",
         "admin_upload_desc": "📝 Send a description (optional) or type «skip»:",
@@ -535,6 +553,31 @@ TEXTS = {
         "rating_medal_2": "🥈",
         "rating_medal_3": "🥉",
         "reminder": "Day {n}/365 (Daily reminder about your goals)🥳",
+        "rem_title": "⏰ <b>Reminder settings</b>\n\n⏱ Time (MSK): <b>{time}</b>\n📢 Channel: <b>{channel}</b>\n🎯 Target: <b>{target}</b>\n📆 Start day: <b>{start_day}</b>\n🗓 Start date: <b>{start_date}</b>\n\n🇷🇺 Text (RU):\n<code>{text_ru}</code>\n\n🇬🇧 Text (EN):\n<code>{text_en}</code>\n\n💡 Today users will see: <b>{preview}</b>",
+        "rem_edit_time": "⏱ Change time",
+        "rem_edit_text_ru": "🇷🇺 Change text (RU)",
+        "rem_edit_text_en": "🇬🇧 Change text (EN)",
+        "rem_edit_start": "📆 Start day and date",
+        "rem_edit_channel": "📢 Channel",
+        "rem_edit_target": "🎯 Delivery target",
+        "rem_test": "🚀 Send now",
+        "rem_ask_time": "⏱ Send time as <code>HH:MM</code> (MSK), e.g. <code>19:00</code>:",
+        "rem_ask_text_ru": "🇷🇺 Send new text (use <code>{n}</code> for day number):",
+        "rem_ask_text_en": "🇬🇧 Send new text (use <code>{n}</code> for day number):",
+        "rem_ask_start": "📆 Send as <code>START_DAY YYYY-MM-DD</code>\nExample: <code>19 2026-09-21</code>\n\nOr just <code>19</code> to start counting from today.",
+        "rem_ask_channel": "📢 Send channel @username or -100... ID. Example: <code>@matham123456</code>",
+        "rem_bad_time": "⚠️ Invalid time format. Send <code>HH:MM</code>.",
+        "rem_bad_start": "⚠️ Invalid format. Send <code>19</code> or <code>19 2026-09-21</code>.",
+        "rem_bad_date": "⚠️ Invalid date. Format: <code>YYYY-MM-DD</code>.",
+        "rem_saved": "✅ Saved.",
+        "rem_target_channel": "📢 channel only",
+        "rem_target_users": "👥 users only",
+        "rem_target_both": "📢+👥 channel and users",
+        "rem_target_pick": "🎯 Where to send the reminder?",
+        "rem_test_ok": "🚀 Test reminder sent.",
+        "rem_test_fail": "⚠️ Failed to send to channel: {err}",
+        "rem_preview_day_unknown": "—",
+        "rem_back": "⬅️ Reminder settings",
     },
 }
 
@@ -617,8 +660,7 @@ async def translate_text(text: str, target_lang: str) -> str:
         translated = working
 
     translated = _restore_math(translated, protected)
-
-    if len(_translation_cache) > 800:
+    if len(_translation_cache) > 1500:
         _translation_cache.clear()
     _translation_cache[key] = translated
     return translated
@@ -633,8 +675,15 @@ async def localize(text: str, user_id: int) -> str:
     return await translate_text(text, lang)
 
 
+async def localize_list(items: list, user_id: int) -> list:
+    out = []
+    for x in items:
+        out.append(await localize(x, user_id))
+    return out
+
+
 # ============================================================
-# DEFAULT DATABASE STATE
+# DEFAULT STATE
 # ============================================================
 
 DEFAULT_TAGS = [
@@ -643,6 +692,17 @@ DEFAULT_TAGS = [
     "#графы", "#инварианты", "#матанализ", "#олимпиаднаяматематика",
     "#начинающим", "#всерос", "#подготовка",
 ]
+
+DEFAULT_REMINDER = {
+    "enabled": True,
+    "time": "19:00",
+    "start_day": 1,
+    "start_date": None,
+    "text_ru": "День {n}/365 (Ежедневное напоминание о ваших целях)🥳",
+    "text_en": "Day {n}/365 (Daily reminder about your goals)🥳",
+    "channel": CHANNEL_ID,
+    "target": "channel",  # channel / users / both
+}
 
 DEFAULT_STATE = {
     "categories": {
@@ -661,8 +721,9 @@ DEFAULT_STATE = {
     "daily_tasks": {},
     "tags": list(DEFAULT_TAGS),
     "users": {},
-    "settings": {},
+    "settings": {"reminder": dict(DEFAULT_REMINDER)},
 }
+
 
 # ============================================================
 # MIDDLEWARE
@@ -689,6 +750,14 @@ def get_yerevan_date() -> str:
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
+
+
+def get_reminder_settings() -> dict:
+    DATABASE.setdefault("settings", {})
+    rem = DATABASE["settings"].setdefault("reminder", dict(DEFAULT_REMINDER))
+    for k, v in DEFAULT_REMINDER.items():
+        rem.setdefault(k, v)
+    return rem
 
 
 def get_file_by_uid(uid: str) -> dict:
@@ -720,7 +789,7 @@ def get_catalog_files_list() -> list:
                 files_dict[uid] = {
                     "uid": uid,
                     "file_id": f.get("file_id"),
-                    "caption": f.get("caption", "Без названия"),
+                    "caption": f.get("caption", "—"),
                     "category": cat_data.get("title", cat_key),
                     "categories": [cat_data.get("title", cat_key)],
                     "summary": f.get("summary", ""),
@@ -755,12 +824,10 @@ def _split_text(text: str, limit: int) -> list:
 
 
 async def safe_send_or_edit(target, text: str, reply_markup=None, photo_id=None, parse_mode=ParseMode.HTML):
-    """Universal send/edit helper that handles unlimited text length."""
     is_message = isinstance(target, types.Message)
     chat_id = target.chat.id if is_message else target.message.chat.id
 
     if photo_id:
-        # Photo caption limit 1024
         if len(text) <= 1024:
             if is_message:
                 return await target.answer_photo(photo=photo_id, caption=text,
@@ -791,7 +858,6 @@ async def safe_send_or_edit(target, text: str, reply_markup=None, photo_id=None,
                     logger.exception("Failed to send long text part")
             return None
 
-    # No photo
     if len(text) <= TG_TEXT_LIMIT:
         if is_message:
             return await target.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
@@ -809,7 +875,6 @@ async def safe_send_or_edit(target, text: str, reply_markup=None, photo_id=None,
     else:
         parts = _split_text(text, TG_TEXT_LIMIT)
         first, rest = parts[0], parts[1:]
-
         if is_message:
             await target.answer(first, parse_mode=parse_mode)
         else:
@@ -825,13 +890,11 @@ async def safe_send_or_edit(target, text: str, reply_markup=None, photo_id=None,
                     await msg.edit_text(first, parse_mode=parse_mode)
                 except Exception:
                     await msg.answer(first, parse_mode=parse_mode)
-
         for part in rest:
             try:
                 await bot.send_message(chat_id, part, parse_mode=parse_mode)
             except Exception:
                 logger.exception("Failed to send long text part")
-
         if reply_markup:
             try:
                 return await bot.send_message(chat_id, "⬇️", reply_markup=reply_markup)
@@ -859,11 +922,8 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
             "favorites": [],
         }
         DATABASE["users"][uid_str] = user_data
-        await db_collection.update_one(
-            {"_id": DB_DOC_ID},
-            {"$set": {f"data.users.{uid_str}": user_data}},
-            upsert=True,
-        )
+        await db_collection.update_one({"_id": DB_DOC_ID},
+                                       {"$set": {f"data.users.{uid_str}": user_data}}, upsert=True)
         return
 
     user = DATABASE["users"][uid_str]
@@ -975,7 +1035,6 @@ def update_file_field(uid: str, field: str, value) -> int:
 
 
 def rename_tag_everywhere(old_tag: str, new_tag: str) -> int:
-    """Rename a tag in the tag DB and in every file. Files stay attached to their categories."""
     tags = DATABASE.setdefault("tags", [])
     if old_tag in tags:
         tags[tags.index(old_tag)] = new_tag
@@ -1001,13 +1060,12 @@ def normalize_tags_input(raw: str) -> list:
 
 
 # ============================================================
-# DATABASE LOAD & MIGRATIONS
+# DATABASE LOAD
 # ============================================================
 
 async def load_db():
     doc = await db_collection.find_one({"_id": DB_DOC_ID})
     if doc is None:
-        logger.info("MongoDB empty - creating DEFAULT_STATE")
         data = copy.deepcopy(DEFAULT_STATE)
         await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {"data": data}}, upsert=True)
         return data
@@ -1026,7 +1084,7 @@ async def load_db():
         for f in cat_data["files"]:
             f.setdefault("file_unique_id", str(uuid.uuid4()))
             f.setdefault("file_id", None)
-            f.setdefault("caption", "Без названия")
+            f.setdefault("caption", "—")
             f.setdefault("summary", "")
             f.setdefault("tags", [])
             f.setdefault("difficulty", "medium")
@@ -1041,6 +1099,12 @@ async def load_db():
 
     if not data.get("tags"):
         data["tags"] = list(DEFAULT_TAGS)
+
+    # settings
+    data.setdefault("settings", {})
+    rem = data["settings"].setdefault("reminder", dict(DEFAULT_REMINDER))
+    for k, v in DEFAULT_REMINDER.items():
+        rem.setdefault(k, v)
 
     for uid, user in data["users"].items():
         user.setdefault("username", "")
@@ -1161,8 +1225,16 @@ class BroadcastAdmin(StatesGroup):
     waiting_for_message = State()
 
 
+class ReminderAdmin(StatesGroup):
+    waiting_time = State()
+    waiting_text_ru = State()
+    waiting_text_en = State()
+    waiting_start = State()
+    waiting_channel = State()
+
+
 # ============================================================
-# KEYBOARDS
+# KEYBOARDS (async, translated)
 # ============================================================
 
 DIFF_KEYS = ("easy", "medium", "hard", "imo")
@@ -1187,12 +1259,14 @@ def get_main_menu_keyboard(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
 
-def get_catalog_keyboard(user_id: int):
+async def get_catalog_keyboard(user_id: int):
+    """Categories with translated titles."""
     builder = []
     for cat_key, cat_data in DATABASE.get("categories", {}).items():
         count = len(cat_data.get("files", []))
+        title = await localize(cat_data.get("title", cat_key), user_id)
         builder.append([InlineKeyboardButton(
-            text=f"{cat_data['title']} ({count})",
+            text=f"{title} ({count})",
             callback_data=f"cat:{cat_key}",
         )])
     builder.append([InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")])
@@ -1264,13 +1338,15 @@ def get_task_keyboard(date_str: str, task_idx: int, user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def get_tag_toggle_keyboard(selected: list, prefix: str, done_cb: str,
-                            user_id: int, skip_text: str = None, skip_cb: str = None):
+async def get_tag_toggle_keyboard(selected: list, prefix: str, done_cb: str,
+                                  user_id: int, skip_text: str = None, skip_cb: str = None):
+    """Tags with translated labels. selected stores ORIGINAL tags."""
     tags = DATABASE.get("tags", [])
     rows, row = [], []
     for i, tag in enumerate(tags):
         mark = "✅ " if tag in selected else ""
-        row.append(InlineKeyboardButton(text=f"{mark}{tag}", callback_data=f"{prefix}:{i}"))
+        label = await localize(tag, user_id)
+        row.append(InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"{prefix}:{i}"))
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -1284,22 +1360,22 @@ def get_tag_toggle_keyboard(selected: list, prefix: str, done_cb: str,
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def get_category_toggle_keyboard(selected: list, user_id: int, publish_cb: str = "upl:publish"):
+async def get_category_toggle_keyboard(selected: list, user_id: int, publish_cb: str = "upl:publish"):
     rows = []
     for cat_key, cat_data in DATABASE.get("categories", {}).items():
         mark = "✅ " if cat_key in selected else "▫️ "
-        rows.append([InlineKeyboardButton(text=f"{mark}{cat_data.get('title', cat_key)}",
-                                          callback_data=f"upl:cat:{cat_key}")])
+        title = await localize(cat_data.get("title", cat_key), user_id)
+        rows.append([InlineKeyboardButton(text=f"{mark}{title}", callback_data=f"upl:cat:{cat_key}")])
     rows.append([InlineKeyboardButton(text=t(user_id, "admin_upload_publish"), callback_data=publish_cb)])
     rows.append([InlineKeyboardButton(text="❌", callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def get_links_keyboard(user_id: int):
+async def get_links_keyboard(user_id: int):
     builder = []
     for sec_key, sec_data in DATABASE.get("links", {}).items():
-        builder.append([InlineKeyboardButton(text=sec_data.get("title", sec_key),
-                                             callback_data=f"links:sec:{sec_key}")])
+        title = await localize(sec_data.get("title", sec_key), user_id)
+        builder.append([InlineKeyboardButton(text=title, callback_data=f"links:sec:{sec_key}")])
     builder.append([InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
@@ -1325,6 +1401,7 @@ def get_admin_menu_keyboard(user_id: int):
         [InlineKeyboardButton(text=t(user_id, "admin_upload"), callback_data="admin:upload")],
         [InlineKeyboardButton(text=t(user_id, "admin_add_task"), callback_data="admin:add_task")],
         [InlineKeyboardButton(text=t(user_id, "admin_tags"), callback_data="admin:tags")],
+        [InlineKeyboardButton(text=t(user_id, "admin_reminder"), callback_data="admin:reminder")],
         [InlineKeyboardButton(text=t(user_id, "admin_stats"), callback_data="admin:stats")],
         [InlineKeyboardButton(text=t(user_id, "admin_subs"), callback_data="admin:submissions")],
         [InlineKeyboardButton(text=t(user_id, "admin_pending"), callback_data="admin:pending_sols")],
@@ -1341,6 +1418,22 @@ def get_language_keyboard(user_id: int):
     ])
 
 
+def get_reminder_settings_keyboard(user_id: int):
+    rem = get_reminder_settings()
+    target = rem.get("target", "channel")
+    rows = [
+        [InlineKeyboardButton(text=t(user_id, "rem_edit_time"), callback_data="rem:edit:time")],
+        [InlineKeyboardButton(text=t(user_id, "rem_edit_text_ru"), callback_data="rem:edit:text_ru")],
+        [InlineKeyboardButton(text=t(user_id, "rem_edit_text_en"), callback_data="rem:edit:text_en")],
+        [InlineKeyboardButton(text=t(user_id, "rem_edit_start"), callback_data="rem:edit:start")],
+        [InlineKeyboardButton(text=t(user_id, "rem_edit_channel"), callback_data="rem:edit:channel")],
+        [InlineKeyboardButton(text=t(user_id, "rem_edit_target"), callback_data="rem:edit:target")],
+        [InlineKeyboardButton(text=t(user_id, "rem_test"), callback_data="rem:test")],
+        [InlineKeyboardButton(text=t(user_id, "back_admin"), callback_data="admin:main")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 # ============================================================
 # RENDER HELPERS
 # ============================================================
@@ -1351,14 +1444,16 @@ async def format_file_info(f: dict, cats: list, user_id: int) -> str:
     title = await localize(title, user_id)
     if summary:
         summary = await localize(summary, user_id)
+    cats_tr = await localize_list(cats, user_id)
     lines = [t(user_id, "file_card_title", title=html.escape(title))]
-    if cats:
-        lines.append(t(user_id, "file_card_section", cats=html.escape(" · ".join(cats))))
+    if cats_tr:
+        lines.append(t(user_id, "file_card_section", cats=html.escape(" · ".join(cats_tr))))
     diff_key = f"admin_diff_{f.get('difficulty') or 'medium'}"
     lines.append(t(user_id, "file_card_diff", diff=t(user_id, diff_key)))
     tags = " ".join(f.get("tags") or [])
     if tags:
-        lines.append(t(user_id, "file_card_tags", tags=html.escape(tags)))
+        tags_tr = await localize(tags, user_id)
+        lines.append(t(user_id, "file_card_tags", tags=html.escape(tags_tr)))
     if summary:
         lines.append(t(user_id, "file_card_summary", summary=html.escape(summary)))
     return "\n".join(lines)
@@ -1414,13 +1509,15 @@ async def render_mustread(target, user_id: int):
 async def show_links_section(target, sec_key: str, user_id: int):
     sec = DATABASE.get("links", {}).get(sec_key, {})
     items = sec.get("items", [])
-    title = html.escape(sec.get("title", sec_key))
+    title_tr = await localize(sec.get("title", sec_key), user_id)
+    title = html.escape(title_tr)
     if items:
         lines = [f"🔗 <b>{title}</b>\n"]
         for i, item in enumerate(items, 1):
             url = html.escape(item.get("url", ""))
-            name = html.escape(item.get("title") or item.get("url", "Link"))
-            lines.append(f"{i}. <a href=\"{url}\">{name}</a>")
+            item_title = item.get("title") or item.get("url", "Link")
+            item_title_tr = await localize(item_title, user_id)
+            lines.append(f"{i}. <a href=\"{url}\">{html.escape(item_title_tr)}</a>")
         text = "\n".join(lines)
     else:
         text = t(user_id, "links_empty_section", title=title)
@@ -1675,11 +1772,8 @@ async def cb_reg_lang(callback: types.CallbackQuery, state: FSMContext):
     uid_str = str(callback.from_user.id)
     DATABASE.setdefault("users", {}).setdefault(uid_str, {})
     DATABASE["users"][uid_str]["language"] = lang
-    await db_collection.update_one(
-        {"_id": DB_DOC_ID},
-        {"$set": {f"data.users.{uid_str}.language": lang}},
-        upsert=True,
-    )
+    await db_collection.update_one({"_id": DB_DOC_ID},
+                                   {"$set": {f"data.users.{uid_str}.language": lang}}, upsert=True)
     await callback.answer(t(callback.from_user.id, "lang_set"))
     await state.set_state(Registration.waiting_for_nickname)
     await safe_send_or_edit(callback, t(callback.from_user.id, "ask_nickname"))
@@ -1697,11 +1791,8 @@ async def process_nickname(message: types.Message, state: FSMContext):
     uid_str = str(message.from_user.id)
     DATABASE.setdefault("users", {}).setdefault(uid_str, {})
     DATABASE["users"][uid_str]["nickname"] = nick
-    await db_collection.update_one(
-        {"_id": DB_DOC_ID},
-        {"$set": {f"data.users.{uid_str}.nickname": nick}},
-        upsert=True,
-    )
+    await db_collection.update_one({"_id": DB_DOC_ID},
+                                   {"$set": {f"data.users.{uid_str}.nickname": nick}}, upsert=True)
     data = await state.get_data()
     target = data.get("after_register")
     await state.clear()
@@ -1712,10 +1803,8 @@ async def process_nickname(message: types.Message, state: FSMContext):
         elif target[0] == "file":
             await show_file_card(message, target[1], message.from_user.id)
         return
-    await message.answer(
-        t(message.from_user.id, "menu_title"),
-        reply_markup=get_main_menu_keyboard(message.from_user.id),
-    )
+    await message.answer(t(message.from_user.id, "menu_title"),
+                         reply_markup=get_main_menu_keyboard(message.from_user.id))
 
 
 @dp.message(StateFilter(Registration.waiting_for_nickname))
@@ -1729,7 +1818,7 @@ async def cmd_catalog(message: types.Message, state: FSMContext):
     await track_user_activity(message.from_user.id, message.from_user.username or "",
                               message.from_user.first_name or "")
     await safe_send_or_edit(message, t(message.from_user.id, "catalog_title"),
-                            reply_markup=get_catalog_keyboard(message.from_user.id))
+                            reply_markup=await get_catalog_keyboard(message.from_user.id))
 
 
 @dp.message(Command("cancel"))
@@ -1767,11 +1856,8 @@ async def cb_lang_set(callback: types.CallbackQuery, state: FSMContext):
     uid_str = str(callback.from_user.id)
     DATABASE.setdefault("users", {}).setdefault(uid_str, {})
     DATABASE["users"][uid_str]["language"] = lang
-    await db_collection.update_one(
-        {"_id": DB_DOC_ID},
-        {"$set": {f"data.users.{uid_str}.language": lang}},
-        upsert=True,
-    )
+    await db_collection.update_one({"_id": DB_DOC_ID},
+                                   {"$set": {f"data.users.{uid_str}.language": lang}}, upsert=True)
     await state.clear()
     await callback.answer(t(callback.from_user.id, "lang_set"))
     await safe_send_or_edit(callback, t(callback.from_user.id, "menu_title"),
@@ -1798,7 +1884,7 @@ async def cb_noop(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "menu:catalog")
 async def cb_catalog(callback: types.CallbackQuery):
     await safe_send_or_edit(callback, t(callback.from_user.id, "catalog_title"),
-                            reply_markup=get_catalog_keyboard(callback.from_user.id))
+                            reply_markup=await get_catalog_keyboard(callback.from_user.id))
     await callback.answer()
 
 
@@ -1822,7 +1908,8 @@ async def cb_category(callback: types.CallbackQuery):
             callback_data=f"file:view:{f.get('file_unique_id')}",
         )])
     builder.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_catalog"), callback_data="menu:catalog")])
-    text = f"<b>{html.escape(cat_data.get('title', cat_key))}</b>\n{len(files)}"
+    cat_title_tr = await localize(cat_data.get('title', cat_key), callback.from_user.id)
+    text = f"<b>{html.escape(cat_title_tr)}</b>\n{len(files)}"
     await safe_send_or_edit(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
@@ -1844,7 +1931,7 @@ async def cb_file_get(callback: types.CallbackQuery):
         await callback.answer(t(callback.from_user.id, "no_file"), show_alert=True)
         return
     try:
-        cap = await localize(f.get("caption") or "Материал", callback.from_user.id)
+        cap = await localize(f.get("caption") or "—", callback.from_user.id)
         await callback.message.answer_document(
             document=f.get("file_id"),
             caption=f"📖 <b>{html.escape(cap)}</b>",
@@ -1875,11 +1962,8 @@ async def cb_fav_toggle(callback: types.CallbackQuery):
     else:
         favs.append(uid)
         msg = t(callback.from_user.id, "fav_added")
-    await db_collection.update_one(
-        {"_id": DB_DOC_ID},
-        {"$set": {f"data.users.{uid_str}.favorites": favs}},
-        upsert=True,
-    )
+    await db_collection.update_one({"_id": DB_DOC_ID},
+                                   {"$set": {f"data.users.{uid_str}.favorites": favs}}, upsert=True)
     if await show_file_card(callback, uid, callback.from_user.id):
         await callback.answer(msg)
     else:
@@ -1894,9 +1978,9 @@ async def cb_fav_toggle(callback: types.CallbackQuery):
 async def cb_search_main(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(TagSearch.selecting)
     await state.update_data(selected_tags=[])
-    markup = get_tag_toggle_keyboard([], "search:tag", "search:go",
-                                     callback.from_user.id,
-                                     t(callback.from_user.id, "search_reset"), "search:reset")
+    markup = await get_tag_toggle_keyboard([], "search:tag", "search:go",
+                                           callback.from_user.id,
+                                           t(callback.from_user.id, "search_reset"), "search:reset")
     await safe_send_or_edit(callback, t(callback.from_user.id, "search_title"), reply_markup=markup)
     await callback.answer()
 
@@ -1907,9 +1991,9 @@ async def cb_search_tag(callback: types.CallbackQuery, state: FSMContext):
     if not res:
         return
     selected, tag, removed = res
-    markup = get_tag_toggle_keyboard(selected, "search:tag", "search:go",
-                                     callback.from_user.id,
-                                     t(callback.from_user.id, "search_reset"), "search:reset")
+    markup = await get_tag_toggle_keyboard(selected, "search:tag", "search:go",
+                                           callback.from_user.id,
+                                           t(callback.from_user.id, "search_reset"), "search:reset")
     await safe_send_or_edit(callback, t(callback.from_user.id, "search_selected_n", n=len(selected)),
                             reply_markup=markup)
     await callback.answer(t(callback.from_user.id, "search_tag_off" if removed else "search_tag_on"))
@@ -1918,9 +2002,9 @@ async def cb_search_tag(callback: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "search:reset")
 async def cb_search_reset(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(selected_tags=[])
-    markup = get_tag_toggle_keyboard([], "search:tag", "search:go",
-                                     callback.from_user.id,
-                                     t(callback.from_user.id, "search_reset"), "search:reset")
+    markup = await get_tag_toggle_keyboard([], "search:tag", "search:go",
+                                           callback.from_user.id,
+                                           t(callback.from_user.id, "search_reset"), "search:reset")
     await safe_send_or_edit(callback, t(callback.from_user.id, "search_reset_done"), reply_markup=markup)
     await callback.answer()
 
@@ -1957,25 +2041,35 @@ async def cb_search_go(callback: types.CallbackQuery, state: FSMContext):
             scored.append((matches, f))
     scored.sort(key=lambda x: -x[0])
     results = [f for _, f in scored]
-    header = t(callback.from_user.id, "search_tagged", tags=html.escape(' '.join(selected)))
+    tags_tr = await localize_list(selected, callback.from_user.id)
+    header = t(callback.from_user.id, "search_tagged", tags=html.escape(' '.join(tags_tr)))
     await show_search_results(callback, results, header, callback.from_user.id)
     await callback.answer()
 
 
 @dp.message(StateFilter(TagSearch.selecting), F.text)
 async def process_search_text(message: types.Message, state: FSMContext):
-    q = message.text.strip().lower().lstrip("#")
+    raw_q = message.text.strip()
+    q = raw_q.lower().lstrip("#")
     if not q:
         await message.answer("?")
         return
+    # If user types in EN, translate the query to RU to match stored data
+    translated_query = None
+    if get_user_lang(message.from_user.id) == "en":
+        try:
+            translated_query = (await translate_text(raw_q.lstrip("#"), "ru")).lower().lstrip("#")
+        except Exception:
+            translated_query = None
+
     files = get_catalog_files_list()
     results = []
     for f in files:
         hay = (f["caption"] + " " + " ".join(f.get("tags", [])) + " " + (f.get("summary") or "")).lower()
-        if q in hay:
+        if q in hay or (translated_query and translated_query in hay):
             results.append(f)
     await state.clear()
-    header = t(message.from_user.id, "search_query", q=html.escape(message.text.strip()))
+    header = t(message.from_user.id, "search_query", q=html.escape(raw_q))
     await show_search_results(message, results, header, message.from_user.id)
 
 
@@ -2050,8 +2144,6 @@ async def cb_tagdel(callback: types.CallbackQuery):
     else:
         await callback.answer(t(callback.from_user.id, "tag_missing"), show_alert=True)
 
-
-# --- Tag rename ---
 
 @dp.callback_query(F.data == "tagrename:start")
 async def cb_tagrename_start(callback: types.CallbackQuery, state: FSMContext):
@@ -2143,7 +2235,7 @@ async def cb_favorites(callback: types.CallbackQuery, state: FSMContext):
     for fuid in favs:
         f = get_file_by_uid(fuid)
         if f:
-            cap = await localize(f.get('caption') or "Материал", callback.from_user.id)
+            cap = await localize(f.get('caption') or "—", callback.from_user.id)
             builder.append([InlineKeyboardButton(text=f"❤️ {cap[:55]}",
                                                  callback_data=f"file:view:{fuid}")])
     text = t(callback.from_user.id, "favorites_title")
@@ -2336,8 +2428,6 @@ async def cb_task_show_sol(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# --- User solution submission ---
-
 @dp.callback_query(F.data.startswith("task:solve:"))
 async def cb_task_solve(callback: types.CallbackQuery, state: FSMContext):
     parts = callback.data.split(":")
@@ -2407,7 +2497,6 @@ async def process_user_solution(message: types.Message, state: FSMContext):
                                         caption=(context + body)[:1024], parse_mode=ParseMode.HTML,
                                         reply_markup=review_markup)
             else:
-                # Send long text in chunks
                 parts = _split_text(context + body, TG_TEXT_LIMIT)
                 for i, part in enumerate(parts):
                     mk = review_markup if i == len(parts) - 1 else None
@@ -2416,8 +2505,6 @@ async def process_user_solution(message: types.Message, state: FSMContext):
             logger.exception("Failed to notify admin %s", admin_id)
     await show_task(message, date_str, idx, message.from_user.id)
 
-
-# --- Participant solutions list ---
 
 @dp.callback_query(F.data.startswith("task:sols:"))
 async def cb_task_sols(callback: types.CallbackQuery):
@@ -2442,6 +2529,8 @@ async def cb_task_sols(callback: types.CallbackQuery):
             grade = s.get("grade")
             g = t(callback.from_user.id, "task_sol_grade_full", grade=grade) if grade else t(callback.from_user.id, "task_sol_ok_mark")
             snippet = (s.get("text") or "").strip()
+            if snippet:
+                snippet = await localize(snippet[:200], callback.from_user.id)
             if s.get("photo_file_id"):
                 snippet = (snippet + " [📷]").strip()
             if s.get("document_file_id"):
@@ -2481,9 +2570,8 @@ async def cb_solfull(callback: types.CallbackQuery):
     try:
         if sol.get("photo_file_id"):
             caption = header + (f"\n\n{html.escape(text)}" if text else "")
-            # Send photo with short caption then full text chunks
             await callback.message.answer_photo(photo=sol["photo_file_id"],
-                                                caption=caption[:1024] if len(caption) > 1024 else caption,
+                                                caption=caption[:1024],
                                                 parse_mode=ParseMode.HTML)
             if len(caption) > 1024:
                 for part in _split_text(caption[1000:], TG_TEXT_LIMIT):
@@ -2505,8 +2593,6 @@ async def cb_solfull(callback: types.CallbackQuery):
         logger.exception("Failed to show solution")
         await callback.answer(t(callback.from_user.id, "task_sol_show_fail"), show_alert=True)
 
-
-# --- Solution review (admin) ---
 
 @dp.callback_query(F.data.startswith("solrev:"))
 async def cb_solrev(callback: types.CallbackQuery):
@@ -2534,7 +2620,6 @@ async def cb_solrev(callback: types.CallbackQuery):
         sol["grade"] = None
         sol["reviewed_at"] = datetime.now(YEREVAN_TZ).isoformat()
         await save_db(DATABASE)
-        user_lang = get_user_lang(int(uid_str))
         try:
             await bot.send_message(int(uid_str), t(int(uid_str), "task_rejected_notify",
                                                     date=date_str, num=idx + 1))
@@ -2624,7 +2709,7 @@ async def cb_grade(callback: types.CallbackQuery):
 async def cb_links_main(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await safe_send_or_edit(callback, t(callback.from_user.id, "links_title"),
-                            reply_markup=get_links_keyboard(callback.from_user.id))
+                            reply_markup=await get_links_keyboard(callback.from_user.id))
     await callback.answer()
 
 
@@ -2725,10 +2810,10 @@ async def process_submit_title(message: types.Message, state: FSMContext):
     await state.update_data(sub_title=message.text.strip()[:200])
     await state.set_state(UserSubmit.choosing_tags)
     await message.answer(t(message.from_user.id, "submit_ask_tags"),
-                         reply_markup=get_tag_toggle_keyboard([], "sub:tag", "sub:tags_done",
-                                                              message.from_user.id,
-                                                              t(message.from_user.id, "submit_skip_tags"),
-                                                              "sub:tags_skip"))
+                         reply_markup=await get_tag_toggle_keyboard([], "sub:tag", "sub:tags_done",
+                                                                    message.from_user.id,
+                                                                    t(message.from_user.id, "submit_skip_tags"),
+                                                                    "sub:tags_skip"))
 
 
 @dp.callback_query(StateFilter(UserSubmit.choosing_tags), F.data.startswith("sub:tag:"))
@@ -2738,10 +2823,10 @@ async def cb_sub_tag(callback: types.CallbackQuery, state: FSMContext):
         return
     selected, tag, removed = res
     await safe_send_or_edit(callback, t(callback.from_user.id, "choose_tags_n", n=len(selected)),
-                            reply_markup=get_tag_toggle_keyboard(selected, "sub:tag", "sub:tags_done",
-                                                                 callback.from_user.id,
-                                                                 t(callback.from_user.id, "submit_skip_tags"),
-                                                                 "sub:tags_skip"))
+                            reply_markup=await get_tag_toggle_keyboard(selected, "sub:tag", "sub:tags_done",
+                                                                       callback.from_user.id,
+                                                                       t(callback.from_user.id, "submit_skip_tags"),
+                                                                       "sub:tags_skip"))
     await callback.answer(t(callback.from_user.id, "search_tag_off" if removed else "search_tag_on"))
 
 
@@ -2831,7 +2916,7 @@ async def cb_submit_cancel(callback: types.CallbackQuery, state: FSMContext):
 
 
 # ============================================================
-# ADMIN: PANEL, MANUAL UPLOAD
+# ADMIN: PANEL
 # ============================================================
 
 @dp.callback_query(F.data == "admin:main")
@@ -2844,6 +2929,222 @@ async def cb_admin_main(callback: types.CallbackQuery, state: FSMContext):
                             reply_markup=get_admin_menu_keyboard(callback.from_user.id))
     await callback.answer()
 
+
+# ============================================================
+# ADMIN: REMINDER SETTINGS
+# ============================================================
+
+def _calc_reminder_day() -> int:
+    rem = get_reminder_settings()
+    start_day = int(rem.get("start_day") or 1)
+    sd = rem.get("start_date")
+    if sd:
+        try:
+            start_date = datetime.strptime(sd, "%Y-%m-%d").date()
+            today = datetime.now(MSK_TZ).date()
+            delta = (today - start_date).days
+            return start_day + max(0, delta)
+        except Exception:
+            pass
+    return start_day
+
+
+async def render_reminder_settings(target, user_id: int):
+    rem = get_reminder_settings()
+    day_now = _calc_reminder_day()
+    text_ru = rem.get("text_ru") or TEXTS["ru"]["reminder"]
+    text_en = rem.get("text_en") or TEXTS["en"]["reminder"]
+    try:
+        preview = text_ru.format(n=day_now)
+    except Exception:
+        preview = text_ru
+    target_label = {
+        "channel": t(user_id, "rem_target_channel"),
+        "users": t(user_id, "rem_target_users"),
+        "both": t(user_id, "rem_target_both"),
+    }.get(rem.get("target", "channel"), rem.get("target", "channel"))
+    text = t(user_id, "rem_title",
+             time=rem.get("time", "19:00"),
+             channel=rem.get("channel", CHANNEL_ID),
+             target=target_label,
+             start_day=rem.get("start_day", 1),
+             start_date=rem.get("start_date") or "—",
+             text_ru=html.escape(text_ru),
+             text_en=html.escape(text_en),
+             preview=html.escape(preview))
+    await safe_send_or_edit(target, text, reply_markup=get_reminder_settings_keyboard(user_id))
+
+
+@dp.callback_query(F.data == "admin:reminder")
+async def cb_admin_reminder(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
+        return
+    await state.clear()
+    await render_reminder_settings(callback, callback.from_user.id)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "rem:back")
+async def cb_rem_back(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
+        return
+    await state.clear()
+    await render_reminder_settings(callback, callback.from_user.id)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("rem:edit:"))
+async def cb_rem_edit(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
+        return
+    field = callback.data.split(":")[2]
+    if field == "time":
+        await state.set_state(ReminderAdmin.waiting_time)
+        await callback.message.answer(t(callback.from_user.id, "rem_ask_time"))
+    elif field == "text_ru":
+        await state.set_state(ReminderAdmin.waiting_text_ru)
+        await callback.message.answer(t(callback.from_user.id, "rem_ask_text_ru"))
+    elif field == "text_en":
+        await state.set_state(ReminderAdmin.waiting_text_en)
+        await callback.message.answer(t(callback.from_user.id, "rem_ask_text_en"))
+    elif field == "start":
+        await state.set_state(ReminderAdmin.waiting_start)
+        await callback.message.answer(t(callback.from_user.id, "rem_ask_start"))
+    elif field == "channel":
+        await state.set_state(ReminderAdmin.waiting_channel)
+        await callback.message.answer(t(callback.from_user.id, "rem_ask_channel"))
+    elif field == "target":
+        rows = [
+            [InlineKeyboardButton(text=t(callback.from_user.id, "rem_target_channel"),
+                                  callback_data="rem:settarget:channel")],
+            [InlineKeyboardButton(text=t(callback.from_user.id, "rem_target_users"),
+                                  callback_data="rem:settarget:users")],
+            [InlineKeyboardButton(text=t(callback.from_user.id, "rem_target_both"),
+                                  callback_data="rem:settarget:both")],
+            [InlineKeyboardButton(text=t(callback.from_user.id, "rem_back"),
+                                  callback_data="rem:back")],
+        ]
+        await safe_send_or_edit(callback, t(callback.from_user.id, "rem_target_pick"),
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("rem:settarget:"))
+async def cb_rem_settarget(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
+        return
+    target = callback.data.split(":")[2]
+    if target not in ("channel", "users", "both"):
+        await callback.answer("Error", show_alert=True)
+        return
+    rem = get_reminder_settings()
+    rem["target"] = target
+    await save_db(DATABASE)
+    await callback.answer(t(callback.from_user.id, "rem_saved"))
+    await render_reminder_settings(callback, callback.from_user.id)
+
+
+@dp.message(StateFilter(ReminderAdmin.waiting_time), F.text)
+async def process_rem_time(message: types.Message, state: FSMContext):
+    raw = message.text.strip()
+    if not re.match(r"^\d{1,2}:\d{2}$", raw):
+        await message.answer(t(message.from_user.id, "rem_bad_time"))
+        return
+    hh, mm = map(int, raw.split(":"))
+    if not (0 <= hh < 24 and 0 <= mm < 60):
+        await message.answer(t(message.from_user.id, "rem_bad_time"))
+        return
+    rem = get_reminder_settings()
+    rem["time"] = f"{hh:02d}:{mm:02d}"
+    await save_db(DATABASE)
+    await state.clear()
+    await message.answer(t(message.from_user.id, "rem_saved"))
+    await render_reminder_settings(message, message.from_user.id)
+    await restart_reminder_scheduler()
+
+
+@dp.message(StateFilter(ReminderAdmin.waiting_text_ru), F.text)
+async def process_rem_text_ru(message: types.Message, state: FSMContext):
+    rem = get_reminder_settings()
+    rem["text_ru"] = message.text.strip()
+    await save_db(DATABASE)
+    await state.clear()
+    await message.answer(t(message.from_user.id, "rem_saved"))
+    await render_reminder_settings(message, message.from_user.id)
+
+
+@dp.message(StateFilter(ReminderAdmin.waiting_text_en), F.text)
+async def process_rem_text_en(message: types.Message, state: FSMContext):
+    rem = get_reminder_settings()
+    rem["text_en"] = message.text.strip()
+    await save_db(DATABASE)
+    await state.clear()
+    await message.answer(t(message.from_user.id, "rem_saved"))
+    await render_reminder_settings(message, message.from_user.id)
+
+
+@dp.message(StateFilter(ReminderAdmin.waiting_start), F.text)
+async def process_rem_start(message: types.Message, state: FSMContext):
+    raw = message.text.strip()
+    parts = raw.split()
+    if not parts or not parts[0].isdigit():
+        await message.answer(t(message.from_user.id, "rem_bad_start"))
+        return
+    start_day = int(parts[0])
+    if start_day < 1 or start_day > 100000:
+        await message.answer(t(message.from_user.id, "rem_bad_start"))
+        return
+    start_date = None
+    if len(parts) >= 2:
+        try:
+            datetime.strptime(parts[1], "%Y-%m-%d")
+            start_date = parts[1]
+        except ValueError:
+            await message.answer(t(message.from_user.id, "rem_bad_date"))
+            return
+    rem = get_reminder_settings()
+    rem["start_day"] = start_day
+    rem["start_date"] = start_date
+    await save_db(DATABASE)
+    await state.clear()
+    await message.answer(t(message.from_user.id, "rem_saved"))
+    await render_reminder_settings(message, message.from_user.id)
+
+
+@dp.message(StateFilter(ReminderAdmin.waiting_channel), F.text)
+async def process_rem_channel(message: types.Message, state: FSMContext):
+    raw = message.text.strip()
+    if not (raw.startswith("@") or raw.lstrip("-").isdigit()):
+        await message.answer(t(message.from_user.id, "rem_ask_channel"))
+        return
+    rem = get_reminder_settings()
+    rem["channel"] = raw
+    await save_db(DATABASE)
+    await state.clear()
+    await message.answer(t(message.from_user.id, "rem_saved"))
+    await render_reminder_settings(message, message.from_user.id)
+    await restart_reminder_scheduler()
+
+
+@dp.callback_query(F.data == "rem:test")
+async def cb_rem_test(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
+        return
+    try:
+        await send_reminder_now()
+        await callback.answer(t(callback.from_user.id, "rem_test_ok"), show_alert=False)
+    except Exception as e:
+        await callback.answer(t(callback.from_user.id, "rem_test_fail", err=str(e)), show_alert=True)
+
+
+# ============================================================
+# ADMIN: MANUAL UPLOAD
+# ============================================================
 
 @dp.callback_query(F.data == "admin:upload")
 async def cb_admin_upload(callback: types.CallbackQuery, state: FSMContext):
@@ -2887,9 +3188,9 @@ async def process_upl_description(message: types.Message, state: FSMContext):
     await state.update_data(description=raw)
     await state.set_state(AdminUpload.choosing_tags)
     await message.answer(t(message.from_user.id, "admin_upload_tags"),
-                         reply_markup=get_tag_toggle_keyboard([], "upl:tag", "upl:tags_done",
-                                                              message.from_user.id,
-                                                              "⏭", "upl:tags_skip"))
+                         reply_markup=await get_tag_toggle_keyboard([], "upl:tag", "upl:tags_done",
+                                                                    message.from_user.id,
+                                                                    "⏭", "upl:tags_skip"))
 
 
 @dp.callback_query(StateFilter(AdminUpload.choosing_tags), F.data.startswith("upl:tag:"))
@@ -2899,9 +3200,9 @@ async def cb_upl_tag(callback: types.CallbackQuery, state: FSMContext):
         return
     selected, tag, removed = res
     await safe_send_or_edit(callback, t(callback.from_user.id, "choose_tags_n", n=len(selected)),
-                            reply_markup=get_tag_toggle_keyboard(selected, "upl:tag", "upl:tags_done",
-                                                                 callback.from_user.id,
-                                                                 "⏭", "upl:tags_skip"))
+                            reply_markup=await get_tag_toggle_keyboard(selected, "upl:tag", "upl:tags_done",
+                                                                       callback.from_user.id,
+                                                                       "⏭", "upl:tags_skip"))
     await callback.answer(t(callback.from_user.id, "search_tag_off" if removed else "search_tag_on"))
 
 
@@ -2938,8 +3239,8 @@ async def cb_upl_diff(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminUpload.choosing_categories)
     data = await state.get_data()
     await safe_send_or_edit(callback, t(callback.from_user.id, "admin_upload_cats"),
-                            reply_markup=get_category_toggle_keyboard(data.get("upl_cats", []),
-                                                                      callback.from_user.id))
+                            reply_markup=await get_category_toggle_keyboard(data.get("upl_cats", []),
+                                                                            callback.from_user.id))
     await callback.answer()
 
 
@@ -2959,7 +3260,7 @@ async def cb_upl_cat(callback: types.CallbackQuery, state: FSMContext):
         selected = True
     await state.update_data(upl_cats=cats)
     await safe_send_or_edit(callback, t(callback.from_user.id, "admin_upload_cats"),
-                            reply_markup=get_category_toggle_keyboard(cats, callback.from_user.id))
+                            reply_markup=await get_category_toggle_keyboard(cats, callback.from_user.id))
     await callback.answer("✅" if selected else "▫️")
 
 
@@ -3106,7 +3407,7 @@ async def process_task_date(message: types.Message, state: FSMContext):
 
 
 # ============================================================
-# ADMIN: STATS / SUBMISSIONS / PENDING SOLUTIONS / BROADCAST
+# ADMIN: STATS / SUBMISSIONS / PENDING / BROADCAST
 # ============================================================
 
 @dp.callback_query(F.data == "admin:stats")
@@ -3190,9 +3491,10 @@ async def cb_sub_accept(callback: types.CallbackQuery):
         return
     await save_submission(sub_id, {"status": "accepted",
                                    "processed_at": datetime.now(YEREVAN_TZ).isoformat()})
-    rows = [[InlineKeyboardButton(text=cat_data.get("title", cat_key),
-                                  callback_data=f"subcat:{sub_id}:{cat_key}")]
-            for cat_key, cat_data in DATABASE.get("categories", {}).items()]
+    rows = []
+    for cat_key, cat_data in DATABASE.get("categories", {}).items():
+        tr_title = await localize(cat_data.get("title", cat_key), callback.from_user.id)
+        rows.append([InlineKeyboardButton(text=tr_title, callback_data=f"subcat:{sub_id}:{cat_key}")])
     rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_admin"), callback_data="admin:main")])
     await callback.message.answer(t(callback.from_user.id, "admin_subs_pick_cat"),
                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -3537,42 +3839,83 @@ async def inline_catalog_search(query: InlineQuery):
 
 
 # ============================================================
-# DAILY REMINDER (19:00 MSK)
+# DAILY REMINDER
 # ============================================================
 
-async def send_daily_reminder():
-    """Send reminder to all users at 19:00 MSK. Day number = day of year."""
-    now_msk = datetime.now(MSK_TZ)
-    day_number = now_msk.timetuple().tm_yday  # 1..365/366
-
-    # Build messages per language
-    reminder_ru = TEXTS["ru"]["reminder"].format(n=day_number)
-    reminder_en = TEXTS["en"]["reminder"].format(n=day_number)
-
-    for uid_str, u in list(DATABASE.get("users", {}).items()):
-        lang = u.get("language", "ru")
-        text = reminder_en if lang == "en" else reminder_ru
+def _calc_reminder_day_for_date(target_date) -> int:
+    rem = get_reminder_settings()
+    start_day = int(rem.get("start_day") or 1)
+    sd = rem.get("start_date")
+    if sd:
         try:
-            await bot.send_message(int(uid_str), text)
+            start_date = datetime.strptime(sd, "%Y-%m-%d").date()
+            delta = (target_date - start_date).days
+            return start_day + max(0, delta)
         except Exception:
-            logger.debug("Reminder send failed for %s", uid_str)
-        await asyncio.sleep(0.05)
-    logger.info("Daily reminder sent (day %s) to %s users", day_number, len(DATABASE.get("users", {})))
+            pass
+    return start_day
+
+
+async def send_reminder_now():
+    """Send the reminder immediately (used by scheduler and test button)."""
+    rem = get_reminder_settings()
+    today = datetime.now(MSK_TZ).date()
+    day_number = _calc_reminder_day_for_date(today)
+
+    text_ru = rem.get("text_ru") or TEXTS["ru"]["reminder"]
+    text_en = rem.get("text_en") or TEXTS["en"]["reminder"]
+    try:
+        msg_ru = text_ru.format(n=day_number)
+    except Exception:
+        msg_ru = text_ru
+    try:
+        msg_en = text_en.format(n=day_number)
+    except Exception:
+        msg_en = text_en
+
+    channel = rem.get("channel") or CHANNEL_ID
+    target = rem.get("target", "channel")
+
+    if target in ("channel", "both"):
+        try:
+            await bot.send_message(channel, msg_ru)
+        except Exception as e:
+            logger.exception("Failed to send reminder to channel %s", channel)
+            raise
+
+    if target in ("users", "both"):
+        for uid_str, u in list(DATABASE.get("users", {}).items()):
+            lang = u.get("language", "ru")
+            text = msg_en if lang == "en" else msg_ru
+            try:
+                await bot.send_message(int(uid_str), text)
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)
+
+    logger.info("Reminder sent (day %s, target=%s, channel=%s)", day_number, target, channel)
 
 
 async def reminder_scheduler():
-    """Wait until 19:00 MSK then send reminders. Loop forever."""
     while True:
         try:
+            rem = get_reminder_settings()
+            time_str = rem.get("time", "19:00")
+            try:
+                hh, mm = map(int, time_str.split(":"))
+            except Exception:
+                hh, mm = 19, 0
             now = datetime.now(MSK_TZ)
-            target = now.replace(hour=19, minute=0, second=0, microsecond=0)
+            target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
             if target <= now:
                 target += timedelta(days=1)
             wait_seconds = (target - now).total_seconds()
-            logger.info("Next daily reminder in %.0f seconds (at %s MSK)", wait_seconds, target)
+            logger.info("Next reminder in %.0f sec (at %s MSK)", wait_seconds, target)
             await asyncio.sleep(wait_seconds)
-            await send_daily_reminder()
-            # extra delay to avoid double-fire
+            try:
+                await send_reminder_now()
+            except Exception:
+                logger.exception("Reminder send failed")
             await asyncio.sleep(60)
         except asyncio.CancelledError:
             raise
@@ -3581,8 +3924,20 @@ async def reminder_scheduler():
             await asyncio.sleep(60)
 
 
+async def restart_reminder_scheduler():
+    global REMINDER_TASK
+    if REMINDER_TASK and not REMINDER_TASK.done():
+        REMINDER_TASK.cancel()
+        try:
+            await REMINDER_TASK
+        except Exception:
+            pass
+    REMINDER_TASK = asyncio.create_task(reminder_scheduler())
+    logger.info("Reminder scheduler restarted")
+
+
 # ============================================================
-# FALLBACK HANDLERS
+# FALLBACK
 # ============================================================
 
 @dp.message(F.text)
@@ -3617,12 +3972,9 @@ async def on_startup(bot: Bot):
         BotCommand(command="cancel", description="❌ Cancel / Отмена"),
     ]
     await bot.set_my_commands(commands)
-
-    # Start reminder scheduler
     REMINDER_TASK = asyncio.create_task(reminder_scheduler())
-
     total_files = sum(len(c.get("files", [])) for c in DATABASE.get("categories", {}).values())
-    logger.info("Startup complete: %s users, %s files, %s tags, channel=%s",
+    logger.info("Startup: %s users, %s files, %s tags, channel=%s",
                 len(DATABASE.get("users", {})), total_files,
                 len(DATABASE.get("tags", [])), CHANNEL_ID)
 
@@ -3637,12 +3989,10 @@ async def run_polling():
     register_middlewares()
     dp.startup.register(on_startup)
     await bot.delete_webhook(drop_pending_updates=True)
-
     port = os.environ.get("PORT")
     if port:
         async def health(request: web.Request) -> web.Response:
             return web.json_response({"status": "ok", "bot": BOT_USERNAME})
-
         app = web.Application()
         app.router.add_get("/", health)
         app.router.add_get("/health", health)
@@ -3650,8 +4000,7 @@ async def run_polling():
         await runner.setup()
         site = web.TCPSite(runner, host="0.0.0.0", port=int(port))
         await site.start()
-        logger.info("Health-check server listening on 0.0.0.0:%s", port)
-
+        logger.info("Health-check server on 0.0.0.0:%s", port)
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
