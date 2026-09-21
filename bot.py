@@ -3086,32 +3086,51 @@ async def process_rem_text_en(message: types.Message, state: FSMContext):
     await message.answer(t(message.from_user.id, "rem_saved"))
     await render_reminder_settings(message, message.from_user.id)
 
-
 @dp.message(StateFilter(ReminderAdmin.waiting_start), F.text)
 async def process_rem_start(message: types.Message, state: FSMContext):
-    raw = message.text.strip()
-    parts = raw.split()
-    if not parts or not parts[0].isdigit():
+    raw = (message.text or "").strip()
+    logger.info("Reminder start input: %r", raw)
+
+    # 1) Находим первое число — стартовый день
+    day_match = re.search(r"\d{1,6}", raw)
+    if not day_match:
         await message.answer(t(message.from_user.id, "rem_bad_start"))
         return
-    start_day = int(parts[0])
-    if start_day < 1 or start_day > 100000:
+    start_day = int(day_match.group(0))
+    if not (1 <= start_day <= 100000):
         await message.answer(t(message.from_user.id, "rem_bad_start"))
         return
-    start_date = None
-    if len(parts) >= 2:
+
+    # 2) Ищем дату в любом из популярных форматов: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD
+    date_match = re.search(r"(\d{4})\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})", raw)
+    if date_match:
+        y, mo, d = date_match.groups()
         try:
-            datetime.strptime(parts[1], "%Y-%m-%d")
-            start_date = parts[1]
+            dt = datetime(int(y), int(mo), int(d))
+            start_date = dt.strftime("%Y-%m-%d")
         except ValueError:
             await message.answer(t(message.from_user.id, "rem_bad_date"))
             return
+    else:
+        # 3) Дату не указал — берём сегодняшнюю (МСК) как точку отсчёта
+        start_date = datetime.now(MSK_TZ).strftime("%Y-%m-%d")
+
     rem = get_reminder_settings()
     rem["start_day"] = start_day
     rem["start_date"] = start_date
     await save_db(DATABASE)
     await state.clear()
-    await message.answer(t(message.from_user.id, "rem_saved"))
+
+    lang = get_user_lang(message.from_user.id)
+    extra = (
+        f"\n📆 Стартовый день: <b>{start_day}</b>, отсчёт с: <b>{start_date}</b>\n"
+        f"💡 Сегодня в канал уйдёт: <b>День {start_day}/365…</b>, завтра — <b>{start_day + 1}/365…</b>"
+        if lang == "ru"
+        else
+        f"\n📆 Start day: <b>{start_day}</b>, counted from: <b>{start_date}</b>\n"
+        f"💡 Today users will see: <b>Day {start_day}/365…</b>, tomorrow — <b>{start_day + 1}/365…</b>"
+    )
+    await message.answer(t(message.from_user.id, "rem_saved") + extra)
     await render_reminder_settings(message, message.from_user.id)
 
 
