@@ -962,8 +962,11 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
             "personal_reminder": {"enabled": False, "time": "19:00"},
         }
         DATABASE["users"][uid_str] = user_data
-        await db_collection.update_one({"_id": DB_DOC_ID},
-                                       {"$set": {f"data.users.{uid_str}": user_data}}, upsert=True)
+        await db_collection.update_one(
+            {"_id": DB_DOC_ID},
+            {"$set": {f"data.users.{uid_str}": user_data}},
+            upsert=True,
+        )
         return
 
     user = DATABASE["users"][uid_str]
@@ -973,7 +976,8 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
         updates[f"data.users.{uid_str}.username"] = username
     if first_name and user.get("first_name") != first_name:
         user["first_name"] = first_name
-        updates[f"[,data.users.{uid_str}.first_name"] =;\ first_name
+        updates[f"data.users.{uid_str}.first_name"] = first_name
+
     user.setdefault("favorites", [])
     user.setdefault("nickname", "")
     user.setdefault("language", "ru")
@@ -992,8 +996,7 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
 
     if updates:
         await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": updates})
-
-
+        
 async def award_points(user_id: int, points: int):
     uid_str = str(user_id)
     if uid_str not in DATABASE.get("users", {}):
