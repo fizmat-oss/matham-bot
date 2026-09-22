@@ -2944,7 +2944,7 @@ async def process_tedit_sol(message: types.Message, state: FSMContext):
 async def cb_tedit_diff(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("Недоступно", show_alert=True); return
-    _, _, date_str, idx =).strip()
+    raw = message.text.strip()
  callback.data   .split(":", 3)
     rows = [[InlineKeyboard photoButton(text=t(callback.from_user.id, f"admin_diff_{lvl}"),
                                   callback_data=f"tedit:setdiff:{date_str}:{idx}:{lvl}")]
