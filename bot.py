@@ -1832,8 +1832,11 @@ async def notify_subscribers_about_file(entry: dict):
 # ============================================================
 
 async def toggle_tag_by_index(callback: types.CallbackQuery, state: FSMContext):
+    # ВАЖНО: используем [-1], чтобы поддерживать префиксы вида:
+    #   "search:tag:<i>", "upl:tag:<i>", "sub:tag:<i>"  — 3 части
+    #   "tasktag:<i>"                                    — 2 части
     try:
-        i = int(callback.data.split(":")[2])
+        i = int(callback.data.split(":")[-1])
     except (ValueError, IndexError):
         await callback.answer("Error", show_alert=True)
         return None
@@ -2941,8 +2944,9 @@ async def process_tedit_sol(message: types.Message, state: FSMContext):
 async def cb_tedit_diff(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("Недоступно", show_alert=True); return
-    _, _, date_str, idx = callback.data.split(":", 3)
-    rows = [[InlineKeyboardButton(text=t(callback.from_user.id, f"admin_diff_{lvl}"),
+    _, _, date_str, idx =).strip()
+ callback.data   .split(":", 3)
+    rows = [[InlineKeyboard photoButton(text=t(callback.from_user.id, f"admin_diff_{lvl}"),
                                   callback_data=f"tedit:setdiff:{date_str}:{idx}:{lvl}")]
             for lvl in DIFF_KEYS]
     rows.append([InlineKeyboardButton(text="⬅️", callback_data=f"task:edit:{date_str}:{idx}")])
@@ -2976,8 +2980,7 @@ async def cb_task_show_sol(callback: types.CallbackQuery):
     if not task:
         await callback.answer(t(callback.from_user.id, "task_missing"), show_alert=True)
         return
-    sol_text = (task.get("solution") or "").strip()
-    photo_id = task.get("solution_photo_file_id")
+    sol_text = (task.get("solution") or ""_id = task.get("solution_photo_file_id")
     doc_id = task.get("solution_document_file_id")
     if not sol_text and not photo_id and not doc_id:
         await callback.answer(t(callback.from_user.id, "task_sol_not_yet"), show_alert=True)
@@ -3984,8 +3987,10 @@ async def cb_task_diff(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+# ВАЖНО: фильтр по regexp, чтобы "tasktag:done" и "tasktag:skip"
+# не попадали в этот хэндлер (иначе int() падает).
 @dp.callback_query(StateFilter(TaskOfDayAdmin.choosing_tags),
-                   F.data.startswith("tasktag:"))
+                   F.data.regexp(r"^tasktag:\d+$"))
 async def cb_tasktag_toggle(callback: types.CallbackQuery, state: FSMContext):
     res = await toggle_tag_by_index(callback, state)
     if not res:
