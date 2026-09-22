@@ -608,11 +608,9 @@ def t(user_id: int, key: str, **kwargs) -> str:
         return text.format(**kwargs)
     except Exception:
         return text
-     
-        
-           
-      
-#============================================================
+
+
+# ============================================================
 # TRANSLATION
 # ============================================================
 
@@ -1001,7 +999,8 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
 
     if updates:
         await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": updates})
-        
+
+
 async def award_points(user_id: int, points: int):
     uid_str = str(user_id)
     if uid_str not in DATABASE.get("users", {}):
@@ -1832,9 +1831,6 @@ async def notify_subscribers_about_file(entry: dict):
 # ============================================================
 
 async def toggle_tag_by_index(callback: types.CallbackQuery, state: FSMContext):
-    # ВАЖНО: используем [-1], чтобы поддерживать префиксы вида:
-    #   "search:tag:<i>", "upl:tag:<i>", "sub:tag:<i>"  — 3 части
-    #   "tasktag:<i>"                                    — 2 части
     try:
         i = int(callback.data.split(":")[-1])
     except (ValueError, IndexError):
@@ -1855,7 +1851,9 @@ async def toggle_tag_by_index(callback: types.CallbackQuery, state: FSMContext):
         removed = False
     await state.update_data(selected_tags=selected)
     return selected, tag, removed
-      # ============================================================
+
+
+# ============================================================
 # COMMANDS
 # ============================================================
 
@@ -2944,8 +2942,8 @@ async def process_tedit_sol(message: types.Message, state: FSMContext):
 async def cb_tedit_diff(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("Недоступно", show_alert=True); return
-    raw = message.text.strip()
-    rows = [[InlineKeyboard photoButton(text=t(callback.from_user.id, f"admin_diff_{lvl}"),
+    _, _, date_str, idx = callback.data.split(":", 3)
+    rows = [[InlineKeyboardButton(text=t(callback.from_user.id, f"admin_diff_{lvl}"),
                                   callback_data=f"tedit:setdiff:{date_str}:{idx}:{lvl}")]
             for lvl in DIFF_KEYS]
     rows.append([InlineKeyboardButton(text="⬅️", callback_data=f"task:edit:{date_str}:{idx}")])
@@ -2979,7 +2977,8 @@ async def cb_task_show_sol(callback: types.CallbackQuery):
     if not task:
         await callback.answer(t(callback.from_user.id, "task_missing"), show_alert=True)
         return
-    sol_text = (task.get("solution") or ""_id = task.get("solution_photo_file_id")
+    sol_text = (task.get("solution") or "").strip()
+    photo_id = task.get("solution_photo_file_id")
     doc_id = task.get("solution_document_file_id")
     if not sol_text and not photo_id and not doc_id:
         await callback.answer(t(callback.from_user.id, "task_sol_not_yet"), show_alert=True)
@@ -3986,8 +3985,6 @@ async def cb_task_diff(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# ВАЖНО: фильтр по regexp, чтобы "tasktag:done" и "tasktag:skip"
-# не попадали в этот хэндлер (иначе int() падает).
 @dp.callback_query(StateFilter(TaskOfDayAdmin.choosing_tags),
                    F.data.regexp(r"^tasktag:\d+$"))
 async def cb_tasktag_toggle(callback: types.CallbackQuery, state: FSMContext):
@@ -4678,7 +4675,7 @@ async def send_reminder_now():
     if target in ("channel", "both"):
         try:
             await bot.send_message(channel, msg_ru)
-        except Exception as e:
+        except Exception:
             logger.exception("Failed to send reminder to channel %s", channel)
             raise
 
@@ -4779,12 +4776,16 @@ async def on_startup(bot: Bot):
     logger.info("Startup: %s users, %s files, %s tags, channel=%s",
                 len(DATABASE.get("users", {})), total_files,
                 len(DATABASE.get("tags", [])), CHANNEL_ID)
+
+
 def register_middlewares():
     dp.message.outer_middleware(SimpleRateLimitMiddleware(RATE_LIMIT_PER_MIN))
     dp.callback_query.outer_middleware(SimpleRateLimitMiddleware(RATE_LIMIT_PER_MIN))
     dp.message.outer_middleware(UserActivityMiddleware())
     dp.callback_query.outer_middleware(UserActivityMiddleware())
     dp.inline_query.outer_middleware(UserActivityMiddleware())
+
+
 async def health_endpoint(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "bot": BOT_USERNAME})
 
