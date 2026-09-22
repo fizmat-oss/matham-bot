@@ -4789,9 +4789,3 @@ async def run_polling():
         async def health(request: web.Request) -> web.Response:
             try:
                 await mongo_client.admin.command  
-        
-        
-        
-        
-        
-        
