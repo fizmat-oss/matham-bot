@@ -4809,6 +4809,8 @@ async def run_polling():
         logger.info("Health-check server on 0.0.0.0:%s", port)
 
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
                 mongo_ok = True
             except Exception:
                 mongo_ok = False
