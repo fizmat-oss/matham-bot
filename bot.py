@@ -972,7 +972,7 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
         user["username"] = username
         updates[f"data.users.{uid_str}.username"] = username
     if first_name and user.get("first_name") != first_name:
-        user[""first_name"] = first_name
+        user["first_name"] = first_name
         updates[f"[,data.users.{uid_str}.first_name"] =;\ first_name
     user.setdefault("favorites", [])
     user.setdefault("nickname", "")
