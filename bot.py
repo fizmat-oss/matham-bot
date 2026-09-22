@@ -4775,7 +4775,12 @@ async def on_startup(bot: Bot):
     logger.info("Startup: %s users, %s files, %s tags, channel=%s",
                 len(DATABASE.get("users", {})), total_files,
                 len(DATABASE.get("tags", [])), CHANNEL_ID)
-
+def register_middlewares():
+    dp.message.outer_middleware(SimpleRateLimitMiddleware(RATE_LIMIT_PER_MIN))
+    dp.callback_query.outer_middleware(SimpleRateLimitMiddleware(RATE_LIMIT_PER_MIN))
+    dp.message.outer_middleware(UserActivityMiddleware())
+    dp.callback_query.outer_middleware(UserActivityMiddleware())
+    dp.inline_query.outer_middleware(UserActivityMiddleware())
 async def health_endpoint(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "bot": BOT_USERNAME})
 
