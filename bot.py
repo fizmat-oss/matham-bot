@@ -4811,7 +4811,7 @@ async def run_polling():
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-                mongo_ok = True
+    mongo_ok = True
             except Exception:
                 mongo_ok = False
             status = {
