@@ -1096,7 +1096,7 @@ def rename_tag_everywhere(old_tag: str, new_tag: str) -> int:
 
 def normalize_tags_input(raw: str) -> list:
     tags = []
-    for part in re.split(rn]", raw):
+    for part in re.split(r"[,;\n]", raw):
         tag = re.sub(r"[^#\wа-яА-ЯёЁ-]", "", part.strip().replace(" ", "-"))
         if tag and not tag.startswith("#"):
             tag = "#" + tag
