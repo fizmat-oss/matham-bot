@@ -4776,62 +4776,26 @@ async def on_startup(bot: Bot):
                 len(DATABASE.get("users", {})), total_files,
                 len(DATABASE.get("tags", [])), CHANNEL_ID)
 
+async def health_endpoint(request: web.Request) -> web.Response:
+    return web.json_response({"status": "ok", "bot": BOT_USERNAME})
+
 
 async def run_polling():
     register_middlewares()
     dp.startup.register(on_startup)
     await bot.delete_webhook(drop_pending_updates=True)
+
     port = os.environ.get("PORT")
     if port:
-        async def health(request: web.Request) -> web.Response:
-            try:
-                await mongo_client.admin.command("ping")
-                mongo_ok = True
-            except Exception:
-                mongo_ok = False
-            status = {
-                "status": "ok" if mongo_ok else "degraded",
-                "bot": BOT_USERNAME,
-                "mongo": "up" if mongo_ok else "down",
-                "users": len(DATABASE.get("users", {})),
-                "tasks": sum(len(g.get("tasks", [])) for g in DATABASE.get("daily_tasks", {}).values()),
-                "time": datetime.now(timezone.utc).isoformat(),
-            }
-            return web.json_response(status, status=200 if mongo_ok else 503)
-
         app = web.Application()
-        app.router.add_get("/", health)
-        app.router.add_get("/health", health)
+        app.router.add_get("/", health_endpoint)
+        app.router.add_get("/health", health_endpoint)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, host="0.0.0.0", port=int(port))
         await site.start()
         logger.info("Health-check server on 0.0.0.0:%s", port)
 
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-    mongo_ok = True
-            except Exception:
-                mongo_ok = False
-            status = {
-                "status": "ok" if mongo_ok else "degraded",
-                "bot": BOT_USERNAME,
-                "mongo": "up" if mongo_ok else "down",
-                "users": len(DATABASE.get("users", {})),
-                "tasks": sum(len(g.get("tasks", [])) for g in DATABASE.get("daily_tasks", {}).values()),
-                "time": datetime.now(timezone.utc).isoformat(),
-            }
-            return web.json_response(status, status=200 if mongo_ok else 503)
-
-        app = web.Application()
-        app.router.add_get("/", health)
-        app.router.add_get("/health", health)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, host="0.0.0.0", port=int(port))
-        await site.start()
-        logger.info("Health-check server on 0.0.0.0:%s", port)
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
@@ -4851,10 +4815,6 @@ def run_webhook():
     setup_application(app, dp, bot=bot)
     web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
 
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
     if os.environ.get("WEBHOOK_URL", "").strip():
