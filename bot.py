@@ -78,24 +78,6 @@ ACHIEVEMENTS = {
     "solver_top1":    {"icon": "👑", "name": "Топ-1 по очкам"},
 }
 
-LEVELS = [
-    (0, "🐣", "Новичок"),
-    (50, "📘", "Любитель"),
-    (150, "🎓", "Знаток"),
-    (350, "⭐", "Олимпиадник"),
-    (700, "🔥", "Мастер"),
-    (1500, "💎", "Гроссмейстер"),
-    (3000, "👑", "Легенда"),
-]
-
-SHOP_ITEMS = {
-    "emoji_star":    {"name": "⭐ Звёздочка в нике", "price": 50,  "emoji": "⭐"},
-    "emoji_fire":    {"name": "🔥 Огонёк в нике",    "price": 80,  "emoji": "🔥"},
-    "emoji_crown":   {"name": "👑 Корона в нике",    "price": 150, "emoji": "👑"},
-    "emoji_diamond": {"name": "💎 Алмаз в нике",     "price": 300, "emoji": "💎"},
-    "reset":         {"name": "🔄 Убрать эмодзи",    "price": 0,   "emoji": ""},
-}
-
 # ============================================================
 # LOCALIZATION
 # ============================================================
@@ -987,13 +969,9 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
             "last_active": today,
             "score": 0,
             "favorites": [],
-            "subscriptions": [],
             "achievements": [],
             "personal_reminder": {"enabled": False, "time": "19:00"},
-            "last_bonus_date": None,
-            "shop_emoji": "",
             "notes": {},
-            "activity_feed": [],
         }
         DATABASE["users"][uid_str] = user_data
         await db_collection.update_one(
@@ -1015,13 +993,9 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
     user.setdefault("favorites", [])
     user.setdefault("nickname", "")
     user.setdefault("language", "ru")
-    user.setdefault("subscriptions", [])
     user.setdefault("achievements", [])
     user.setdefault("personal_reminder", {"enabled": False, "time": "19:00"})
-    user.setdefault("last_bonus_date", None)
-    user.setdefault("shop_emoji", "")
     user.setdefault("notes", {})
-    user.setdefault("activity_feed", [])
 
     if user.get("last_active") != today:
         if user.get("last_active") == yesterday:
@@ -1049,63 +1023,14 @@ async def award_points(user_id: int, points: int):
     )
 
 
-def get_level(score: int):
-    cur = LEVELS[0]
-    for lvl in LEVELS:
-        if score >= lvl[0]:
-            cur = lvl
-        else:
-            break
-    nxt = None
-    for lvl in LEVELS:
-        if lvl[0] > score:
-            nxt = lvl
-            break
-    return cur, nxt
-
-
-def add_activity(user_id: int, text: str):
-    uid_str = str(user_id)
-    u = DATABASE.get("users", {}).get(uid_str)
-    if not u:
-        return
-    feed = u.setdefault("activity_feed", [])
-    feed.append({"text": text, "at": datetime.now(YEREVAN_TZ).isoformat()})
-    if len(feed) > 50:
-        del feed[:-50]
-
-
-def get_similar_files(uid: str, limit: int = 6) -> list:
-    src = get_file_by_uid(uid)
-    if not src:
-        return []
-    src_tags = {x.lower() for x in (src.get("tags") or [])}
-    if not src_tags:
-        return []
-    out = []
-    for f in get_catalog_files_list():
-        if f["uid"] == uid:
-            continue
-        tags = {x.lower() for x in (f.get("tags") or [])}
-        overlap = len(src_tags & tags)
-        if overlap > 0:
-            out.append((overlap, f))
-    out.sort(key=lambda x: -x[0])
-    return [f for _, f in out[:limit]]
-
-
 def get_nickname(uid_str: str) -> str:
     u = DATABASE.get("users", {}).get(uid_str, {})
-    base = u.get("nickname") or u.get("username") or u.get("first_name") or f"id{uid_str}"
-    emoji = u.get("shop_emoji") or ""
-    return f"{emoji} {base}".strip() if emoji else base
+    return u.get("nickname") or u.get("username") or u.get("first_name") or f"id{uid_str}"
 
 
 def user_display(uid_str: str) -> str:
     u = DATABASE.get("users", {}).get(uid_str, {})
-    emoji = u.get("shop_emoji") or ""
-    base = u.get("nickname") or u.get("username") or f"id{uid_str}"
-    nick = f"{emoji} {base}".strip() if emoji else base
+    nick = u.get("nickname") or u.get("username") or f"id{uid_str}"
     tg = u.get("first_name") or ""
     uname = u.get("username") or ""
     parts = []
@@ -1119,9 +1044,7 @@ def user_display(uid_str: str) -> str:
 
 def sol_display(s: dict, uid_str: str) -> str:
     u = DATABASE.get("users", {}).get(uid_str, {})
-    emoji = s.get("shop_emoji") or u.get("shop_emoji") or ""
     nick = s.get("nickname") or u.get("nickname") or f"id{uid_str}"
-    nick = f"{emoji} {nick}".strip() if emoji else nick
     tg = s.get("first_name") or u.get("first_name") or ""
     uname = s.get("username") or u.get("username") or ""
     parts = []
@@ -1238,12 +1161,9 @@ async def check_and_award_achievements(user_id: int):
             )
         except Exception:
             pass
-        try:
-            add_activity(user_id, f"🏆 Достижение: {info['name']}")
-        except Exception:
-            pass
 
-        # ============================================================
+
+# ============================================================
 # DATABASE LOAD / SAVE
 # ============================================================
 
@@ -1308,13 +1228,9 @@ async def load_db():
         user.setdefault("last_active", get_yerevan_date())
         user.setdefault("score", 0)
         user.setdefault("favorites", [])
-        user.setdefault("subscriptions", [])
         user.setdefault("achievements", [])
         user.setdefault("personal_reminder", {"enabled": False, "time": "19:00"})
-        user.setdefault("last_bonus_date", None)
-        user.setdefault("shop_emoji", "")
         user.setdefault("notes", {})
-        user.setdefault("activity_feed", [])
 
     for date_str, group in list(data["daily_tasks"].items()):
         if isinstance(group, list) or (isinstance(group, dict) and "tasks" not in group):
@@ -1343,7 +1259,6 @@ async def load_db():
                 sol.setdefault("username", "")
                 sol.setdefault("first_name", "")
                 sol.setdefault("nickname", "")
-                sol.setdefault("shop_emoji", "")
                 sol.setdefault("status", "approved")
                 sol.setdefault("grade", None)
                 sol.setdefault("submitted_at", get_yerevan_date())
@@ -1478,12 +1393,8 @@ def get_main_menu_keyboard(user_id: int):
          InlineKeyboardButton(text=t(user_id, "menu_fav"), callback_data="favorites:main")],
         [InlineKeyboardButton(text=t(user_id, "menu_rating"), callback_data="rating:main"),
          InlineKeyboardButton(text=t(user_id, "menu_random"), callback_data="challenge:main")],
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile:view"),
-         InlineKeyboardButton(text="🛒 Магазин", callback_data="shop:main")],
-        [InlineKeyboardButton(text="📰 Лента", callback_data="activity:feed"),
-         InlineKeyboardButton(text="🏆 Достижения", callback_data="ach:main")],
-        [InlineKeyboardButton(text="⏰ Напоминание", callback_data="prem:menu"),
-         InlineKeyboardButton(text="🔔 Подписки", callback_data="subs:main")],
+        [InlineKeyboardButton(text="🏆 Достижения", callback_data="ach:main"),
+         InlineKeyboardButton(text="⏰ Напоминание", callback_data="prem:menu")],
         [InlineKeyboardButton(text=t(user_id, "menu_links"), callback_data="links:main")],
         [InlineKeyboardButton(text=t(user_id, "menu_submit"), callback_data="submit:start")],
         [InlineKeyboardButton(text=t(user_id, "menu_lang"), callback_data="lang:menu")],
@@ -1951,27 +1862,6 @@ async def announce_file_to_channel(entry: dict, cat_titles: list):
             logger.warning("Channel file message also failed")
 
 
-async def notify_subscribers_about_file(entry: dict):
-    tags = {x.lower() for x in entry.get("tags", [])}
-    if not tags:
-        return
-    for uid_str, u in list(DATABASE.get("users", {}).items()):
-        user_tags = {x.lower() for x in (u.get("subscriptions") or [])}
-        if not (tags & user_tags):
-            continue
-        try:
-            await bot.send_message(
-                int(uid_str),
-                f"🔔 <b>Новый материал по вашим тегам</b>\n\n"
-                f"📖 {html.escape(entry.get('caption') or '—')}\n"
-                f"🏷 {' '.join(entry.get('tags', []))}",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception:
-            pass
-        await asyncio.sleep(0.05)
-
-
 # ============================================================
 # TAG TOGGLE
 # ============================================================
@@ -2377,8 +2267,7 @@ async def cb_file_comments(callback: types.CallbackQuery, state: FSMContext):
     comments = f.get("comments", [])
     lines = [f"💬 <b>Комментарии</b> ({len(comments)})\n"]
     for c in comments[-10:]:
-        emoji = c.get("shop_emoji") or ""
-        nick = f"{emoji} {c.get('nickname') or c.get('first_name') or '—'}".strip()
+        nick = c.get('nickname') or c.get('first_name') or '—'
         at = (c.get("at") or "")[:10]
         lines.append(f"🪪 <b>{html.escape(nick)}</b> <i>{at}</i>\n{html.escape(c.get('text',''))}\n")
     if not comments:
@@ -2421,7 +2310,6 @@ async def process_file_comment(message: types.Message, state: FSMContext):
         "user_id": message.from_user.id,
         "nickname": u.get("nickname") or "",
         "first_name": message.from_user.first_name or "",
-        "shop_emoji": u.get("shop_emoji") or "",
         "text": text,
         "at": datetime.now(YEREVAN_TZ).isoformat(),
     }
@@ -2861,158 +2749,6 @@ async def cb_challenge(callback: types.CallbackQuery, state: FSMContext):
 
 
 # ============================================================
-# PROFILE / BONUS / SHOP / ACTIVITY
-# ============================================================
-
-@dp.callback_query(F.data == "profile:view")
-async def cb_profile(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    uid_str = str(callback.from_user.id)
-    u = DATABASE.get("users", {}).get(uid_str, {})
-    score = u.get("score", 0)
-    lvl, nxt = get_level(score)
-    solved = count_solved(uid_str)
-    streak = u.get("streak", 0)
-    favs = len(u.get("favorites", []))
-    ach = len(u.get("achievements", []))
-
-    if nxt:
-        cur_min, nxt_min = lvl[0], nxt[0]
-        progress = (score - cur_min) / (nxt_min - cur_min) if nxt_min > cur_min else 0
-        filled = int(progress * 10)
-        bar = "█" * filled + "░" * (10 - filled)
-        next_text = f"\n➡️ До «{nxt[1]} {nxt[2]}»: <b>{nxt_min - score}</b> очк.\n<code>[{bar}] {int(progress*100)}%</code>"
-    else:
-        next_text = "\n🏆 Максимальный уровень!"
-
-    tag_counter = {}
-    for group in DATABASE.get("daily_tasks", {}).values():
-        for task in group.get("tasks", []):
-            s = (task.get("user_solutions") or {}).get(uid_str)
-            if s and s.get("status") == "approved":
-                for tg in task.get("tags", []):
-                    tag_counter[tg] = tag_counter.get(tg, 0) + 1
-    top_tags = sorted(tag_counter.items(), key=lambda x: -x[1])[:5]
-    tags_line = " · ".join(f"{tg}×{n}" for tg, n in top_tags) if top_tags else "—"
-
-    today = get_yerevan_date()
-    bonus_ready = u.get("last_bonus_date") != today
-    bonus_line = "🎁 <b>Бонус доступен!</b>" if bonus_ready else f"⏳ Бонус получен ({today})"
-
-    emoji = u.get("shop_emoji") or ""
-    nick_display = f"{emoji} {u.get('nickname') or '—'}".strip()
-
-    text = (
-        f"👤 <b>Профиль</b>\n\n"
-        f"🪪 <b>{html.escape(nick_display)}</b>\n"
-        f"{lvl[1]} Уровень: <b>{lvl[2]}</b>\n"
-        f"💰 Очки: <b>{score}</b>{next_text}\n\n"
-        f"✅ Решено: <b>{solved}</b>\n"
-        f"🔥 Стрик: <b>{streak}</b> дн.\n"
-        f"❤️ Избранное: <b>{favs}</b>\n"
-        f"🏆 Достижения: <b>{ach}/{len(ACHIEVEMENTS)}</b>\n\n"
-        f"🏷 <b>Любимые темы:</b>\n{html.escape(tags_line)}\n\n"
-        f"{bonus_line}"
-    )
-    rows = []
-    if bonus_ready:
-        rows.append([InlineKeyboardButton(text="🎁 Забрать бонус (+10)", callback_data="bonus:claim")])
-    rows.append([InlineKeyboardButton(text="🏆 Достижения", callback_data="ach:main"),
-                 InlineKeyboardButton(text="🛒 Магазин", callback_data="shop:main")])
-    rows.append([InlineKeyboardButton(text="📰 Лента", callback_data="activity:feed")])
-    rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_menu"), callback_data="menu:main")])
-    await safe_send_or_edit(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "bonus:claim")
-async def cb_bonus_claim(callback: types.CallbackQuery, state: FSMContext):
-    uid_str = str(callback.from_user.id)
-    u = DATABASE.setdefault("users", {}).setdefault(uid_str, {})
-    today = get_yerevan_date()
-    if u.get("last_bonus_date") == today:
-        await callback.answer("⏳ Уже получен сегодня", show_alert=True)
-        return
-    bonus = 10
-    u["last_bonus_date"] = today
-    u["score"] = u.get("score", 0) + bonus
-    await save_db(DATABASE)
-    add_activity(callback.from_user.id, f"🎁 Ежедневный бонус +{bonus}")
-    await callback.answer(f"🎁 +{bonus} очков!", show_alert=True)
-    await cb_profile(callback, state)
-
-
-@dp.callback_query(F.data == "activity:feed")
-async def cb_activity_feed(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    uid_str = str(callback.from_user.id)
-    u = DATABASE.get("users", {}).get(uid_str, {})
-    feed = list(reversed(u.get("activity_feed", [])))[:20]
-    if not feed:
-        text = "📰 <b>Лента активности</b>\n\nПока пусто. Решайте задачи, получайте очки и достижения!"
-    else:
-        lines = ["📰 <b>Ваша лента активности</b>\n"]
-        for it in feed:
-            at = (it.get("at") or "")[:16].replace("T", " ")
-            lines.append(f"• {html.escape(it.get('text',''))}\n  <i>{at}</i>")
-        text = "\n".join(lines)
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t(callback.from_user.id, "back_menu"), callback_data="menu:main")]])
-    await safe_send_or_edit(callback, text, reply_markup=markup)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "shop:main")
-async def cb_shop_main(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    uid_str = str(callback.from_user.id)
-    u = DATABASE.get("users", {}).get(uid_str, {})
-    score = u.get("score", 0)
-    cur_emoji = u.get("shop_emoji", "")
-    lines = [
-        "🛒 <b>Магазин MathAm</b>\n",
-        f"💰 Ваши очки: <b>{score}</b>",
-        f"Текущий эмодзи ника: <b>{cur_emoji or '—'}</b>\n",
-        "Выберите товар:",
-    ]
-    rows = []
-    for key, item in SHOP_ITEMS.items():
-        if key == "reset":
-            if cur_emoji:
-                rows.append([InlineKeyboardButton(text=item["name"], callback_data=f"shop:buy:{key}")])
-            continue
-        rows.append([InlineKeyboardButton(
-            text=f"{item['emoji']} {item['name']} — {item['price']} очк.",
-            callback_data=f"shop:buy:{key}")])
-    rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_menu"), callback_data="menu:main")])
-    await safe_send_or_edit(callback, "\n".join(lines),
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("shop:buy:"))
-async def cb_shop_buy(callback: types.CallbackQuery, state: FSMContext):
-    key = callback.data.split(":", 2)[2]
-    item = SHOP_ITEMS.get(key)
-    if not item:
-        await callback.answer("Товар не найден", show_alert=True)
-        return
-    uid_str = str(callback.from_user.id)
-    u = DATABASE.setdefault("users", {}).setdefault(uid_str, {})
-    score = u.get("score", 0)
-    if item["price"] > 0 and score < item["price"]:
-        await callback.answer(f"❌ Не хватает очков (нужно {item['price']})", show_alert=True)
-        return
-    if item["price"] > 0:
-        u["score"] = score - item["price"]
-    u["shop_emoji"] = item["emoji"]
-    await save_db(DATABASE)
-    add_activity(callback.from_user.id, f"🛒 Куплено: {item['name']}")
-    await callback.answer(f"✅ Куплено: {item['name']}", show_alert=True)
-    await cb_shop_main(callback, state)
-
-
-# ============================================================
 # PERSONAL REMINDERS
 # ============================================================
 
@@ -3110,57 +2846,6 @@ async def personal_reminder_scheduler():
 async def cb_ach_main(callback: types.CallbackQuery, state: FSMContext):
     await cmd_achievements(callback.message, state)
     await callback.answer()
-
-
-# ============================================================
-# TAG SUBSCRIPTIONS
-# ============================================================
-
-@dp.callback_query(F.data == "subs:main")
-async def cb_subs_main(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    uid_str = str(callback.from_user.id)
-    subs = DATABASE.get("users", {}).get(uid_str, {}).get("subscriptions", [])
-    rows, row = [], []
-    for i, tag in enumerate(DATABASE.get("tags", [])):
-        mark = "✅ " if tag in subs else ""
-        row.append(InlineKeyboardButton(text=f"{mark}{tag}", callback_data=f"subs:t:{i}"))
-        if len(row) == 2:
-            rows.append(row); row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_menu"),
-                                      callback_data="menu:main")])
-    await safe_send_or_edit(
-        callback,
-        f"🔔 <b>Подписка на теги</b>\n"
-        f"Выбрано: <b>{len(subs)}</b>\n\n"
-        f"Когда появится новый материал с этими тегами — пришлём уведомление.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("subs:t:"))
-async def cb_subs_toggle(callback: types.CallbackQuery, state: FSMContext):
-    try:
-        i = int(callback.data.split(":")[2])
-    except (ValueError, IndexError):
-        await callback.answer("Error", show_alert=True); return
-    tags = DATABASE.get("tags", [])
-    if not (0 <= i < len(tags)):
-        await callback.answer("?", show_alert=True); return
-    tag = tags[i]
-    uid_str = str(callback.from_user.id)
-    user = DATABASE.setdefault("users", {}).setdefault(uid_str, {})
-    subs = user.setdefault("subscriptions", [])
-    if tag in subs:
-        subs.remove(tag)
-        await callback.answer("▫️ Отписан")
-    else:
-        subs.append(tag)
-        await callback.answer("✅ Подписан")
-    await save_db(DATABASE)
-    await cb_subs_main(callback, state)
 
 
 # ============================================================
@@ -3484,7 +3169,6 @@ async def process_user_solution(message: types.Message, state: FSMContext):
         "nickname": u.get("nickname") or "",
         "first_name": message.from_user.first_name or "",
         "username": message.from_user.username or "",
-        "shop_emoji": u.get("shop_emoji") or "",
         "status": "pending",
         "grade": None,
         "submitted_at": datetime.now(YEREVAN_TZ).isoformat(),
@@ -3580,7 +3264,6 @@ async def process_numans(message: types.Message, state: FSMContext):
             "nickname": u.get("nickname") or "",
             "first_name": message.from_user.first_name or "",
             "username": message.from_user.username or "",
-            "shop_emoji": u.get("shop_emoji") or "",
             "status": "approved",
             "grade": 10,
             "submitted_at": datetime.now(YEREVAN_TZ).isoformat(),
@@ -3590,8 +3273,6 @@ async def process_numans(message: types.Message, state: FSMContext):
         add_pts = 10 * mult
         u["score"] = u.get("score", 0) + add_pts
         await save_db(DATABASE)
-        add_activity(message.from_user.id,
-                     f"✅ Авто-решение {date_str} №{idx+1} (+{add_pts})")
         try:
             await check_and_award_achievements(message.from_user.id)
         except Exception:
@@ -3789,11 +3470,6 @@ async def cb_grade(callback: types.CallbackQuery):
         else:
             await bot.send_message(int(uid_str), t(int(uid_str), "task_approved_notify",
                                                     date=date_str, num=idx + 1))
-    except Exception:
-        pass
-
-    try:
-        add_activity(int(uid_str), f"📝 Задача {date_str} №{idx+1} оценена: {new_grade}/10")
     except Exception:
         pass
 
@@ -4424,7 +4100,6 @@ async def cb_upl_publish(callback: types.CallbackQuery, state: FSMContext):
         parse_mode=ParseMode.HTML,
     )
     await announce_file_to_channel(entry, titles)
-    await notify_subscribers_about_file(entry)
     await callback.answer(t(callback.from_user.id, "admin_upload_done_short"))
 
 
@@ -4877,7 +4552,6 @@ async def cb_subcat(callback: types.CallbackQuery):
     await callback.message.answer(t(callback.from_user.id, "admin_subs_published",
                                     cat=html.escape(cat_title)))
     await announce_file_to_channel(entry, [cat_title])
-    await notify_subscribers_about_file(entry)
     await callback.answer("✅")
 
 
