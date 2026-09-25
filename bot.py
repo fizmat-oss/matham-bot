@@ -47,7 +47,6 @@ ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdig
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "matham_bot")
 YEREVAN_TZ = timezone(timedelta(hours=4))
-MSK_TZ = timezone(timedelta(hours=3))
 
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@matham123456").strip() or "@matham123456"
 TG_TEXT_LIMIT = 4000
@@ -63,20 +62,9 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 DATABASE = {}
 BOT_USERNAME = ""
-REMINDER_TASK = None
 
 DIFF_KEYS = ("easy", "medium", "hard", "imo")
 DIFF_MULT = {"easy": 1, "medium": 2, "hard": 3, "imo": 5}
-
-ACHIEVEMENTS = {
-    "first_solution": {"icon": "🥇", "name": "Первое решение"},
-    "solve_10":       {"icon": "🔟", "name": "10 решённых задач"},
-    "solve_50":       {"icon": "🏅", "name": "50 решённых задач"},
-    "streak_7":       {"icon": "🔥", "name": "7 дней подряд"},
-    "streak_30":      {"icon": "💎", "name": "30 дней подряд"},
-    "collector":      {"icon": "📚", "name": "Коллекционер (10 в избранном)"},
-    "solver_top1":    {"icon": "👑", "name": "Топ-1 по очкам"},
-}
 
 # ============================================================
 # LOCALIZATION
@@ -84,25 +72,29 @@ ACHIEVEMENTS = {
 
 TEXTS = {
     "ru": {
-        "welcome_back": "👋 <b>С возвращением, {nick}!</b>",
+        "welcome_back": "👋 С возвращением, {nick}!",
         "hello_new": "👋 Привет, {name}!\n\nДобро пожаловать в <b>MathAm</b>!",
         "choose_language": "🌐 <b>Выберите язык / Choose your language:</b>",
         "lang_set": "✅ Язык установлен: <b>Русский</b> 🇷🇺",
         "ask_nickname": "🪪 Напишите ваш <b>никнейм</b> — под ним вас будут видеть в рейтинге, решениях и заявках.",
+        "change_nickname": "🪪 Введите новый <b>никнейм</b>:\n/cancel — отмена.",
         "nickname_bad_slash": "⚠️ Никнейм не может начинаться с «/». Напишите другой:",
         "nickname_bad_len": "⚠️ Никнейм должен быть от 2 до 30 символов. Попробуйте ещё раз:",
-        "nickname_welcome": "✅ Приятно познакомиться, <b>{nick}</b>! 🎉",
+        "nickname_welcome": "✅ Приятно познакомиться, {nick}! 🎉",
+        "nickname_updated": "✅ Ваш никнейм успешно изменён на: {nick}",
         "menu_title": "🏠 <b>Главное меню</b>\nВыберите раздел:",
         "menu_catalog": "📚 Каталог",
         "menu_search": "🏷 Поиск по тегам",
         "menu_task": "🎯 Задача дня",
         "menu_archive": "🗄 Архив задач",
+        "menu_task_tags": "🏷 Задачи по тегам",
         "menu_mustread": "⭐ Must-read",
         "menu_fav": "❤️ Избранное",
         "menu_rating": "🏆 Рейтинг",
         "menu_random": "🎲 Случайный материал",
         "menu_links": "🔗 Полезные ссылки",
         "menu_submit": "📤 Предложить файл",
+        "menu_name": "🪪 Сменить ник",
         "menu_admin": "👑 Админ-панель",
         "menu_lang": "🌐 Язык / Language",
         "cancel_done": "❌ Отменено. /start — главное меню.",
@@ -125,7 +117,8 @@ TEXTS = {
         "section_missing": "Раздел не найден.",
         "task_missing": "🎯 Задача не найдена.",
         "search_title": "🏷 <b>Поиск по тегам</b>\n\nВыберите один или несколько тегов и нажмите «🔎 Искать».\nИли просто напишите тег/слово текстом.",
-        "search_go": "🔎 Искать",
+        "search_go": "🔎 Искать материалы",
+        "search_tasks_btn": "🎯 Искать задачи дня",
         "search_reset": "♻️ Сброс",
         "search_new": "🏷 Новый поиск",
         "search_pick_one": "Выберите хотя бы один тег!",
@@ -154,7 +147,7 @@ TEXTS = {
         "favorites_empty": "\n\nПока пусто. Откройте материал в каталоге и нажмите «❤️ В избранное».",
         "rating_title": "🏆 <b>Рейтинг MathAm</b>\n<i>Очки — за зачтённые решения задач дня</i>\n",
         "rating_empty": "Пока никто не набрал очки. Решите задачу дня первым!",
-        "rating_you": "\n👤 Вы: 🪪 <b>{nick}</b> — {score} очк. · ✅ {solved} · ❤️ {favs}",
+        "rating_you": "\n👤 Вы: {nick} — {score} очк. · ✅ {solved} · ❤️ {favs}",
         "mustread_title": "⭐ <b>Must-read</b>\nМатериалы, которые стоит изучить каждому олимпиаднику:",
         "mustread_empty": "⭐ <b>Must-read</b>\n\nСписок пока пуст.",
         "mustread_added": "⭐ Добавлено в must-read",
@@ -206,8 +199,8 @@ TEXTS = {
         "task_approved_notify_grade": "✅ Ваше решение задачи {date} (№{num}) зачтено!\n⭐ Оценка: {grade}/10",
         "task_grade_updated": "⭐ Оценка обновлена: {grade}/10",
         "task_rejected_notify": "❌ Ваше решение задачи {date} (№{num}) не зачтено.",
-        "task_admin_graded": "⭐ Оценка для 🪪 <b>{nick}</b>: <b>{label}</b>.",
-        "task_admin_approved": "✅ Решение от 🪪 <b>{nick}</b> зачтено.\n⭐ Поставьте оценку:",
+        "task_admin_graded": "⭐ Оценка для {nick}: <b>{label}</b>.",
+        "task_admin_approved": "✅ Решение от {nick} зачтено.\n⭐ Поставьте оценку:",
         "task_admin_grade_ask": "✓ Без оценки",
         "task_admin_rejected": "❌ Отклонено.",
         "task_admin_sol_rev_not_found": "Решение не найдено.",
@@ -229,12 +222,12 @@ TEXTS = {
         "admin_title": "👑 <b>Админ-панель MathAm</b>\nВыберите действие:",
         "admin_upload": "➕ Загрузить материал",
         "admin_add_task": "🎯 Добавить задачу дня",
+        "admin_cats": "📂 Управление разделами",
         "admin_tags": "🏷 Управление тегами",
         "admin_stats": "📊 Статистика",
         "admin_subs": "📥 Заявки на файлы",
         "admin_pending": "🧩 Решения на проверку",
         "admin_bcast": "📢 Рассылка",
-        "admin_reminder": "⏰ Напоминание",
         "admin_upload_ask": "📤 Отправьте файл (PDF):",
         "admin_upload_title": "✏️ Отправьте название материала:",
         "admin_upload_desc": "📝 Отправьте описание (необязательно) или «пропустить»:",
@@ -264,8 +257,8 @@ TEXTS = {
         "admin_subs_title": "📥 <b>Заявки на файлы</b>\n",
         "admin_subs_pick_cat": "📂 Выберите раздел:",
         "admin_subs_published": "✅ Опубликовано в «{cat}».",
-        "admin_subs_user_notify": "✅ Ваш материал «{title}» добавлен в каталог!",
-        "admin_subs_reject_notify": "❌ Ваш материал не подошёл.",
+        "admin_subs_user_notify": "✅ Ваш материал «{title}» одобрен и добавлен в каталог в раздел «{cat}»!",
+        "admin_subs_reject_notify": "❌ Ваша заявка на публикацию материала «{title}» была отклонена.",
         "admin_subs_accept": "✅ Принять",
         "admin_subs_reject": "❌ Отклонить",
         "admin_subs_rejected": "❌ Отклонено.",
@@ -281,13 +274,16 @@ TEXTS = {
         "admin_edit_title": "⚙️ <b>Редактирование</b>\n📖 {title}",
         "admin_edit_replace": "📄 Заменить файл",
         "admin_edit_rename": "✏️ Название",
+        "admin_edit_desc": "📝 Описание",
         "admin_edit_tags": "🏷 Теги",
         "admin_edit_back": "⬅️ Назад",
         "admin_edit_ask_doc": "📄 Отправьте новый файл:",
         "admin_edit_ask_title": "✏️ Отправьте новое название:",
+        "admin_edit_ask_desc": "📝 Отправьте новое описание (или «очистить»):",
         "admin_edit_ask_tags": "🏷 Отправьте теги через запятую (или «очистить»):",
         "admin_edit_doc_done": "✅ Файл заменён (записей: {n}).",
         "admin_edit_title_done": "✅ Название обновлено (записей: {n}).",
+        "admin_edit_desc_done": "✅ Описание обновлено (записей: {n}).",
         "admin_edit_tags_done": "✅ Теги обновлены (записей: {n}).",
         "admin_del_confirm": "⚠️ Удалить «{title}»?",
         "admin_del_yes": "🗑 Да, удалить",
@@ -300,7 +296,7 @@ TEXTS = {
         "new_material": "📚 <b>Новый материал в MathAm</b>",
         "open_in_bot": "🤖 Открыть в боте",
         "solve_in_bot": "🤖 Решить в боте",
-        "user_sol_new": "🧩 <b>Новое решение</b>\nЗадача: {date} · №{num}\n🪪 Ник: <b>{nick}</b>\n👤 TG: {tg}",
+        "user_sol_new": "🧩 <b>Новое решение</b>\nЗадача: {date} · №{num}\n🪪 Ник: {nick}\n👤 TG: {tg}",
         "unknown_text": "🤖 Не понял. Откройте /start.",
         "expect_file": "📤 Ожидаю файл.",
         "expect_doc": "📄 Ожидаю файл.",
@@ -310,53 +306,31 @@ TEXTS = {
         "rating_medal_1": "🥇",
         "rating_medal_2": "🥈",
         "rating_medal_3": "🥉",
-        "reminder": "День {n}/365 🥳",
-        "rem_title": "⏰ <b>Настройки напоминания</b>\n\n⏱ Время (МСК): <b>{time}</b>\n📢 Канал: <b>{channel}</b>\n🎯 Режим: <b>{target}</b>\n📆 Стартовый день: <b>{start_day}</b>\n🗓 Старт: <b>{start_date}</b>\n\n🇷🇺 RU:\n<code>{text_ru}</code>\n\n🇬🇧 EN:\n<code>{text_en}</code>\n\n💡 Сегодня: <b>{preview}</b>",
-        "rem_edit_time": "⏱ Изменить время",
-        "rem_edit_text_ru": "🇷🇺 Текст (RU)",
-        "rem_edit_text_en": "🇬🇧 Text (EN)",
-        "rem_edit_start": "📆 Стартовый день",
-        "rem_edit_channel": "📢 Канал",
-        "rem_edit_target": "🎯 Режим",
-        "rem_test": "🚀 Тест",
-        "rem_ask_time": "⏱ Формат <code>ЧЧ:ММ</code>:",
-        "rem_ask_text_ru": "🇷🇺 Новый текст (<code>{n}</code> — номер дня):",
-        "rem_ask_text_en": "🇬🇧 New text:",
-        "rem_ask_start": "📆 <code>СТАРТ_ДЕНЬ YYYY-MM-DD</code> или просто <code>19</code>:",
-        "rem_ask_channel": "📢 @username или -100...:",
-        "rem_bad_time": "⚠️ Неверно. <code>ЧЧ:ММ</code>.",
-        "rem_bad_start": "⚠️ Неверно.",
-        "rem_bad_date": "⚠️ Неверная дата.",
-        "rem_saved": "✅ Сохранено.",
-        "rem_target_channel": "📢 только канал",
-        "rem_target_users": "👥 только пользователи",
-        "rem_target_both": "📢+👥 оба",
-        "rem_target_pick": "🎯 Куда отправлять?",
-        "rem_test_ok": "🚀 Отправлено.",
-        "rem_test_fail": "⚠️ Ошибка: {err}",
-        "rem_preview_day_unknown": "—",
-        "rem_back": "⬅️ Настройки",
     },
     "en": {
-        "welcome_back": "👋 <b>Welcome back, {nick}!</b>",
+        "welcome_back": "👋 Welcome back, {nick}!",
         "hello_new": "👋 Hello, {name}!\n\nWelcome to <b>MathAm</b>!",
         "choose_language": "🌐 <b>Choose your language / Выберите язык:</b>",
         "lang_set": "✅ Language set: <b>English</b> 🇬🇧",
         "ask_nickname": "🪪 Please enter your <b>nickname</b>:",
+        "change_nickname": "🪪 Enter new <b>nickname</b>:\n/cancel — cancel.",
         "nickname_bad_slash": "⚠️ Nickname cannot start with «/». Try another:",
         "nickname_bad_len": "⚠️ Nickname must be 2–30 chars:",
-        "nickname_welcome": "✅ Nice to meet you, <b>{nick}</b>! 🎉",
+        "nickname_welcome": "✅ Nice to meet you, {nick}! 🎉",
+        "nickname_updated": "✅ Your nickname has been updated to: {nick}",
         "menu_title": "🏠 <b>Main menu</b>\nChoose a section:",
         "menu_catalog": "📚 Catalog",
         "menu_search": "🏷 Tag search",
         "menu_task": "🎯 Task of the day",
         "menu_archive": "🗄 Task archive",
+        "menu_task_tags": "🏷 Tasks by tags",
         "menu_mustread": "⭐ Must-read",
         "menu_fav": "❤️ Favorites",
         "menu_rating": "🏆 Rating",
         "menu_random": "🎲 Random material",
         "menu_links": "🔗 Useful links",
         "menu_submit": "📤 Submit a file",
+        "menu_name": "🪪 Change nickname",
         "menu_admin": "👑 Admin panel",
         "menu_lang": "🌐 Language / Язык",
         "cancel_done": "❌ Cancelled. /start — main menu.",
@@ -379,7 +353,8 @@ TEXTS = {
         "section_missing": "Section not found.",
         "task_missing": "🎯 Task not found.",
         "search_title": "🏷 <b>Tag search</b>\n\nPick tags and press «🔎 Search».",
-        "search_go": "🔎 Search",
+        "search_go": "🔎 Search materials",
+        "search_tasks_btn": "🎯 Search daily tasks",
         "search_reset": "♻️ Reset",
         "search_new": "🏷 New search",
         "search_pick_one": "Pick at least one tag!",
@@ -408,7 +383,7 @@ TEXTS = {
         "favorites_empty": "\n\nEmpty.",
         "rating_title": "🏆 <b>MathAm rating</b>\n",
         "rating_empty": "Nobody has scored yet.",
-        "rating_you": "\n👤 You: 🪪 <b>{nick}</b> — {score} pts · ✅ {solved} · ❤️ {favs}",
+        "rating_you": "\n👤 You: {nick} — {score} pts · ✅ {solved} · ❤️ {favs}",
         "mustread_title": "⭐ <b>Must-read</b>",
         "mustread_empty": "⭐ <b>Must-read</b>\n\nEmpty.",
         "mustread_added": "⭐ Added to must-read",
@@ -460,7 +435,7 @@ TEXTS = {
         "task_approved_notify_grade": "✅ Approved! ⭐ {grade}/10",
         "task_grade_updated": "⭐ Grade updated: {grade}/10",
         "task_rejected_notify": "❌ Not accepted.",
-        "task_admin_graded": "⭐ Grade for 🪪 <b>{nick}</b>: <b>{label}</b>.",
+        "task_admin_graded": "⭐ Grade for {nick}: <b>{label}</b>.",
         "task_admin_approved": "✅ Approved.\n⭐ Assign grade:",
         "task_admin_grade_ask": "✓ No grade",
         "task_admin_rejected": "❌ Rejected.",
@@ -483,12 +458,12 @@ TEXTS = {
         "admin_title": "👑 <b>Admin panel</b>",
         "admin_upload": "➕ Upload material",
         "admin_add_task": "🎯 Add task",
+        "admin_cats": "📂 Category management",
         "admin_tags": "🏷 Tags",
         "admin_stats": "📊 Stats",
         "admin_subs": "📥 Submissions",
         "admin_pending": "🧩 Solutions",
         "admin_bcast": "📢 Broadcast",
-        "admin_reminder": "⏰ Reminder",
         "admin_upload_ask": "📤 Send a file:",
         "admin_upload_title": "✏️ Title:",
         "admin_upload_desc": "📝 Description (or «skip»):",
@@ -518,8 +493,8 @@ TEXTS = {
         "admin_subs_title": "📥 <b>Submissions</b>\n",
         "admin_subs_pick_cat": "📂 Section:",
         "admin_subs_published": "✅ Published to «{cat}».",
-        "admin_subs_user_notify": "✅ Your material «{title}» is added!",
-        "admin_subs_reject_notify": "❌ Did not fit.",
+        "admin_subs_user_notify": "✅ Your material «{title}» has been approved and added to «{cat}»!",
+        "admin_subs_reject_notify": "❌ Your material submission «{title}» was not accepted.",
         "admin_subs_accept": "✅ Accept",
         "admin_subs_reject": "❌ Reject",
         "admin_subs_rejected": "❌ Rejected.",
@@ -535,13 +510,16 @@ TEXTS = {
         "admin_edit_title": "⚙️ <b>Editing</b>\n📖 {title}",
         "admin_edit_replace": "📄 Replace file",
         "admin_edit_rename": "✏️ Title",
+        "admin_edit_desc": "📝 Description",
         "admin_edit_tags": "🏷 Tags",
         "admin_edit_back": "⬅️ Back",
         "admin_edit_ask_doc": "📄 New file:",
         "admin_edit_ask_title": "✏️ New title:",
+        "admin_edit_ask_desc": "📝 New description (or «clear»):",
         "admin_edit_ask_tags": "🏷 Tags (or «clear»):",
         "admin_edit_doc_done": "✅ File replaced ({n}).",
         "admin_edit_title_done": "✅ Title updated ({n}).",
+        "admin_edit_desc_done": "✅ Description updated ({n}).",
         "admin_edit_tags_done": "✅ Tags updated ({n}).",
         "admin_del_confirm": "⚠️ Delete «{title}»?",
         "admin_del_yes": "🗑 Yes",
@@ -554,7 +532,7 @@ TEXTS = {
         "new_material": "📚 <b>New material in MathAm</b>",
         "open_in_bot": "🤖 Open in bot",
         "solve_in_bot": "🤖 Solve in bot",
-        "user_sol_new": "🧩 <b>New solution</b>\nTask: {date} · №{num}\n🪪 <b>{nick}</b>\n👤 {tg}",
+        "user_sol_new": "🧩 <b>New solution</b>\nTask: {date} · №{num}\n🪪 {nick}\n👤 {tg}",
         "unknown_text": "🤖 Use /start.",
         "expect_file": "📤 Waiting for a file.",
         "expect_doc": "📄 Waiting for a file.",
@@ -564,32 +542,6 @@ TEXTS = {
         "rating_medal_1": "🥇",
         "rating_medal_2": "🥈",
         "rating_medal_3": "🥉",
-        "reminder": "Day {n}/365 🥳",
-        "rem_title": "⏰ <b>Reminder settings</b>\n\n⏱ {time}\n📢 {channel}\n🎯 {target}\n📆 Start: {start_day}\n🗓 {start_date}\n\n🇷🇺 RU:\n<code>{text_ru}</code>\n\n🇬🇧 EN:\n<code>{text_en}</code>\n\n💡 Today: <b>{preview}</b>",
-        "rem_edit_time": "⏱ Time",
-        "rem_edit_text_ru": "🇷🇺 RU text",
-        "rem_edit_text_en": "🇬🇧 EN text",
-        "rem_edit_start": "📆 Start day",
-        "rem_edit_channel": "📢 Channel",
-        "rem_edit_target": "🎯 Target",
-        "rem_test": "🚀 Test",
-        "rem_ask_time": "⏱ <code>HH:MM</code>:",
-        "rem_ask_text_ru": "🇷🇺 New text:",
-        "rem_ask_text_en": "🇬🇧 New text:",
-        "rem_ask_start": "📆 <code>START_DAY YYYY-MM-DD</code> or just <code>19</code>:",
-        "rem_ask_channel": "📢 @username or -100...:",
-        "rem_bad_time": "⚠️ Format <code>HH:MM</code>.",
-        "rem_bad_start": "⚠️ Wrong format.",
-        "rem_bad_date": "⚠️ Wrong date.",
-        "rem_saved": "✅ Saved.",
-        "rem_target_channel": "📢 channel only",
-        "rem_target_users": "👥 users only",
-        "rem_target_both": "📢+👥 both",
-        "rem_target_pick": "🎯 Where?",
-        "rem_test_ok": "🚀 Sent.",
-        "rem_test_fail": "⚠️ Error: {err}",
-        "rem_preview_day_unknown": "—",
-        "rem_back": "⬅️ Settings",
     },
 }
 
@@ -705,17 +657,6 @@ DEFAULT_TAGS = [
     "#начинающим", "#всерос", "#подготовка",
 ]
 
-DEFAULT_REMINDER = {
-    "enabled": True,
-    "time": "19:00",
-    "start_day": 1,
-    "start_date": None,
-    "text_ru": "День {n}/365 (Ежедневное напоминание о ваших целях)🥳",
-    "text_en": "Day {n}/365 (Daily reminder about your goals)🥳",
-    "channel": CHANNEL_ID,
-    "target": "channel",
-}
-
 DEFAULT_STATE = {
     "categories": {
         "geometry": {"title": "📐 Геометрия", "files": []},
@@ -727,11 +668,11 @@ DEFAULT_STATE = {
     },
     "links": {
         "useful_links": {"title": "🔗 Полезные сайты и базы задач", "items": [
-            {"title": "AoPS", "url": "https://artofproblemsolving.com"},
-            {"title": "Imomath", "url": "https://imomath.com"},
+            {"title": "AoPS (Art of Problem Solving)", "url": "https://artofproblemsolving.com"},
+            {"title": "Imomath (IMO Training)", "url": "https://imomath.com"},
             {"title": "МЦНМО", "url": "https://mccme.ru"},
         ]},
-        "useful_videos": {"title": "🎥 Видеолекции и каналы", "items": [
+        "useful_videos": {"title": "🎥 Видеолекции и YouTube каналы", "items": [
             {"title": "3Blue1Brown", "url": "https://www.youtube.com/@3blue1brown"},
             {"title": "Numberphile", "url": "https://www.youtube.com/@numberphile"},
             {"title": "Mathologer", "url": "https://www.youtube.com/@Mathologer"},
@@ -742,7 +683,6 @@ DEFAULT_STATE = {
     "daily_tasks": {},
     "tags": list(DEFAULT_TAGS),
     "users": {},
-    "settings": {"reminder": dict(DEFAULT_REMINDER)},
 }
 
 
@@ -801,14 +741,6 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
-def get_reminder_settings() -> dict:
-    DATABASE.setdefault("settings", {})
-    rem = DATABASE["settings"].setdefault("reminder", dict(DEFAULT_REMINDER))
-    for k, v in DEFAULT_REMINDER.items():
-        rem.setdefault(k, v)
-    return rem
-
-
 def get_file_by_uid(uid: str) -> dict:
     for cat_data in DATABASE.get("categories", {}).values():
         for f in cat_data.get("files", []):
@@ -855,6 +787,23 @@ def get_catalog_files_list() -> list:
                     if tag not in item["tags"]:
                         item["tags"].append(tag)
     return list(files_dict.values())
+
+
+def get_similar_files(uid: str, limit: int = 5) -> list:
+    current = get_file_by_uid(uid)
+    if not current:
+        return []
+    curr_tags = set(t.lower() for t in current.get("tags", []))
+    all_files = get_catalog_files_list()
+    scored = []
+    for f in all_files:
+        if f["uid"] == uid:
+            continue
+        common = len(curr_tags & set(t.lower() for t in f.get("tags", [])))
+        if common > 0:
+            scored.append((common, f))
+    scored.sort(key=lambda x: -x[0])
+    return [f for _, f in scored[:limit]]
 
 
 def _split_text(text: str, limit: int) -> list:
@@ -969,8 +918,6 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
             "last_active": today,
             "score": 0,
             "favorites": [],
-            "achievements": [],
-            "personal_reminder": {"enabled": False, "time": "19:00"},
             "notes": {},
         }
         DATABASE["users"][uid_str] = user_data
@@ -993,8 +940,6 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
     user.setdefault("favorites", [])
     user.setdefault("nickname", "")
     user.setdefault("language", "ru")
-    user.setdefault("achievements", [])
-    user.setdefault("personal_reminder", {"enabled": False, "time": "19:00"})
     user.setdefault("notes", {})
 
     if user.get("last_active") != today:
@@ -1029,6 +974,7 @@ def get_nickname(uid_str: str) -> str:
 
 
 def user_display(uid_str: str) -> str:
+    # No bold tags around nickname
     u = DATABASE.get("users", {}).get(uid_str, {})
     nick = u.get("nickname") or u.get("username") or f"id{uid_str}"
     tg = u.get("first_name") or ""
@@ -1104,6 +1050,11 @@ def rename_tag_everywhere(old_tag: str, new_tag: str) -> int:
             if old_tag in file_tags:
                 f["tags"] = [new_tag if x == old_tag else x for x in file_tags]
                 count += 1
+    for group in DATABASE.get("daily_tasks", {}).values():
+        for task in group.get("tasks", []):
+            task_tags = task.get("tags", [])
+            if old_tag in task_tags:
+                task["tags"] = [new_tag if x == old_tag else x for x in task_tags]
     return count
 
 
@@ -1116,51 +1067,6 @@ def normalize_tags_input(raw: str) -> list:
         if tag and 2 <= len(tag) <= 40 and tag.lower() not in {x.lower() for x in tags}:
             tags.append(tag)
     return tags[:10]
-
-
-async def check_and_award_achievements(user_id: int):
-    uid_str = str(user_id)
-    user = DATABASE.get("users", {}).get(uid_str)
-    if not user:
-        return
-    have = set(user.get("achievements", []))
-    solved = count_solved(uid_str)
-    streak = user.get("streak", 0)
-    favs = len(user.get("favorites", []))
-
-    top_scores = sorted(
-        (u.get("score", 0) for u in DATABASE.get("users", {}).values()),
-        reverse=True,
-    )
-    is_top1 = bool(top_scores) and top_scores[0] == user.get("score", 0) and user.get("score", 0) > 0
-
-    candidates = []
-    if solved >= 1:   candidates.append("first_solution")
-    if solved >= 10:  candidates.append("solve_10")
-    if solved >= 50:  candidates.append("solve_50")
-    if streak >= 7:   candidates.append("streak_7")
-    if streak >= 30:  candidates.append("streak_30")
-    if favs >= 10:    candidates.append("collector")
-    if is_top1:       candidates.append("solver_top1")
-
-    new_ones = [c for c in candidates if c not in have]
-    if not new_ones:
-        return
-    user.setdefault("achievements", []).extend(new_ones)
-    await save_db(DATABASE)
-
-    for code in new_ones:
-        info = ACHIEVEMENTS.get(code)
-        if not info:
-            continue
-        try:
-            await bot.send_message(
-                user_id,
-                f"🎉 <b>Новое достижение!</b>\n{info['icon']} {info['name']}",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception:
-            pass
 
 
 # ============================================================
@@ -1203,20 +1109,12 @@ async def load_db():
         data["links"][sec_key].setdefault("title", default_sec["title"])
         data["links"][sec_key].setdefault("items", [])
 
-    if "useful_videos" in data["links"] and not data["links"]["useful_videos"].get("items"):
-        data["links"]["useful_videos"]["items"] = [
-            {"title": "3Blue1Brown", "url": "https://www.youtube.com/@3blue1brown"},
-            {"title": "Numberphile", "url": "https://www.youtube.com/@numberphile"},
-            {"title": "Mathologer", "url": "https://www.youtube.com/@Mathologer"},
-        ]
+    # Always ensure YouTube videos exist with working clean URLs
+    if "useful_videos" not in data["links"] or not data["links"]["useful_videos"].get("items"):
+        data["links"]["useful_videos"] = copy.deepcopy(DEFAULT_STATE["links"]["useful_videos"])
 
     if not data.get("tags"):
         data["tags"] = list(DEFAULT_TAGS)
-
-    data.setdefault("settings", {})
-    rem = data["settings"].setdefault("reminder", dict(DEFAULT_REMINDER))
-    for k, v in DEFAULT_REMINDER.items():
-        rem.setdefault(k, v)
 
     for uid, user in data["users"].items():
         user.setdefault("username", "")
@@ -1228,8 +1126,6 @@ async def load_db():
         user.setdefault("last_active", get_yerevan_date())
         user.setdefault("score", 0)
         user.setdefault("favorites", [])
-        user.setdefault("achievements", [])
-        user.setdefault("personal_reminder", {"enabled": False, "time": "19:00"})
         user.setdefault("notes", {})
 
     for date_str, group in list(data["daily_tasks"].items()):
@@ -1289,7 +1185,15 @@ class Registration(StatesGroup):
     waiting_for_nickname = State()
 
 
+class ChangeNicknameState(StatesGroup):
+    waiting_new_name = State()
+
+
 class TagSearch(StatesGroup):
+    selecting = State()
+
+
+class TaskTagSearch(StatesGroup):
     selecting = State()
 
 
@@ -1300,6 +1204,10 @@ class AdminUpload(StatesGroup):
     choosing_tags = State()
     choosing_difficulty = State()
     choosing_categories = State()
+
+
+class AdminAddCategory(StatesGroup):
+    waiting_for_title = State()
 
 
 class UserSubmit(StatesGroup):
@@ -1324,6 +1232,7 @@ class AddLink(StatesGroup):
 class EditFile(StatesGroup):
     waiting_for_document = State()
     waiting_for_title = State()
+    waiting_for_desc = State()
     waiting_for_tags = State()
 
 
@@ -1357,18 +1266,6 @@ class BroadcastAdmin(StatesGroup):
     waiting_for_message = State()
 
 
-class ReminderAdmin(StatesGroup):
-    waiting_time = State()
-    waiting_text_ru = State()
-    waiting_text_en = State()
-    waiting_start = State()
-    waiting_channel = State()
-
-
-class PersonalReminder(StatesGroup):
-    waiting_time = State()
-
-
 class TaskEdit(StatesGroup):
     text = State()
     photo = State()
@@ -1389,14 +1286,14 @@ def get_main_menu_keyboard(user_id: int):
          InlineKeyboardButton(text=t(user_id, "menu_search"), callback_data="search:main")],
         [InlineKeyboardButton(text=t(user_id, "menu_task"), callback_data="task:show"),
          InlineKeyboardButton(text=t(user_id, "menu_archive"), callback_data="task:archive")],
-        [InlineKeyboardButton(text=t(user_id, "menu_mustread"), callback_data="mustread:main"),
-         InlineKeyboardButton(text=t(user_id, "menu_fav"), callback_data="favorites:main")],
-        [InlineKeyboardButton(text=t(user_id, "menu_rating"), callback_data="rating:main"),
-         InlineKeyboardButton(text=t(user_id, "menu_random"), callback_data="challenge:main")],
-        [InlineKeyboardButton(text="🏆 Достижения", callback_data="ach:main"),
-         InlineKeyboardButton(text="⏰ Напоминание", callback_data="prem:menu")],
-        [InlineKeyboardButton(text=t(user_id, "menu_links"), callback_data="links:main")],
-        [InlineKeyboardButton(text=t(user_id, "menu_submit"), callback_data="submit:start")],
+        [InlineKeyboardButton(text=t(user_id, "menu_task_tags"), callback_data="tasktagsearch:main"),
+         InlineKeyboardButton(text=t(user_id, "menu_mustread"), callback_data="mustread:main")],
+        [InlineKeyboardButton(text=t(user_id, "menu_fav"), callback_data="favorites:main"),
+         InlineKeyboardButton(text=t(user_id, "menu_rating"), callback_data="rating:main")],
+        [InlineKeyboardButton(text=t(user_id, "menu_random"), callback_data="challenge:main"),
+         InlineKeyboardButton(text=t(user_id, "menu_links"), callback_data="links:main")],
+        [InlineKeyboardButton(text=t(user_id, "menu_submit"), callback_data="submit:start"),
+         InlineKeyboardButton(text=t(user_id, "menu_name"), callback_data="user:chname")],
         [InlineKeyboardButton(text=t(user_id, "menu_lang"), callback_data="lang:menu")],
     ]
     if is_admin(user_id):
@@ -1413,6 +1310,8 @@ async def get_catalog_keyboard(user_id: int):
             text=f"{title} ({count})",
             callback_data=f"cat:{cat_key}",
         )])
+    if is_admin(user_id):
+        builder.append([InlineKeyboardButton(text="➕ Добавить раздел", callback_data="admin:add_cat")])
     builder.append([InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
@@ -1549,8 +1448,11 @@ def get_links_section_keyboard(sec_key: str, user_id: int):
     items = [it for it in sec.get("items", []) if (it.get("url") or "").strip()]
     builder = []
     for idx, item in enumerate(items):
-        builder.append([InlineKeyboardButton(text=item.get("title", f"Link #{idx + 1}"),
-                                             url=item.get("url", ""))])
+        url = (item.get("url") or "").strip()
+        # Ensure scheme is present so Telegram inline URL buttons work perfectly
+        if not (url.startswith("http://") or url.startswith("https://")):
+            url = f"https://{url}"
+        builder.append([InlineKeyboardButton(text=item.get("title", f"Link #{idx + 1}"), url=url)])
         if is_admin(user_id):
             builder.append([InlineKeyboardButton(text=t(user_id, "links_del", n=idx + 1),
                                                  callback_data=f"links:del:{sec_key}:{idx}")])
@@ -1564,8 +1466,8 @@ def get_admin_menu_keyboard(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t(user_id, "admin_upload"), callback_data="admin:upload")],
         [InlineKeyboardButton(text=t(user_id, "admin_add_task"), callback_data="admin:add_task")],
+        [InlineKeyboardButton(text=t(user_id, "admin_cats"), callback_data="admin:cats")],
         [InlineKeyboardButton(text=t(user_id, "admin_tags"), callback_data="admin:tags")],
-        [InlineKeyboardButton(text=t(user_id, "admin_reminder"), callback_data="admin:reminder")],
         [InlineKeyboardButton(text=t(user_id, "admin_stats"), callback_data="admin:stats")],
         [InlineKeyboardButton(text="📊 Экспорт CSV", callback_data="admin:stats_csv")],
         [InlineKeyboardButton(text=t(user_id, "admin_subs"), callback_data="admin:submissions")],
@@ -1581,20 +1483,6 @@ def get_language_keyboard(user_id: int):
         [InlineKeyboardButton(text="🇬🇧 English", callback_data="lang:set:en")],
         [InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")],
     ])
-
-
-def get_reminder_settings_keyboard(user_id: int):
-    rows = [
-        [InlineKeyboardButton(text=t(user_id, "rem_edit_time"), callback_data="rem:edit:time")],
-        [InlineKeyboardButton(text=t(user_id, "rem_edit_text_ru"), callback_data="rem:edit:text_ru")],
-        [InlineKeyboardButton(text=t(user_id, "rem_edit_text_en"), callback_data="rem:edit:text_en")],
-        [InlineKeyboardButton(text=t(user_id, "rem_edit_start"), callback_data="rem:edit:start")],
-        [InlineKeyboardButton(text=t(user_id, "rem_edit_channel"), callback_data="rem:edit:channel")],
-        [InlineKeyboardButton(text=t(user_id, "rem_edit_target"), callback_data="rem:edit:target")],
-        [InlineKeyboardButton(text=t(user_id, "rem_test"), callback_data="rem:test")],
-        [InlineKeyboardButton(text=t(user_id, "back_admin"), callback_data="admin:main")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # ============================================================
@@ -1654,6 +1542,8 @@ async def show_task(target, date_str: str, task_idx: int, user_id: int = None):
     text = t(user_id, "task_of_day",
              date=date_str, num=task_idx + 1, total=total,
              text=html.escape(task_text))
+    if task.get("tags"):
+        text += f"\n\n🏷 " + " ".join(html.escape(x) for x in task["tags"])
     await safe_send_or_edit(target, text,
                             reply_markup=get_task_keyboard(date_str, task_idx, user_id),
                             photo_id=task.get("photo_file_id"))
@@ -1686,9 +1576,10 @@ async def show_links_section(target, sec_key: str, user_id: int):
         lines = [f"🔗 <b>{title}</b>\n"]
         for i, item in enumerate(items, 1):
             raw_url = (item.get("url") or "").strip()
-            clean_url = re.sub(r"[?&](utm_[^&]+|si=[^&]+|feature=[^&]+|t=[^&]+)", "", raw_url).rstrip("?&")
-            url = html.escape(clean_url, quote=True)
-            item_title = item.get("title") or clean_url
+            if not (raw_url.startswith("http://") or raw_url.startswith("https://")):
+                raw_url = f"https://{raw_url}"
+            url = html.escape(raw_url, quote=True)
+            item_title = item.get("title") or raw_url
             item_title_tr = await localize(item_title, user_id)
             lines.append(f'{i}. <a href="{url}">{html.escape(item_title_tr)}</a>')
         text = "\n".join(lines)
@@ -1744,6 +1635,9 @@ async def broadcast_task(date_str: str, task_idx: int, report_msg: types.Message
         f"<i>№ {task_idx + 1} из {tasks_total}</i>\n\n"
         f"{html.escape(task_text)}"
     )
+    if task.get("tags"):
+        text_ru += f"\n\n🏷 " + " ".join(html.escape(x) for x in task["tags"])
+
     markup_ru = None
     if BOT_USERNAME:
         markup_ru = InlineKeyboardMarkup(inline_keyboard=[[
@@ -1779,6 +1673,8 @@ async def broadcast_task(date_str: str, task_idx: int, report_msg: types.Message
                     f"<i>№ {task_idx + 1} of {tasks_total}</i>\n\n"
                     f"{html.escape(translated)}"
                 )
+                if task.get("tags"):
+                    text_en_cache["value"] += f"\n\n🏷 " + " ".join(html.escape(x) for x in task["tags"])
             text = text_en_cache["value"]
             markup = None
             if BOT_USERNAME:
@@ -2002,6 +1898,38 @@ async def process_nickname_any(message: types.Message, state: FSMContext):
     await message.answer(t(message.from_user.id, "ask_nickname"))
 
 
+@dp.message(Command("nickname"))
+async def cmd_change_nickname(message: types.Message, state: FSMContext):
+    await state.set_state(ChangeNicknameState.waiting_new_name)
+    await message.answer(t(message.from_user.id, "change_nickname"))
+
+
+@dp.callback_query(F.data == "user:chname")
+async def cb_user_chname(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(ChangeNicknameState.waiting_new_name)
+    await callback.message.answer(t(callback.from_user.id, "change_nickname"))
+    await callback.answer()
+
+
+@dp.message(StateFilter(ChangeNicknameState.waiting_new_name), F.text)
+async def process_new_nickname(message: types.Message, state: FSMContext):
+    nick = message.text.strip()
+    if nick.startswith("/"):
+        await message.answer(t(message.from_user.id, "nickname_bad_slash"))
+        return
+    if not (2 <= len(nick) <= 30):
+        await message.answer(t(message.from_user.id, "nickname_bad_len"))
+        return
+    uid_str = str(message.from_user.id)
+    DATABASE.setdefault("users", {}).setdefault(uid_str, {})
+    DATABASE["users"][uid_str]["nickname"] = nick
+    await db_collection.update_one({"_id": DB_DOC_ID},
+                                   {"$set": {f"data.users.{uid_str}.nickname": nick}}, upsert=True)
+    await state.clear()
+    await message.answer(t(message.from_user.id, "nickname_updated", nick=html.escape(nick)),
+                         reply_markup=get_main_menu_keyboard(message.from_user.id))
+
+
 @dp.message(Command("catalog"))
 async def cmd_catalog(message: types.Message, state: FSMContext):
     await state.clear()
@@ -2023,43 +1951,6 @@ async def cmd_language(message: types.Message, state: FSMContext):
     await state.clear()
     await safe_send_or_edit(message, t(message.from_user.id, "choose_language"),
                             reply_markup=get_language_keyboard(message.from_user.id))
-
-
-@dp.message(Command("achievements"))
-async def cmd_achievements(message: types.Message, state: FSMContext):
-    await state.clear()
-    uid_str = str(message.from_user.id)
-    user = DATABASE.get("users", {}).get(uid_str, {})
-    have = set(user.get("achievements", []))
-    lines = ["🏆 <b>Ваши достижения</b>\n"]
-    for code, info in ACHIEVEMENTS.items():
-        mark = "✅" if code in have else "🔒"
-        lines.append(f"{mark} {info['icon']} {info['name']}")
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t(message.from_user.id, "back_menu"), callback_data="menu:main")]])
-    await message.answer("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=markup)
-
-
-@dp.message(Command("remind"))
-async def cmd_remind(message: types.Message, state: FSMContext):
-    await state.clear()
-    uid_str = str(message.from_user.id)
-    user = DATABASE.get("users", {}).get(uid_str, {})
-    pr = user.get("personal_reminder") or {"enabled": False, "time": "19:00"}
-    is_on = pr.get("enabled")
-    text = (
-        f"⏰ <b>Личное напоминание о задаче дня</b>\n\n"
-        f"Статус: {'🟢 включено' if is_on else '🔴 выключено'}\n"
-        f"Время: <b>{pr.get('time', '19:00')}</b> (Ереван)\n\n"
-        f"Бот пришлёт вам задачу дня в указанное время."
-    )
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Выключить" if is_on else "✅ Включить",
-                              callback_data="prem:toggle")],
-        [InlineKeyboardButton(text="⏱ Изменить время", callback_data="prem:settime")],
-        [InlineKeyboardButton(text=t(message.from_user.id, "back_menu"), callback_data="menu:main")],
-    ])
-    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 # ============================================================
@@ -2112,8 +2003,86 @@ async def cb_catalog(callback: types.CallbackQuery):
 
 
 # ============================================================
-# CATALOG & FILES
+# CATALOG & CATEGORIES MANAGEMENT
 # ============================================================
+
+@dp.callback_query(F.data == "admin:cats")
+async def cb_admin_cats(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
+        return
+    await state.clear()
+    cats = DATABASE.get("categories", {})
+    lines = ["📂 <b>Управление разделами каталога</b>\n"]
+    rows = []
+    for k, v in cats.items():
+        cnt = len(v.get("files", []))
+        lines.append(f"• <b>{html.escape(v.get('title', k))}</b>: {cnt} файлов (код: <code>{k}</code>)")
+        rows.append([InlineKeyboardButton(text=f"🗑 Удалить «{v.get('title', k)}»", callback_data=f"admin:delcat:{k}")])
+    rows.append([InlineKeyboardButton(text="➕ Создать новый раздел", callback_data="admin:add_cat")])
+    rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_admin"), callback_data="admin:main")])
+    await safe_send_or_edit(callback, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin:add_cat")
+async def cb_admin_add_cat(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
+        return
+    await state.set_state(AdminAddCategory.waiting_for_title)
+    await callback.message.answer(
+        "📂 Введите название нового раздела (можно с эмодзи):\n"
+        "Например: <code>📖 Зарубежные олимпиады</code>\n"
+        "/cancel — отмена"
+    )
+    await callback.answer()
+
+
+@dp.message(StateFilter(AdminAddCategory.waiting_for_title), F.text)
+async def process_add_category_title(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    title = message.text.strip()
+    if not title:
+        await message.answer("⚠️ Введите название раздела:")
+        return
+    # Generate clean unique key
+    base_key = re.sub(r"[^a-zA-Z0-9_]", "", title.lower())[:20]
+    if not base_key:
+        base_key = f"cat_{uuid.uuid4().hex[:6]}"
+    cat_key = base_key
+    counter = 1
+    while cat_key in DATABASE.get("categories", {}):
+        cat_key = f"{base_key}_{counter}"
+        counter += 1
+
+    DATABASE.setdefault("categories", {})[cat_key] = {
+        "title": title,
+        "files": [],
+    }
+    await save_db(DATABASE)
+    await state.clear()
+    await message.answer(f"✅ Раздел «{html.escape(title)}» успешно создан!",
+                         reply_markup=await get_catalog_keyboard(message.from_user.id))
+
+
+@dp.callback_query(F.data.startswith("admin:delcat:"))
+async def cb_admin_delcat(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
+        return
+    cat_key = callback.data.split(":", 2)[2]
+    cats = DATABASE.get("categories", {})
+    if cat_key not in cats:
+        await callback.answer("Раздел не найден", show_alert=True)
+        return
+    cat_title = cats[cat_key].get("title", cat_key)
+    del cats[cat_key]
+    await save_db(DATABASE)
+    await callback.message.answer(f"🗑 Раздел «{html.escape(cat_title)}» удалён.")
+    await cb_admin_cats(callback, None)
+
 
 @dp.callback_query(F.data.startswith("cat:"))
 async def cb_category(callback: types.CallbackQuery):
@@ -2132,7 +2101,7 @@ async def cb_category(callback: types.CallbackQuery):
         )])
     builder.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_catalog"), callback_data="menu:catalog")])
     cat_title_tr = await localize(cat_data.get('title', cat_key), callback.from_user.id)
-    text = f"<b>{html.escape(cat_title_tr)}</b>\n{len(files)}"
+    text = f"<b>{html.escape(cat_title_tr)}</b>\nМатериалов: {len(files)}"
     await safe_send_or_edit(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
@@ -2214,10 +2183,6 @@ async def cb_fav_toggle(callback: types.CallbackQuery):
         await callback.answer(msg)
     else:
         await callback.answer(t(callback.from_user.id, "no_file"), show_alert=True)
-    try:
-        await check_and_award_achievements(callback.from_user.id)
-    except Exception:
-        logger.exception("Achievements check failed")
 
 
 @dp.callback_query(F.data.startswith("file:like:"))
@@ -2269,7 +2234,7 @@ async def cb_file_comments(callback: types.CallbackQuery, state: FSMContext):
     for c in comments[-10:]:
         nick = c.get('nickname') or c.get('first_name') or '—'
         at = (c.get("at") or "")[:10]
-        lines.append(f"🪪 <b>{html.escape(nick)}</b> <i>{at}</i>\n{html.escape(c.get('text',''))}\n")
+        lines.append(f"🪪 {html.escape(nick)} <i>{at}</i>\n{html.escape(c.get('text',''))}\n")
     if not comments:
         lines.append("Пока никто не оставил комментарий.")
     rows = [
@@ -2368,7 +2333,7 @@ async def process_file_note(message: types.Message, state: FSMContext):
 
 
 # ============================================================
-# TAG SEARCH
+# TAG SEARCH FOR MATERIALS & DAILY TASKS
 # ============================================================
 
 @dp.callback_query(F.data == "search:main")
@@ -2378,6 +2343,9 @@ async def cb_search_main(callback: types.CallbackQuery, state: FSMContext):
     markup = await get_tag_toggle_keyboard([], "search:tag", "search:go",
                                            callback.from_user.id,
                                            t(callback.from_user.id, "search_reset"), "search:reset")
+    # Add explicit button to search tasks as well
+    markup.inline_keyboard.insert(-2, [InlineKeyboardButton(text=t(callback.from_user.id, "search_tasks_btn"),
+                                                            callback_data="search:tasks")])
     await safe_send_or_edit(callback, t(callback.from_user.id, "search_title"), reply_markup=markup)
     await callback.answer()
 
@@ -2391,6 +2359,8 @@ async def cb_search_tag(callback: types.CallbackQuery, state: FSMContext):
     markup = await get_tag_toggle_keyboard(selected, "search:tag", "search:go",
                                            callback.from_user.id,
                                            t(callback.from_user.id, "search_reset"), "search:reset")
+    markup.inline_keyboard.insert(-2, [InlineKeyboardButton(text=t(callback.from_user.id, "search_tasks_btn"),
+                                                            callback_data="search:tasks")])
     await safe_send_or_edit(callback, t(callback.from_user.id, "search_selected_n", n=len(selected)),
                             reply_markup=markup)
     await callback.answer(t(callback.from_user.id, "search_tag_off" if removed else "search_tag_on"))
@@ -2402,6 +2372,8 @@ async def cb_search_reset(callback: types.CallbackQuery, state: FSMContext):
     markup = await get_tag_toggle_keyboard([], "search:tag", "search:go",
                                            callback.from_user.id,
                                            t(callback.from_user.id, "search_reset"), "search:reset")
+    markup.inline_keyboard.insert(-2, [InlineKeyboardButton(text=t(callback.from_user.id, "search_tasks_btn"),
+                                                            callback_data="search:tasks")])
     await safe_send_or_edit(callback, t(callback.from_user.id, "search_reset_done"), reply_markup=markup)
     await callback.answer()
 
@@ -2442,6 +2414,106 @@ async def cb_search_go(callback: types.CallbackQuery, state: FSMContext):
     header = t(callback.from_user.id, "search_tagged", tags=html.escape(' '.join(tags_tr)))
     await show_search_results(callback, results, header, callback.from_user.id)
     await callback.answer()
+
+
+@dp.callback_query(F.data == "search:tasks")
+async def cb_search_tasks(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = data.get("selected_tags", [])
+    if not selected:
+        await callback.answer(t(callback.from_user.id, "search_pick_one"), show_alert=True)
+        return
+    sel_lower = {x.lower() for x in selected}
+    results = []
+    for date_str in get_dates_sorted():
+        group = DATABASE.get("daily_tasks", {}).get(date_str, {})
+        for idx, task in enumerate(group.get("tasks", [])):
+            task_tags = {x.lower() for x in task.get("tags", [])}
+            if sel_lower & task_tags:
+                results.append((date_str, idx, task))
+    tags_tr = await localize_list(selected, callback.from_user.id)
+    header = f"🎯 <b>Задачи дня по тегам:</b> {html.escape(' '.join(tags_tr))}\n"
+    rows = []
+    if results:
+        header += f"Найдено задач: <b>{len(results)}</b>"
+        for d, idx, tsk in results[:20]:
+            preview = (tsk.get("text") or "Задача с фото").strip()[:40]
+            rows.append([InlineKeyboardButton(text=f"🎯 {d} #{idx+1}: {preview}",
+                                              callback_data=f"task:view:{d}:{idx}")])
+    else:
+        header += "\n😔 Задач с выбранными тегами не найдено."
+    rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "search_new"), callback_data="search:main")])
+    rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_menu"), callback_data="menu:main")])
+    await safe_send_or_edit(callback, header, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+# Dedicated entry for tasks by tag
+@dp.callback_query(F.data == "tasktagsearch:main")
+async def cb_tasktagsearch_main(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(TaskTagSearch.selecting)
+    await state.update_data(selected_tags=[])
+    markup = await get_tag_toggle_keyboard([], "tasksearchtag", "tasksearchtag:go",
+                                           callback.from_user.id,
+                                           t(callback.from_user.id, "search_reset"), "tasksearchtag:reset")
+    text = "🎯 <b>Поиск задач дня по тегам</b>\n\nВыберите тег(и) и нажмите «💾 OK»:"
+    await safe_send_or_edit(callback, text, reply_markup=markup)
+    await callback.answer()
+
+
+@dp.callback_query(StateFilter(TaskTagSearch.selecting), F.data.startswith("tasksearchtag:"))
+async def cb_tasksearchtag_toggle(callback: types.CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    action = parts[1]
+    if action == "reset":
+        await state.update_data(selected_tags=[])
+        markup = await get_tag_toggle_keyboard([], "tasksearchtag", "tasksearchtag:go",
+                                               callback.from_user.id,
+                                               t(callback.from_user.id, "search_reset"), "tasksearchtag:reset")
+        await safe_send_or_edit(callback, "🎯 Выбор тегов сброшен.", reply_markup=markup)
+        await callback.answer()
+        return
+    elif action == "go":
+        data = await state.get_data()
+        selected = data.get("selected_tags", [])
+        if not selected:
+            await callback.answer(t(callback.from_user.id, "search_pick_one"), show_alert=True)
+            return
+        sel_lower = {x.lower() for x in selected}
+        results = []
+        for date_str in get_dates_sorted():
+            group = DATABASE.get("daily_tasks", {}).get(date_str, {})
+            for idx, task in enumerate(group.get("tasks", [])):
+                task_tags = {x.lower() for x in task.get("tags", [])}
+                if sel_lower & task_tags:
+                    results.append((date_str, idx, task))
+        tags_tr = await localize_list(selected, callback.from_user.id)
+        header = f"🎯 <b>Задачи дня по тегам:</b> {html.escape(' '.join(tags_tr))}\n"
+        rows = []
+        if results:
+            header += f"Найдено задач: <b>{len(results)}</b>"
+            for d, idx, tsk in results[:25]:
+                preview = (tsk.get("text") or "Задача с фото").strip()[:40]
+                rows.append([InlineKeyboardButton(text=f"🎯 {d} #{idx+1}: {preview}",
+                                                  callback_data=f"task:view:{d}:{idx}")])
+        else:
+            header += "\n😔 Задач с выбранными тегами не найдено."
+        rows.append([InlineKeyboardButton(text="🏷 Выбрать другие теги", callback_data="tasktagsearch:main")])
+        rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_menu"), callback_data="menu:main")])
+        await safe_send_or_edit(callback, header, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await callback.answer()
+        return
+
+    # Toggle tag index
+    res = await toggle_tag_by_index(callback, state)
+    if not res:
+        return
+    selected, tag, removed = res
+    markup = await get_tag_toggle_keyboard(selected, "tasksearchtag", "tasksearchtag:go",
+                                           callback.from_user.id,
+                                           t(callback.from_user.id, "search_reset"), "tasksearchtag:reset")
+    await safe_send_or_edit(callback, f"🎯 Выбрано тегов: {len(selected)}", reply_markup=markup)
+    await callback.answer(t(callback.from_user.id, "search_tag_off" if removed else "search_tag_on"))
 
 
 @dp.message(StateFilter(TagSearch.selecting), F.text)
@@ -2746,106 +2818,6 @@ async def cb_challenge(callback: types.CallbackQuery, state: FSMContext):
     chosen = random.choice(files)
     await show_file_card(callback, chosen["uid"], callback.from_user.id)
     await callback.answer("🎲")
-
-
-# ============================================================
-# PERSONAL REMINDERS
-# ============================================================
-
-@dp.callback_query(F.data == "prem:menu")
-async def cb_prem_menu(callback: types.CallbackQuery, state: FSMContext):
-    await cmd_remind(callback.message, state)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "prem:toggle")
-async def cb_prem_toggle(callback: types.CallbackQuery, state: FSMContext):
-    uid_str = str(callback.from_user.id)
-    user = DATABASE.setdefault("users", {}).setdefault(uid_str, {})
-    pr = user.get("personal_reminder") or {"enabled": False, "time": "19:00"}
-    pr["enabled"] = not pr.get("enabled", False)
-    user["personal_reminder"] = pr
-    await save_db(DATABASE)
-    await callback.answer("✅ Включено" if pr["enabled"] else "❌ Выключено")
-    await cmd_remind(callback.message, state)
-
-
-@dp.callback_query(F.data == "prem:settime")
-async def cb_prem_settime(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(PersonalReminder.waiting_time)
-    await callback.message.answer(
-        "⏱ Отправьте время в формате <code>ЧЧ:ММ</code> (Ереван, UTC+4):\n"
-        "Например: <code>20:30</code>",
-        parse_mode=ParseMode.HTML)
-    await callback.answer()
-
-
-@dp.message(StateFilter(PersonalReminder.waiting_time), F.text)
-async def process_prem_time(message: types.Message, state: FSMContext):
-    raw = message.text.strip()
-    if not re.match(r"^\d{1,2}:\d{2}$", raw):
-        await message.answer("⚠️ Формат: <code>ЧЧ:ММ</code>", parse_mode=ParseMode.HTML)
-        return
-    hh, mm = map(int, raw.split(":"))
-    if not (0 <= hh < 24 and 0 <= mm < 60):
-        await message.answer("⚠️ Некорректное время.")
-        return
-    uid_str = str(message.from_user.id)
-    user = DATABASE.setdefault("users", {}).setdefault(uid_str, {})
-    pr = user.get("personal_reminder") or {"enabled": True, "time": "19:00"}
-    pr["time"] = f"{hh:02d}:{mm:02d}"
-    pr["enabled"] = True
-    user["personal_reminder"] = pr
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer(f"✅ Время установлено: <b>{pr['time']}</b>",
-                         parse_mode=ParseMode.HTML,
-                         reply_markup=get_main_menu_keyboard(message.from_user.id))
-
-
-async def personal_reminder_scheduler():
-    while True:
-        try:
-            now = datetime.now(YEREVAN_TZ)
-            hhmm = now.strftime("%H:%M")
-            today = now.strftime("%Y-%m-%d")
-            for uid_str, u in list(DATABASE.get("users", {}).items()):
-                pr = u.get("personal_reminder") or {}
-                if not pr.get("enabled"):
-                    continue
-                if pr.get("time") != hhmm:
-                    continue
-                if pr.get("last_sent_date") == today:
-                    continue
-                try:
-                    group = DATABASE.get("daily_tasks", {}).get(today)
-                    if group and group.get("tasks"):
-                        task = group["tasks"][0]
-                        txt = (task.get("text") or "Текст задачи — в боте").strip()[:200]
-                        msg = f"🎯 <b>Задача дня</b>\n\n{html.escape(txt)}"
-                    else:
-                        msg = "🎯 Сегодня задачи пока нет, но загляните в архив!"
-                    await bot.send_message(int(uid_str), msg, parse_mode=ParseMode.HTML)
-                    pr["last_sent_date"] = today
-                    await save_db(DATABASE)
-                except Exception:
-                    logger.exception("Personal reminder failed for %s", uid_str)
-            await asyncio.sleep(60)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("personal_reminder_scheduler error")
-            await asyncio.sleep(60)
-
-
-# ============================================================
-# ACHIEVEMENTS MENU
-# ============================================================
-
-@dp.callback_query(F.data == "ach:main")
-async def cb_ach_main(callback: types.CallbackQuery, state: FSMContext):
-    await cmd_achievements(callback.message, state)
-    await callback.answer()
 
 
 # ============================================================
@@ -3273,10 +3245,6 @@ async def process_numans(message: types.Message, state: FSMContext):
         add_pts = 10 * mult
         u["score"] = u.get("score", 0) + add_pts
         await save_db(DATABASE)
-        try:
-            await check_and_award_achievements(message.from_user.id)
-        except Exception:
-            logger.exception("Achievements check failed")
         await message.answer(f"✅ <b>Верно!</b> +{add_pts} очков.", parse_mode=ParseMode.HTML)
         await state.clear()
         await show_task(message, date_str, idx, message.from_user.id)
@@ -3313,7 +3281,7 @@ async def cb_task_sols(callback: types.CallbackQuery):
                 snippet = (snippet + " [📷]").strip()
             if s.get("document_file_id"):
                 snippet = (snippet + " [📎]").strip()
-            lines.append(f"⭐ <b>{sol_display(s, uid_str)}</b> — {g}\n<i>{html.escape(snippet[:150])}</i>\n")
+            lines.append(f"⭐ {sol_display(s, uid_str)} — {g}\n<i>{html.escape(snippet[:150])}</i>\n")
             builder.append([InlineKeyboardButton(
                 text=t(callback.from_user.id, "task_sol_view", nick=sol_button_name(s, uid_str), grade=g),
                 callback_data=f"solfull:{date_str}:{idx}:{uid_str}")])
@@ -3340,7 +3308,7 @@ async def cb_solfull(callback: types.CallbackQuery):
         await callback.answer(t(callback.from_user.id, "task_sol_pending_user"), show_alert=True)
         return
     grade = sol.get("grade")
-    header = f"🪪 <b>{sol_display(sol, uid_str)}</b>"
+    header = f"🪪 {sol_display(sol, uid_str)}"
     header += f" — ⭐ {grade}/10" if grade else " — ✅"
     text = sol.get("text") or ""
     if text:
@@ -3459,6 +3427,7 @@ async def cb_grade(callback: types.CallbackQuery):
         await award_points(int(uid_str), delta)
 
     name = sol.get("nickname") or get_nickname(uid_str)
+    # Send notification message directly to user about approved solution & grade
     try:
         if new_grade > 0:
             if prev_grade:
@@ -3471,12 +3440,7 @@ async def cb_grade(callback: types.CallbackQuery):
             await bot.send_message(int(uid_str), t(int(uid_str), "task_approved_notify",
                                                     date=date_str, num=idx + 1))
     except Exception:
-        pass
-
-    try:
-        await check_and_award_achievements(int(uid_str))
-    except Exception:
-        logger.exception("Achievements check failed")
+        logger.warning("Failed to notify user %s about solution", uid_str)
 
     label = t(callback.from_user.id, "task_sol_grade_full", grade=new_grade) if new_grade > 0 else t(callback.from_user.id, "task_grade_zero")
     await callback.message.answer(t(callback.from_user.id, "task_admin_graded",
@@ -3665,7 +3629,7 @@ async def cb_submit_confirm(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     notify_text = (
         "📥 <b>Новая заявка на файл</b>\n\n"
-        f"🪪 Ник: <b>{html.escape(payload['nickname'] or '—')}</b>\n"
+        f"🪪 Ник: {html.escape(payload['nickname'] or '—')}\n"
         f"👤 TG: {html.escape(payload['first_name'] or '')}"
         + (f" · @{html.escape(payload['username'])}" if payload["username"] else "")
         + "\n\n"
@@ -3712,231 +3676,6 @@ async def cb_admin_main(callback: types.CallbackQuery, state: FSMContext):
     await safe_send_or_edit(callback, t(callback.from_user.id, "admin_title"),
                             reply_markup=get_admin_menu_keyboard(callback.from_user.id))
     await callback.answer()
-
-
-# ============================================================
-# ADMIN: REMINDER SETTINGS
-# ============================================================
-
-def _calc_reminder_day() -> int:
-    rem = get_reminder_settings()
-    start_day = int(rem.get("start_day") or 1)
-    sd = rem.get("start_date")
-    if sd:
-        try:
-            start_date = datetime.strptime(sd, "%Y-%m-%d").date()
-            today = datetime.now(MSK_TZ).date()
-            delta = (today - start_date).days
-            return start_day + max(0, delta)
-        except Exception:
-            pass
-    return start_day
-
-
-async def render_reminder_settings(target, user_id: int):
-    rem = get_reminder_settings()
-    day_now = _calc_reminder_day()
-    text_ru = rem.get("text_ru") or TEXTS["ru"]["reminder"]
-    text_en = rem.get("text_en") or TEXTS["en"]["reminder"]
-    try:
-        preview = text_ru.format(n=day_now)
-    except Exception:
-        preview = text_ru
-    target_label = {
-        "channel": t(user_id, "rem_target_channel"),
-        "users": t(user_id, "rem_target_users"),
-        "both": t(user_id, "rem_target_both"),
-    }.get(rem.get("target", "channel"), rem.get("target", "channel"))
-    text = t(user_id, "rem_title",
-             time=rem.get("time", "19:00"),
-             channel=rem.get("channel", CHANNEL_ID),
-             target=target_label,
-             start_day=rem.get("start_day", 1),
-             start_date=rem.get("start_date") or "—",
-             text_ru=html.escape(text_ru),
-             text_en=html.escape(text_en),
-             preview=html.escape(preview))
-    await safe_send_or_edit(target, text, reply_markup=get_reminder_settings_keyboard(user_id))
-
-
-@dp.callback_query(F.data == "admin:reminder")
-async def cb_admin_reminder(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.clear()
-    await render_reminder_settings(callback, callback.from_user.id)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "rem:back")
-async def cb_rem_back(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.clear()
-    await render_reminder_settings(callback, callback.from_user.id)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("rem:edit:"))
-async def cb_rem_edit(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    field = callback.data.split(":")[2]
-    if field == "time":
-        await state.set_state(ReminderAdmin.waiting_time)
-        await callback.message.answer(t(callback.from_user.id, "rem_ask_time"))
-    elif field == "text_ru":
-        await state.set_state(ReminderAdmin.waiting_text_ru)
-        await callback.message.answer(t(callback.from_user.id, "rem_ask_text_ru"))
-    elif field == "text_en":
-        await state.set_state(ReminderAdmin.waiting_text_en)
-        await callback.message.answer(t(callback.from_user.id, "rem_ask_text_en"))
-    elif field == "start":
-        await state.set_state(ReminderAdmin.waiting_start)
-        await callback.message.answer(t(callback.from_user.id, "rem_ask_start"))
-    elif field == "channel":
-        await state.set_state(ReminderAdmin.waiting_channel)
-        await callback.message.answer(t(callback.from_user.id, "rem_ask_channel"))
-    elif field == "target":
-        rows = [
-            [InlineKeyboardButton(text=t(callback.from_user.id, "rem_target_channel"),
-                                  callback_data="rem:settarget:channel")],
-            [InlineKeyboardButton(text=t(callback.from_user.id, "rem_target_users"),
-                                  callback_data="rem:settarget:users")],
-            [InlineKeyboardButton(text=t(callback.from_user.id, "rem_target_both"),
-                                  callback_data="rem:settarget:both")],
-            [InlineKeyboardButton(text=t(callback.from_user.id, "rem_back"),
-                                  callback_data="rem:back")],
-        ]
-        await safe_send_or_edit(callback, t(callback.from_user.id, "rem_target_pick"),
-                                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("rem:settarget:"))
-async def cb_rem_settarget(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    target = callback.data.split(":")[2]
-    if target not in ("channel", "users", "both"):
-        await callback.answer("Error", show_alert=True)
-        return
-    rem = get_reminder_settings()
-    rem["target"] = target
-    await save_db(DATABASE)
-    await callback.answer(t(callback.from_user.id, "rem_saved"))
-    await render_reminder_settings(callback, callback.from_user.id)
-
-
-@dp.message(StateFilter(ReminderAdmin.waiting_time), F.text)
-async def process_rem_time(message: types.Message, state: FSMContext):
-    raw = message.text.strip()
-    if not re.match(r"^\d{1,2}:\d{2}$", raw):
-        await message.answer(t(message.from_user.id, "rem_bad_time"))
-        return
-    hh, mm = map(int, raw.split(":"))
-    if not (0 <= hh < 24 and 0 <= mm < 60):
-        await message.answer(t(message.from_user.id, "rem_bad_time"))
-        return
-    rem = get_reminder_settings()
-    rem["time"] = f"{hh:02d}:{mm:02d}"
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer(t(message.from_user.id, "rem_saved"))
-    await render_reminder_settings(message, message.from_user.id)
-    await restart_reminder_scheduler()
-
-
-@dp.message(StateFilter(ReminderAdmin.waiting_text_ru), F.text)
-async def process_rem_text_ru(message: types.Message, state: FSMContext):
-    rem = get_reminder_settings()
-    rem["text_ru"] = message.text.strip()
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer(t(message.from_user.id, "rem_saved"))
-    await render_reminder_settings(message, message.from_user.id)
-
-
-@dp.message(StateFilter(ReminderAdmin.waiting_text_en), F.text)
-async def process_rem_text_en(message: types.Message, state: FSMContext):
-    rem = get_reminder_settings()
-    rem["text_en"] = message.text.strip()
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer(t(message.from_user.id, "rem_saved"))
-    await render_reminder_settings(message, message.from_user.id)
-
-
-@dp.message(StateFilter(ReminderAdmin.waiting_start), F.text)
-async def process_rem_start(message: types.Message, state: FSMContext):
-    raw = (message.text or "").strip()
-    day_match = re.search(r"\d{1,6}", raw)
-    if not day_match:
-        await message.answer(t(message.from_user.id, "rem_bad_start"))
-        return
-    start_day = int(day_match.group(0))
-    if not (1 <= start_day <= 100000):
-        await message.answer(t(message.from_user.id, "rem_bad_start"))
-        return
-
-    date_match = re.search(r"(\d{4})\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})", raw)
-    if date_match:
-        y, mo, d = date_match.groups()
-        try:
-            dt = datetime(int(y), int(mo), int(d))
-            start_date = dt.strftime("%Y-%m-%d")
-        except ValueError:
-            await message.answer(t(message.from_user.id, "rem_bad_date"))
-            return
-    else:
-        start_date = datetime.now(MSK_TZ).strftime("%Y-%m-%d")
-
-    rem = get_reminder_settings()
-    rem["start_day"] = start_day
-    rem["start_date"] = start_date
-    await save_db(DATABASE)
-    await state.clear()
-
-    lang = get_user_lang(message.from_user.id)
-    extra = (
-        f"\n📆 Стартовый день: <b>{start_day}</b>, отсчёт с: <b>{start_date}</b>"
-        if lang == "ru"
-        else
-        f"\n📆 Start day: <b>{start_day}</b>, from: <b>{start_date}</b>"
-    )
-    await message.answer(t(message.from_user.id, "rem_saved") + extra)
-    await render_reminder_settings(message, message.from_user.id)
-
-
-@dp.message(StateFilter(ReminderAdmin.waiting_channel), F.text)
-async def process_rem_channel(message: types.Message, state: FSMContext):
-    raw = message.text.strip()
-    if not (raw.startswith("@") or raw.lstrip("-").isdigit()):
-        await message.answer(t(message.from_user.id, "rem_ask_channel"))
-        return
-    rem = get_reminder_settings()
-    rem["channel"] = raw
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer(t(message.from_user.id, "rem_saved"))
-    await render_reminder_settings(message, message.from_user.id)
-    await restart_reminder_scheduler()
-
-
-@dp.callback_query(F.data == "rem:test")
-async def cb_rem_test(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    try:
-        await send_reminder_now()
-        await callback.answer(t(callback.from_user.id, "rem_test_ok"), show_alert=False)
-    except Exception as e:
-        await callback.answer(t(callback.from_user.id, "rem_test_fail", err=str(e)), show_alert=True)
 
 
 # ============================================================
@@ -4408,7 +4147,7 @@ async def cb_admin_stats(callback: types.CallbackQuery, state: FSMContext):
     pending_subs = await submissions_collection.count_documents({"status": "pending"})
     top = sorted(users.items(), key=lambda kv: kv[1].get("score", 0), reverse=True)[:5]
     top_lines = "\n".join(
-        f"  {i}. 🪪 {html.escape(u.get('nickname') or u.get('username') or f'id{uid_str}')} — "
+        f"  {i}. {html.escape(u.get('nickname') or u.get('username') or f'id{uid_str}')} — "
         f"{u.get('score', 0)}"
         for i, (uid_str, u) in enumerate(top, 1)
     ) or "  —"
@@ -4544,11 +4283,16 @@ async def cb_subcat(callback: types.CallbackQuery):
     await save_db(DATABASE)
     await save_submission(sub_id, {"status": "published"})
     cat_title = DATABASE["categories"][cat_key].get("title", cat_key)
+    # Notify user that submitted material was approved and published
     try:
-        await bot.send_message(sub.get("user_id"),
-                               t(sub.get("user_id"), "admin_subs_user_notify", title=entry['caption']))
+        user_uid = sub.get("user_id")
+        if user_uid:
+            await bot.send_message(user_uid,
+                                   t(user_uid, "admin_subs_user_notify",
+                                     title=entry['caption'], cat=cat_title))
     except Exception:
-        logger.warning("Failed to notify user %s", sub.get("user_id"))
+        logger.warning("Failed to notify user %s about published material", sub.get("user_id"))
+
     await callback.message.answer(t(callback.from_user.id, "admin_subs_published",
                                     cat=html.escape(cat_title)))
     await announce_file_to_channel(entry, [cat_title])
@@ -4567,8 +4311,13 @@ async def cb_sub_reject(callback: types.CallbackQuery):
         return
     await save_submission(sub_id, {"status": "rejected",
                                    "processed_at": datetime.now(YEREVAN_TZ).isoformat()})
+    # Notify user that submitted material was rejected
     try:
-        await bot.send_message(sub.get("user_id"), t(sub.get("user_id"), "admin_subs_reject_notify"))
+        user_uid = sub.get("user_id")
+        if user_uid:
+            await bot.send_message(user_uid,
+                                   t(user_uid, "admin_subs_reject_notify",
+                                     title=sub.get("title") or "материал"))
     except Exception:
         pass
     await callback.message.answer(t(callback.from_user.id, "admin_subs_rejected"))
@@ -4666,7 +4415,7 @@ async def process_broadcast(message: types.Message, state: FSMContext):
 
 
 # ============================================================
-# ADMIN: EDIT / DELETE FILE
+# ADMIN: EDIT / DELETE FILE & DESCRIPTION
 # ============================================================
 
 @dp.callback_query(F.data.startswith("admin:edit_file:"))
@@ -4684,7 +4433,8 @@ async def cb_edit_file(callback: types.CallbackQuery, state: FSMContext):
     markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t(callback.from_user.id, "admin_edit_replace"), callback_data="admin:efile:doc")],
         [InlineKeyboardButton(text=t(callback.from_user.id, "admin_edit_rename"), callback_data="admin:efile:title"),
-         InlineKeyboardButton(text=t(callback.from_user.id, "admin_edit_tags"), callback_data="admin:efile:tags")],
+         InlineKeyboardButton(text=t(callback.from_user.id, "admin_edit_desc"), callback_data="admin:efile:desc")],
+        [InlineKeyboardButton(text=t(callback.from_user.id, "admin_edit_tags"), callback_data="admin:efile:tags")],
         [InlineKeyboardButton(text=t(callback.from_user.id, "admin_edit_back"), callback_data=f"file:view:{uid}")],
     ])
     await safe_send_or_edit(callback,
@@ -4738,6 +4488,32 @@ async def process_efile_title(message: types.Message, state: FSMContext):
     await save_db(DATABASE)
     await state.clear()
     await message.answer(t(message.from_user.id, "admin_edit_title_done", n=n))
+    await show_file_card(message, uid, message.from_user.id)
+
+
+@dp.callback_query(F.data == "admin:efile:desc")
+async def cb_efile_desc(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
+        return
+    await state.set_state(EditFile.waiting_for_desc)
+    await callback.message.answer(t(callback.from_user.id, "admin_edit_ask_desc"))
+    await callback.answer()
+
+
+@dp.message(StateFilter(EditFile.waiting_for_desc), F.text)
+async def process_efile_desc(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    uid = data.get("edit_uid")
+    if not uid:
+        await state.clear()
+        return
+    raw = message.text.strip()
+    new_desc = "" if raw.lower() in ("очистить", "clear", "-") else raw
+    n = update_file_field(uid, "summary", new_desc)
+    await save_db(DATABASE)
+    await state.clear()
+    await message.answer(t(message.from_user.id, "admin_edit_desc_done", n=n))
     await show_file_card(message, uid, message.from_user.id)
 
 
@@ -4862,103 +4638,6 @@ async def inline_catalog_search(query: InlineQuery):
 
 
 # ============================================================
-# DAILY REMINDER
-# ============================================================
-
-def _calc_reminder_day_for_date(target_date) -> int:
-    rem = get_reminder_settings()
-    start_day = int(rem.get("start_day") or 1)
-    sd = rem.get("start_date")
-    if sd:
-        try:
-            start_date = datetime.strptime(sd, "%Y-%m-%d").date()
-            delta = (target_date - start_date).days
-            return start_day + max(0, delta)
-        except Exception:
-            pass
-    return start_day
-
-
-async def send_reminder_now():
-    rem = get_reminder_settings()
-    today = datetime.now(MSK_TZ).date()
-    day_number = _calc_reminder_day_for_date(today)
-
-    text_ru = rem.get("text_ru") or TEXTS["ru"]["reminder"]
-    text_en = rem.get("text_en") or TEXTS["en"]["reminder"]
-    try:
-        msg_ru = text_ru.format(n=day_number)
-    except Exception:
-        msg_ru = text_ru
-    try:
-        msg_en = text_en.format(n=day_number)
-    except Exception:
-        msg_en = text_en
-
-    channel = rem.get("channel") or CHANNEL_ID
-    target = rem.get("target", "channel")
-
-    if target in ("channel", "both"):
-        try:
-            await bot.send_message(channel, msg_ru)
-        except Exception:
-            logger.exception("Failed to send reminder to channel %s", channel)
-            raise
-
-    if target in ("users", "both"):
-        for uid_str, u in list(DATABASE.get("users", {}).items()):
-            lang = u.get("language", "ru")
-            text = msg_en if lang == "en" else msg_ru
-            try:
-                await bot.send_message(int(uid_str), text)
-            except Exception:
-                pass
-            await asyncio.sleep(0.05)
-
-    logger.info("Reminder sent (day %s, target=%s, channel=%s)", day_number, target, channel)
-
-
-async def reminder_scheduler():
-    while True:
-        try:
-            rem = get_reminder_settings()
-            time_str = rem.get("time", "19:00")
-            try:
-                hh, mm = map(int, time_str.split(":"))
-            except Exception:
-                hh, mm = 19, 0
-            now = datetime.now(MSK_TZ)
-            target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-            if target <= now:
-                target += timedelta(days=1)
-            wait_seconds = (target - now).total_seconds()
-            logger.info("Next reminder in %.0f sec (at %s MSK)", wait_seconds, target)
-            await asyncio.sleep(wait_seconds)
-            try:
-                await send_reminder_now()
-            except Exception:
-                logger.exception("Reminder send failed")
-            await asyncio.sleep(60)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Reminder scheduler error")
-            await asyncio.sleep(60)
-
-
-async def restart_reminder_scheduler():
-    global REMINDER_TASK
-    if REMINDER_TASK and not REMINDER_TASK.done():
-        REMINDER_TASK.cancel()
-        try:
-            await REMINDER_TASK
-        except Exception:
-            pass
-    REMINDER_TASK = asyncio.create_task(reminder_scheduler())
-    logger.info("Reminder scheduler restarted")
-
-
-# ============================================================
 # FALLBACK
 # ============================================================
 
@@ -4983,21 +4662,18 @@ async def cb_unhandled(callback: types.CallbackQuery):
 # ============================================================
 
 async def on_startup(bot: Bot):
-    global DATABASE, BOT_USERNAME, REMINDER_TASK
+    global DATABASE, BOT_USERNAME
     DATABASE = await load_db()
     me = await bot.get_me()
     BOT_USERNAME = me.username or ""
     commands = [
         BotCommand(command="start", description="🏠 Menu / Меню"),
         BotCommand(command="catalog", description="📚 Catalog / Каталог"),
-        BotCommand(command="remind", description="⏰ Напоминание"),
-        BotCommand(command="achievements", description="🏆 Достижения"),
+        BotCommand(command="nickname", description="🪪 Сменить ник / Nickname"),
         BotCommand(command="language", description="🌐 Language / Язык"),
         BotCommand(command="cancel", description="❌ Cancel / Отмена"),
     ]
     await bot.set_my_commands(commands)
-    REMINDER_TASK = asyncio.create_task(reminder_scheduler())
-    asyncio.create_task(personal_reminder_scheduler())
     total_files = sum(len(c.get("files", [])) for c in DATABASE.get("categories", {}).values())
     logger.info("Startup: %s users, %s files, %s tags, channel=%s",
                 len(DATABASE.get("users", {})), total_files,
