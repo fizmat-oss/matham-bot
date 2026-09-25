@@ -22,7 +22,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BotCommand, InlineKeyboardButton, InlineKeyboardMarkup,
     InlineQuery, InlineQueryResultArticle, InlineQueryResultCachedDocument,
-    InputTextMessageContent,
+    InputTextMessageContent, InputMediaPhoto,
 )
 from aiohttp import web
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -672,11 +672,14 @@ DEFAULT_STATE = {
             {"title": "Imomath (IMO Training)", "url": "https://imomath.com"},
             {"title": "МЦНМО", "url": "https://mccme.ru"},
         ]},
-        "useful_videos": {"title": "🎥 Видеолекции и YouTube каналы", "items": [
+        "useful_videos": {"title": "🎥 Полезные YouTube видео", "items": [
             {"title": "3Blue1Brown", "url": "https://www.youtube.com/@3blue1brown"},
             {"title": "Numberphile", "url": "https://www.youtube.com/@numberphile"},
             {"title": "Mathologer", "url": "https://www.youtube.com/@Mathologer"},
             {"title": "Лекторий ФПМИ МФТИ", "url": "https://www.youtube.com/@mipt_lectures"},
+            {"title": "Борис Трушин", "url": "https://www.youtube.com/@TrushinBV"},
+            {"title": "Stand-up Maths", "url": "https://www.youtube.com/@standupmaths"},
+            {"title": "Welch Labs", "url": "https://www.youtube.com/@WelchLabsVideo"},
         ]},
     },
     "must_read": {"title": "⭐ Must-read", "files": []},
@@ -1109,9 +1112,8 @@ async def load_db():
         data["links"][sec_key].setdefault("title", default_sec["title"])
         data["links"][sec_key].setdefault("items", [])
 
-    # Always ensure YouTube videos exist with working clean URLs
-    if "useful_videos" not in data["links"] or not data["links"]["useful_videos"].get("items"):
-        data["links"]["useful_videos"] = copy.deepcopy(DEFAULT_STATE["links"]["useful_videos"])
+    # Always ensure YouTube videos exist with working clean URLs: delete old and recreate cleanly
+    data.setdefault("links", {})["useful_videos"] = copy.deepcopy(DEFAULT_STATE["links"]["useful_videos"])
 
     if not data.get("tags"):
         data["tags"] = list(DEFAULT_TAGS)
@@ -1436,7 +1438,15 @@ async def get_category_toggle_keyboard(selected: list, user_id: int, publish_cb:
 
 async def get_links_keyboard(user_id: int):
     builder = []
+    ordered_keys = ["useful_links", "useful_videos"]
+    for sec_key in ordered_keys:
+        if sec_key in DATABASE.get("links", {}):
+            sec_data = DATABASE["links"][sec_key]
+            title = await localize(sec_data.get("title", sec_key), user_id)
+            builder.append([InlineKeyboardButton(text=title, callback_data=f"links:sec:{sec_key}")])
     for sec_key, sec_data in DATABASE.get("links", {}).items():
+        if sec_key in ordered_keys:
+            continue
         title = await localize(sec_data.get("title", sec_key), user_id)
         builder.append([InlineKeyboardButton(text=title, callback_data=f"links:sec:{sec_key}")])
     builder.append([InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")])
@@ -1452,13 +1462,15 @@ def get_links_section_keyboard(sec_key: str, user_id: int):
         # Ensure scheme is present so Telegram inline URL buttons work perfectly
         if not (url.startswith("http://") or url.startswith("https://")):
             url = f"https://{url}"
-        builder.append([InlineKeyboardButton(text=item.get("title", f"Link #{idx + 1}"), url=url)])
+        title = item.get("title") or f"Link #{idx + 1}"
+        icon = "▶️ " if sec_key == "useful_videos" else "🔗 "
+        builder.append([InlineKeyboardButton(text=f"{icon}{title}", url=url)])
         if is_admin(user_id):
             builder.append([InlineKeyboardButton(text=t(user_id, "links_del", n=idx + 1),
                                                  callback_data=f"links:del:{sec_key}:{idx}")])
     if is_admin(user_id):
         builder.append([InlineKeyboardButton(text=t(user_id, "links_add"), callback_data=f"links:add:{sec_key}")])
-    builder.append([InlineKeyboardButton(text="⬅️", callback_data="links:main")])
+    builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="links:main")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
 
@@ -3107,6 +3119,15 @@ async def cb_task_show_sol(callback: types.CallbackQuery):
     await callback.answer()
 
 
+_user_locks = {}
+
+
+def get_user_lock(user_id: int) -> asyncio.Lock:
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
+
+
 @dp.callback_query(F.data.startswith("task:solve:"))
 async def cb_task_solve(callback: types.CallbackQuery, state: FSMContext):
     parts = callback.data.split(":")
@@ -3118,71 +3139,236 @@ async def cb_task_solve(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer(t(callback.from_user.id, "task_missing"), show_alert=True)
         return
     await state.set_state(UserTaskSolution.waiting_for_solution)
-    await state.update_data(task_date=date_str, task_idx=idx)
-    await callback.message.answer(t(callback.from_user.id, "task_ask_solution"))
+    await state.update_data(
+        task_date=date_str,
+        task_idx=idx,
+        photos=[],
+        docs=[],
+        solution_text=""
+    )
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Завершить и отправить решение", callback_data="task:solve_finish")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="task:solve_cancel")],
+    ])
+    help_text = (
+        "✍️ <b>Отправка решения задачи</b>\n\n"
+        "Вы можете отправить:\n"
+        "• <b>Фотографии решения</b> — одно или <b>несколько фото</b> (можно сразу альбомом или отдельными сообщениями)\n"
+        "• <b>Текст решения</b> — любого объёма, без ограничений (если текст очень длинный, можно отправить в двух или нескольких сообщениях)\n"
+        "• Документы (PDF и др.)\n\n"
+        "После того как отправите все материалы (фото/текст), нажмите кнопку <b>«✅ Завершить и отправить решение»</b> ниже.\n\n"
+        "/cancel — отмена."
+    )
+    await callback.message.answer(help_text, parse_mode=ParseMode.HTML, reply_markup=markup)
     await callback.answer()
 
 
-@dp.message(StateFilter(UserTaskSolution.waiting_for_solution))
-async def process_user_solution(message: types.Message, state: FSMContext):
+@dp.callback_query(F.data == "task:solve_cancel")
+async def cb_task_solve_cancel(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    date_str, idx = data.get("task_date"), data.get("task_idx", -1)
-    task = get_task(date_str, idx) if date_str else {}
-    if not task:
-        await state.clear()
-        await message.answer("⚠️ /start")
-        return
-    uid_str = str(message.from_user.id)
-    u = DATABASE.get("users", {}).get(uid_str, {})
-    entry = {
-        "text": (message.text or message.caption or "").strip(),
-        "photo_file_id": message.photo[-1].file_id if message.photo else None,
-        "document_file_id": message.document.file_id if message.document else None,
-        "nickname": u.get("nickname") or "",
-        "first_name": message.from_user.first_name or "",
-        "username": message.from_user.username or "",
-        "status": "pending",
-        "grade": None,
-        "submitted_at": datetime.now(YEREVAN_TZ).isoformat(),
-    }
-    if not entry["text"] and not entry["photo_file_id"] and not entry["document_file_id"]:
-        await message.answer(t(message.from_user.id, "task_solution_send_any"))
-        return
-    task.setdefault("user_solutions", {})[uid_str] = entry
-    await save_db(DATABASE)
+    date_str = data.get("task_date")
+    idx = data.get("task_idx", 0)
     await state.clear()
-    await message.answer(t(message.from_user.id, "task_solution_sent"))
+    await callback.message.answer("❌ Отправка решения отменена.", reply_markup=get_main_menu_keyboard(callback.from_user.id))
+    await callback.answer()
+    if date_str:
+        await show_task(callback.message, date_str, idx, callback.from_user.id)
 
-    nick = u.get("nickname") or "—"
-    tg = message.from_user.first_name or ""
-    uname = message.from_user.username or ""
-    context = t(message.from_user.id, "user_sol_new",
-                date=date_str, num=idx + 1,
-                nick=html.escape(nick),
-                tg=html.escape(tg) + (f" · @{html.escape(uname)}" if uname else "")) + "\n\n"
-    body = html.escape(entry["text"]) if entry["text"] else ""
+
+@dp.callback_query(F.data == "task:solve_finish")
+async def cb_task_solve_finish(callback: types.CallbackQuery, state: FSMContext):
+    await finalize_user_solution(callback, state, callback.from_user.id)
+
+
+async def notify_admins_about_solution(date_str: str, idx: int, uid_str: str, entry: dict):
+    u = DATABASE.get("users", {}).get(uid_str, {})
+    nick = entry.get("nickname") or u.get("nickname") or "—"
+    tg = entry.get("first_name") or u.get("first_name") or ""
+    uname = entry.get("username") or u.get("username") or ""
+
+    context = (
+        f"🧩 <b>Новое решение задачи</b>\n"
+        f"📅 Задача: <b>{date_str}</b> · №<b>{idx + 1}</b>\n"
+        f"🪪 Ник: <b>{html.escape(nick)}</b>\n"
+        f"👤 TG: {html.escape(tg)}" + (f" · @{html.escape(uname)}" if uname else "")
+    )
+
     review_markup = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Засчитать", callback_data=f"solrev:ok:{date_str}:{idx}:{uid_str}"),
         InlineKeyboardButton(text="❌ Отклонить", callback_data=f"solrev:no:{date_str}:{idx}:{uid_str}"),
     ]])
+
+    photos = entry.get("photo_file_ids") or ([entry["photo_file_id"]] if entry.get("photo_file_id") else [])
+    docs = entry.get("document_file_ids") or ([entry["document_file_id"]] if entry.get("document_file_id") else [])
+    text = (entry.get("text") or "").strip()
+
     for admin_id in ADMIN_IDS:
         try:
-            if entry["photo_file_id"]:
-                await bot.send_photo(admin_id, photo=entry["photo_file_id"],
-                                     caption=(context + body)[:1024], parse_mode=ParseMode.HTML,
-                                     reply_markup=review_markup)
-            elif entry["document_file_id"]:
-                await bot.send_document(admin_id, document=entry["document_file_id"],
-                                        caption=(context + body)[:1024], parse_mode=ParseMode.HTML,
-                                        reply_markup=review_markup)
-            else:
-                parts = _split_text(context + body, TG_TEXT_LIMIT)
+            # 1. Photos
+            if photos:
+                if len(photos) == 1:
+                    if text and len(context + "\n\n" + text) <= 1000 and not docs:
+                        await bot.send_photo(
+                            admin_id, photo=photos[0],
+                            caption=context + "\n\n" + html.escape(text),
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=review_markup
+                        )
+                        continue
+                    else:
+                        await bot.send_photo(admin_id, photo=photos[0], caption=context, parse_mode=ParseMode.HTML)
+                else:
+                    media = []
+                    for i, p in enumerate(photos[:10]):
+                        cap = context if i == 0 else None
+                        media.append(InputMediaPhoto(media=p, caption=cap, parse_mode=ParseMode.HTML))
+                    await bot.send_media_group(admin_id, media=media)
+
+            # 2. Documents
+            for d in docs:
+                await bot.send_document(admin_id, document=d)
+
+            # 3. Unlimited text split across messages if long
+            full_body = text
+            if not photos:
+                full_body = context + ("\n\n" + text if text else "")
+
+            if full_body:
+                parts = _split_text(full_body, TG_TEXT_LIMIT)
                 for i, part in enumerate(parts):
                     mk = review_markup if i == len(parts) - 1 else None
-                    await bot.send_message(admin_id, part, parse_mode=ParseMode.HTML, reply_markup=mk)
+                    await bot.send_message(admin_id, html.escape(part) if photos else part,
+                                           parse_mode=ParseMode.HTML, reply_markup=mk)
+            else:
+                await bot.send_message(admin_id, "⬇️ Решение выше:", reply_markup=review_markup)
         except Exception:
-            logger.exception("Failed to notify admin %s", admin_id)
-    await show_task(message, date_str, idx, message.from_user.id)
+            logger.exception("Failed to notify admin %s about solution", admin_id)
+
+
+async def finalize_user_solution(target, state: FSMContext, user_id: int):
+    async with get_user_lock(user_id):
+        data = await state.get_data()
+        date_str = data.get("task_date")
+        idx = data.get("task_idx", -1)
+        photos = list(data.get("photos", []))
+        docs = list(data.get("docs", []))
+        text = (data.get("solution_text") or "").strip()
+
+        if not photos and not docs and not text:
+            msg = "⚠️ Вы ещё не отправили ни фото, ни текст решения. Отправьте материалы перед завершением."
+            if isinstance(target, types.CallbackQuery):
+                await target.answer(msg, show_alert=True)
+            else:
+                await target.answer(msg)
+            return
+
+        task = get_task(date_str, idx) if date_str else {}
+        if not task:
+            await state.clear()
+            msg = "⚠️ Задача не найдена. Откройте /start."
+            if isinstance(target, types.CallbackQuery):
+                await target.answer(msg, show_alert=True)
+            else:
+                await target.answer(msg)
+            return
+
+        uid_str = str(user_id)
+        u = DATABASE.get("users", {}).get(uid_str, {})
+        from_user = target.from_user
+
+        entry = {
+            "text": text,
+            "photo_file_id": photos[0] if photos else None,
+            "photo_file_ids": photos,
+            "document_file_id": docs[0] if docs else None,
+            "document_file_ids": docs,
+            "nickname": u.get("nickname") or "",
+            "first_name": from_user.first_name or "",
+            "username": from_user.username or "",
+            "status": "pending",
+            "grade": None,
+            "submitted_at": datetime.now(YEREVAN_TZ).isoformat(),
+        }
+        task.setdefault("user_solutions", {})[uid_str] = entry
+        await save_db(DATABASE)
+        await state.clear()
+
+        confirm_text = (
+            "✅ <b>Решение успешно отправлено на проверку!</b>\n\n"
+            f"📷 Прикреплено фото: <b>{len(photos)}</b> шт.\n"
+            f"✍️ Объём текста: <b>{len(text)}</b> симв.\n\n"
+            "Администраторы проверят его и поставят оценку."
+        )
+        if isinstance(target, types.CallbackQuery):
+            await target.message.answer(confirm_text, parse_mode=ParseMode.HTML)
+            await target.answer("✅ Решение отправлено!")
+            await show_task(target.message, date_str, idx, user_id)
+        else:
+            await target.answer(confirm_text, parse_mode=ParseMode.HTML)
+            await show_task(target, date_str, idx, user_id)
+
+        await notify_admins_about_solution(date_str, idx, uid_str, entry)
+
+
+@dp.message(StateFilter(UserTaskSolution.waiting_for_solution))
+async def process_user_solution(message: types.Message, state: FSMContext):
+    if message.text:
+        cmd = message.text.strip().lower()
+        if cmd in ("/cancel", "отмена", "/отмена"):
+            await state.clear()
+            await message.answer(t(message.from_user.id, "cancel_done"),
+                                 reply_markup=get_main_menu_keyboard(message.from_user.id))
+            return
+        if cmd in ("/done", "готово", "/готово", "/submit", "/ok"):
+            await finalize_user_solution(message, state, message.from_user.id)
+            return
+
+    async with get_user_lock(message.from_user.id):
+        data = await state.get_data()
+        date_str = data.get("task_date")
+        idx = data.get("task_idx", -1)
+        task = get_task(date_str, idx) if date_str else {}
+        if not task:
+            await state.clear()
+            await message.answer("⚠️ Задача не найдена. Откройте /start.")
+            return
+
+        photos = list(data.get("photos", []))
+        docs = list(data.get("docs", []))
+        current_text = data.get("solution_text", "")
+
+        incoming_text = (message.text or message.caption or "").strip()
+        if incoming_text:
+            if current_text:
+                current_text = current_text + "\n\n" + incoming_text
+            else:
+                current_text = incoming_text
+
+        if message.photo:
+            photos.append(message.photo[-1].file_id)
+
+        if message.document:
+            docs.append(message.document.file_id)
+
+        if not incoming_text and not message.photo and not message.document:
+            await message.answer("⚠️ Отправьте фото, текст или документ решения.")
+            return
+
+        await state.update_data(photos=photos, docs=docs, solution_text=current_text)
+
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Завершить и отправить решение", callback_data="task:solve_finish")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="task:solve_cancel")],
+        ])
+        status_msg = (
+            "📥 <b>Материалы решения добавлены:</b>\n"
+            f"📷 Фото: <b>{len(photos)}</b> шт.\n"
+            f"📄 Документов: <b>{len(docs)}</b> шт.\n"
+            f"✍️ Текст: <b>{len(current_text)}</b> симв.\n\n"
+            "<i>Вы можете отправить ещё фото или текст (если решение объёмное, можно несколькими сообщениями подряд без ограничений по длине).\n"
+            "Когда закончите отправку, нажмите кнопку ниже:</i>"
+        )
+        await message.answer(status_msg, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 @dp.callback_query(F.data.startswith("task:numans:"))
@@ -3277,9 +3463,10 @@ async def cb_task_sols(callback: types.CallbackQuery):
             snippet = (s.get("text") or "").strip()
             if snippet:
                 snippet = await localize(snippet[:200], callback.from_user.id)
-            if s.get("photo_file_id"):
-                snippet = (snippet + " [📷]").strip()
-            if s.get("document_file_id"):
+            s_photos = s.get("photo_file_ids") or ([s["photo_file_id"]] if s.get("photo_file_id") else [])
+            if s_photos:
+                snippet = (snippet + (f" [📷 {len(s_photos)}]" if len(s_photos) > 1 else " [📷]")).strip()
+            if s.get("document_file_id") or s.get("document_file_ids"):
                 snippet = (snippet + " [📎]").strip()
             lines.append(f"⭐ {sol_display(s, uid_str)} — {g}\n<i>{html.escape(snippet[:150])}</i>\n")
             builder.append([InlineKeyboardButton(
@@ -3313,27 +3500,48 @@ async def cb_solfull(callback: types.CallbackQuery):
     text = sol.get("text") or ""
     if text:
         text = await localize(text, callback.from_user.id)
+
+    photos = sol.get("photo_file_ids") or ([sol["photo_file_id"]] if sol.get("photo_file_id") else [])
+    docs = sol.get("document_file_ids") or ([sol["document_file_id"]] if sol.get("document_file_id") else [])
+
     try:
-        if sol.get("photo_file_id"):
-            caption = header + (f"\n\n{html.escape(text)}" if text else "")
-            await callback.message.answer_photo(photo=sol["photo_file_id"],
-                                                caption=caption[:1024],
-                                                parse_mode=ParseMode.HTML)
-            if len(caption) > 1024:
-                for part in _split_text(caption[1000:], TG_TEXT_LIMIT):
-                    await bot.send_message(callback.message.chat.id, part, parse_mode=ParseMode.HTML)
-        elif sol.get("document_file_id"):
-            caption = header + (f"\n\n{html.escape(text)}" if text else "")
-            await callback.message.answer_document(document=sol["document_file_id"],
-                                                   caption=caption[:1024], parse_mode=ParseMode.HTML)
-            if len(caption) > 1024:
-                for part in _split_text(caption[1000:], TG_TEXT_LIMIT):
-                    await bot.send_message(callback.message.chat.id, part, parse_mode=ParseMode.HTML)
-        elif text:
-            await safe_send_or_edit(callback, header + f"\n\n{html.escape(text)}")
-        else:
+        # If photos
+        if photos:
+            if len(photos) == 1:
+                if text and len(header + "\n\n" + text) <= 1000 and not docs:
+                    await callback.message.answer_photo(
+                        photo=photos[0],
+                        caption=header + "\n\n" + html.escape(text),
+                        parse_mode=ParseMode.HTML
+                    )
+                    await callback.answer()
+                    return
+                else:
+                    await callback.message.answer_photo(photo=photos[0], caption=header, parse_mode=ParseMode.HTML)
+            else:
+                media = []
+                for i, p in enumerate(photos[:10]):
+                    cap = header if i == 0 else None
+                    media.append(InputMediaPhoto(media=p, caption=cap, parse_mode=ParseMode.HTML))
+                await callback.message.answer_media_group(media=media)
+
+        # If docs
+        for d in docs:
+            await callback.message.answer_document(document=d)
+
+        # Text without limit: split into chunks of <= 4000 chars
+        full_content = text
+        if not photos:
+            full_content = header + ("\n\n" + text if text else "")
+
+        if full_content:
+            parts = _split_text(full_content, TG_TEXT_LIMIT)
+            for part in parts:
+                await callback.message.answer(html.escape(part) if photos else part, parse_mode=ParseMode.HTML)
+        elif not photos and not docs and not text:
             await callback.answer(t(callback.from_user.id, "task_sol_empty_content"), show_alert=True)
             return
+
         await callback.answer()
     except Exception:
         logger.exception("Failed to show solution")
@@ -3464,10 +3672,21 @@ async def cb_links_main(callback: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("links:sec:"))
 async def cb_links_section(callback: types.CallbackQuery):
     sec_key = callback.data.split(":", 2)[2]
+    if sec_key == "useful_videos" and (sec_key not in DATABASE.get("links", {}) or not DATABASE["links"][sec_key].get("items")):
+        DATABASE.setdefault("links", {})["useful_videos"] = copy.deepcopy(DEFAULT_STATE["links"]["useful_videos"])
+        await save_db(DATABASE)
     if sec_key not in DATABASE.get("links", {}):
         await callback.answer(t(callback.from_user.id, "links_section_missing"), show_alert=True)
         return
     await show_links_section(callback, sec_key, callback.from_user.id)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.in_(["links:videos", "menu:videos"]))
+async def cb_links_videos_direct(callback: types.CallbackQuery):
+    DATABASE.setdefault("links", {})["useful_videos"] = copy.deepcopy(DEFAULT_STATE["links"]["useful_videos"])
+    await save_db(DATABASE)
+    await show_links_section(callback, "useful_videos", callback.from_user.id)
     await callback.answer()
 
 
