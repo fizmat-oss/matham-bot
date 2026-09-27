@@ -9,6 +9,7 @@ import uuid
 import json
 import csv
 import io
+import zipfile
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -306,6 +307,13 @@ TEXTS = {
         "rating_medal_1": "🥇",
         "rating_medal_2": "🥈",
         "rating_medal_3": "🥉",
+        "download_all_zip": "📦 Скачать все материалы (ZIP)",
+        "download_cat_zip": "📦 Скачать раздел (ZIP)",
+        "zip_preparing": "⏳ Собираем ZIP-архив ({current}/{total})...",
+        "zip_empty": "⚠️ В каталоге пока нет файлов для скачивания.",
+        "zip_ready": "📦 <b>Архив библиотеки MathAm</b>\n📚 Файлов: {count}\n💾 Размер: {size_mb:.1f} МБ",
+        "zip_part": "📦 <b>Архив библиотеки MathAm (часть {part}/{total_parts})</b>\n📚 Файлов: {count}\n💾 Размер: {size_mb:.1f} МБ",
+        "zip_error": "⚠️ Произошла ошибка при сборке архива.",
     },
     "en": {
         "welcome_back": "👋 Welcome back, {nick}!",
@@ -542,6 +550,13 @@ TEXTS = {
         "rating_medal_1": "🥇",
         "rating_medal_2": "🥈",
         "rating_medal_3": "🥉",
+        "download_all_zip": "📦 Download all materials (ZIP)",
+        "download_cat_zip": "📦 Download section (ZIP)",
+        "zip_preparing": "⏳ Preparing ZIP archive ({current}/{total})...",
+        "zip_empty": "⚠️ No files available for download in the catalog.",
+        "zip_ready": "📦 <b>MathAm Library Archive</b>\n📚 Files: {count}\n💾 Size: {size_mb:.1f} MB",
+        "zip_part": "📦 <b>MathAm Library Archive (Part {part}/{total_parts})</b>\n📚 Files: {count}\n💾 Size: {size_mb:.1f} MB",
+        "zip_error": "⚠️ An error occurred while creating the archive.",
     },
 }
 
@@ -563,17 +578,26 @@ def t(user_id: int, key: str, **kwargs) -> str:
 
 
 # ============================================================
-# TRANSLATION
+# TRANSLATION & MATH PRESERVATION
 # ============================================================
 
 GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
 
 _MATH_PATTERNS = [
+    # 1. Display containers
     re.compile(r"\$\$[\s\S]+?\$\$"),
+    re.compile(r"\\\[[\s\S]+?\\\]"),
+    # 2. LaTeX environments
+    re.compile(r"\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\1\}"),
+    # 3. Inline containers
+    re.compile(r"\\\([\s\S]+?\\\)"),
     re.compile(r"\$[^\$\n]+?\$"),
-    re.compile(r"\\[a-zA-Z]+(?:\{[^{}]*\})*"),
-    re.compile(r"(?<![A-Za-zА-Яа-я0-9])[A-Za-z]\s*[\^_]\s*\{?[A-Za-z0-9]+"),
-    re.compile(r"\\begin\{[^}]+\}[\s\S]*?\\end\{[^}]+\}"),
+    # 4. Commands with nested curly braces, e.g. \frac{...}{...}, \sqrt[3]{...}, \pmod{...}
+    re.compile(r"\\([a-zA-Z]+)(?:\[[^\]]*\])?(?:\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})+"),
+    # 5. Standalone LaTeX commands/symbols, e.g. \alpha, \ge, \le, \ne, \infty, \pi, \cdot, \times, \pm
+    re.compile(r"\\[a-zA-Z]+"),
+    # 6. Variable sub/superscript, e.g. x_1, a^2, x_{i+1}, 2^{n-1}
+    re.compile(r"(?<![A-Za-zА-Яа-я0-9])[A-Za-z]\s*[\^_]\s*(?:\{[^{}]*\}|[A-Za-z0-9]+)"),
 ]
 
 _translation_cache: dict = {}
@@ -584,17 +608,88 @@ def _protect_math(text: str):
 
     def repl(m):
         protected.append(m.group(0))
-        return f"<<M{len(protected) - 1}>>"
+        return f"_MTH_TOKEN_{len(protected) - 1}_"
 
     for pat in _MATH_PATTERNS:
         text = pat.sub(repl, text)
     return text, protected
 
 
-def _restore_math(text: str, protected):
-    for i, orig in enumerate(protected):
-        text = text.replace(f"<<M{i}>>", orig)
+def _restore_math(text: str, protected: list):
+    pattern = re.compile(
+        r"(?:_MTH_TOKEN_|<<\s*M\s*|«\s*M\s*|MTH_TOKEN_)\s*(\d+)(?:\s*(?:>>|»|_))?",
+        re.IGNORECASE
+    )
+
+    def repl(m):
+        idx = int(m.group(1))
+        if 0 <= idx < len(protected):
+            return protected[idx]
+        return m.group(0)
+
+    # Multi-pass restore to handle nested structures cleanly
+    for _ in range(5):
+        new_text = pattern.sub(repl, text)
+        if new_text == text:
+            break
+        text = new_text
     return text
+
+
+def _chunk_text(text: str, max_chunk_len: int = 1200) -> list[str]:
+    if len(text) <= max_chunk_len:
+        return [text]
+    lines = text.split("\n")
+    chunks = []
+    curr = []
+    curr_len = 0
+    for line in lines:
+        if len(line) > max_chunk_len:
+            words = line.split(" ")
+            w_curr = []
+            w_len = 0
+            for w in words:
+                if w_len + len(w) + 1 > max_chunk_len and w_curr:
+                    if curr:
+                        chunks.append("\n".join(curr))
+                        curr = []
+                        curr_len = 0
+                    chunks.append(" ".join(w_curr))
+                    w_curr = [w]
+                    w_len = len(w)
+                else:
+                    w_curr.append(w)
+                    w_len += len(w) + 1
+            if w_curr:
+                curr.append(" ".join(w_curr))
+                curr_len += len(curr[-1]) + 1
+        elif curr_len + len(line) + 1 > max_chunk_len and curr:
+            chunks.append("\n".join(curr))
+            curr = [line]
+            curr_len = len(line)
+        else:
+            curr.append(line)
+            curr_len += len(line) + 1
+    if curr:
+        chunks.append("\n".join(curr))
+    return chunks
+
+
+async def _fetch_gt_segment(session: aiohttp.ClientSession, segment: str, target_lang: str) -> str:
+    if not segment.strip():
+        return segment
+    try:
+        params = {"client": "gtx", "sl": "auto", "tl": target_lang, "dt": "t", "q": segment}
+        async with session.get(GOOGLE_TRANSLATE_URL, params=params) as resp:
+            data = await resp.json()
+            parts = []
+            for seg in data[0]:
+                if seg and seg[0]:
+                    parts.append(seg[0])
+            return "".join(parts)
+    except Exception:
+        logger.exception("Google translate segment failed")
+        return segment
 
 
 async def translate_text(text: str, target_lang: str) -> str:
@@ -608,33 +703,50 @@ async def translate_text(text: str, target_lang: str) -> str:
         return _translation_cache[key]
 
     working, protected = _protect_math(text)
-    try:
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            params = {"client": "gtx", "sl": "auto", "tl": target_lang, "dt": "t", "q": working}
-            async with session.get(GOOGLE_TRANSLATE_URL, params=params) as resp:
-                data = await resp.json()
-                parts = []
-                for seg in data[0]:
-                    if seg and seg[0]:
-                        parts.append(seg[0])
-                translated = "".join(parts)
-    except Exception:
-        logger.exception("Translation failed")
-        translated = working
 
-    translated = _restore_math(translated, protected)
-    if len(_translation_cache) > 1500:
+    # Check if remaining text contains actual words that need translation
+    stripped = re.sub(r"(?:_MTH_TOKEN_|<<\s*M\s*|«\s*M\s*|MTH_TOKEN_)\s*(\d+)(?:\s*(?:>>|»|_))?", "", working)
+    words = re.findall(r"[a-zA-Zа-яА-ЯёЁ]{2,}", stripped)
+    if not words:
+        return text
+
+    chunks = _chunk_text(working, 1200)
+    timeout = aiohttp.ClientTimeout(total=25)
+    translated_chunks = []
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for ch in chunks:
+                tr = await _fetch_gt_segment(session, ch, target_lang)
+                translated_chunks.append(tr)
+        raw_translated = "\n".join(translated_chunks)
+    except Exception:
+        logger.exception("Translation request failed")
+        raw_translated = working
+
+    translated = _restore_math(raw_translated, protected)
+    if len(_translation_cache) > 5000:
         _translation_cache.clear()
     _translation_cache[key] = translated
     return translated
+
+
+def _needs_translation(text: str, target_lang: str) -> bool:
+    if not text or not text.strip():
+        return False
+    has_cyrillic = bool(re.search(r"[\u0400-\u04FF]", text))
+    has_latin = bool(re.search(r"[a-zA-Z]", text))
+    if target_lang == "en":
+        return has_cyrillic
+    elif target_lang == "ru":
+        return (not has_cyrillic) and has_latin
+    return False
 
 
 async def localize(text: str, user_id: int) -> str:
     if not text or not text.strip():
         return text
     lang = get_user_lang(user_id)
-    if lang == "ru":
+    if not _needs_translation(text, lang):
         return text
     return await translate_text(text, lang)
 
@@ -915,7 +1027,7 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
             "username": username,
             "first_name": first_name,
             "nickname": "",
-            "language": "ru",
+            "language": "",
             "created_at": datetime.now(YEREVAN_TZ).isoformat(),
             "streak": 1,
             "last_active": today,
@@ -942,7 +1054,7 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
 
     user.setdefault("favorites", [])
     user.setdefault("nickname", "")
-    user.setdefault("language", "ru")
+    user.setdefault("language", "")
     user.setdefault("notes", {})
 
     if user.get("last_active") != today:
@@ -1122,7 +1234,7 @@ async def load_db():
         user.setdefault("username", "")
         user.setdefault("first_name", "")
         user.setdefault("nickname", "")
-        user.setdefault("language", "ru")
+        user.setdefault("language", "")
         user.setdefault("created_at", datetime.now(YEREVAN_TZ).isoformat())
         user.setdefault("streak", 1)
         user.setdefault("last_active", get_yerevan_date())
@@ -1312,6 +1424,11 @@ async def get_catalog_keyboard(user_id: int):
             text=f"{title} ({count})",
             callback_data=f"cat:{cat_key}",
         )])
+    # Button to download all PDFs in a ZIP archive
+    builder.append([InlineKeyboardButton(
+        text=t(user_id, "download_all_zip"),
+        callback_data="catalog:zip_all"
+    )])
     if is_admin(user_id):
         builder.append([InlineKeyboardButton(text="➕ Добавить раздел", callback_data="admin:add_cat")])
     builder.append([InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")])
@@ -1482,6 +1599,7 @@ def get_admin_menu_keyboard(user_id: int):
         [InlineKeyboardButton(text=t(user_id, "admin_tags"), callback_data="admin:tags")],
         [InlineKeyboardButton(text=t(user_id, "admin_stats"), callback_data="admin:stats")],
         [InlineKeyboardButton(text="📊 Экспорт CSV", callback_data="admin:stats_csv")],
+        [InlineKeyboardButton(text="📦 Экспорт всех PDF (ZIP)", callback_data="catalog:zip_all")],
         [InlineKeyboardButton(text=t(user_id, "admin_subs"), callback_data="admin:submissions")],
         [InlineKeyboardButton(text=t(user_id, "admin_pending"), callback_data="admin:pending_sols")],
         [InlineKeyboardButton(text=t(user_id, "admin_bcast"), callback_data="admin:broadcast")],
@@ -1495,6 +1613,119 @@ def get_language_keyboard(user_id: int):
         [InlineKeyboardButton(text="🇬🇧 English", callback_data="lang:set:en")],
         [InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")],
     ])
+
+
+def sanitize_filename(name: str) -> str:
+    clean = re.sub(r'[\\/*?:"<>|]', "_", name).strip()
+    clean = re.sub(r"\s+", " ", clean)
+    return clean[:60] if clean else "material"
+
+
+async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: list, archive_title: str):
+    if not files_to_download:
+        await bot.send_message(chat_id, t(user_id, "zip_empty"))
+        return
+
+    total = len(files_to_download)
+    status_msg = await bot.send_message(chat_id, t(user_id, "zip_preparing", current=0, total=total))
+
+    sem = asyncio.Semaphore(4)
+    downloaded_files = []
+    completed_count = 0
+    lock = asyncio.Lock()
+
+    async def _fetch_file(item):
+        nonlocal completed_count
+        file_id = item.get("file_id")
+        if not file_id:
+            return
+        async with sem:
+            try:
+                tg_file = await bot.get_file(file_id)
+                buf = io.BytesIO()
+                await bot.download_file(tg_file.file_path, destination=buf)
+                content = buf.getvalue()
+                if content:
+                    folder = sanitize_filename(item.get("category", "General"))
+                    fname = sanitize_filename(item.get("filename", "material"))
+                    if not fname.lower().endswith(".pdf"):
+                        fname += ".pdf"
+                    async with lock:
+                        downloaded_files.append((f"{folder}/{fname}", content))
+                        completed_count += 1
+                        if completed_count % 5 == 0 or completed_count == total:
+                            try:
+                                await status_msg.edit_text(t(user_id, "zip_preparing", current=completed_count, total=total))
+                            except Exception:
+                                pass
+            except Exception as e:
+                logger.warning("Failed to download file %s for zip: %s", file_id, e)
+                async with lock:
+                    completed_count += 1
+
+    await asyncio.gather(*[_fetch_file(item) for item in files_to_download])
+
+    if not downloaded_files:
+        try:
+            await status_msg.edit_text(t(user_id, "zip_empty"))
+        except Exception:
+            await bot.send_message(chat_id, t(user_id, "zip_empty"))
+        return
+
+    used_names = set()
+    unique_files = []
+    for path, content in downloaded_files:
+        cand = path
+        counter = 1
+        folder, fname = path.split("/", 1) if "/" in path else ("General", path)
+        base_name, ext = os.path.splitext(fname)
+        while cand.lower() in used_names:
+            cand = f"{folder}/{base_name}_{counter}{ext}"
+            counter += 1
+        used_names.add(cand.lower())
+        unique_files.append((cand, content))
+
+    MAX_VOLUME_BYTES = 45 * 1024 * 1024
+    volumes = []
+    curr_vol = []
+    curr_size = 0
+    for path, content in unique_files:
+        if curr_size + len(content) > MAX_VOLUME_BYTES and curr_vol:
+            volumes.append(curr_vol)
+            curr_vol = [(path, content)]
+            curr_size = len(content)
+        else:
+            curr_vol.append((path, content))
+            curr_size += len(content)
+    if curr_vol:
+        volumes.append(curr_vol)
+
+    total_vols = len(volumes)
+    date_str = datetime.now().strftime("%Y%m%d")
+
+    for part_idx, vol in enumerate(volumes, 1):
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for path, content in vol:
+                zf.writestr(path, content)
+        zip_bytes = zip_buf.getvalue()
+        size_mb = len(zip_bytes) / (1024 * 1024)
+
+        safe_title = sanitize_filename(archive_title)
+        if total_vols > 1:
+            fname = f"MathAm_{safe_title}_part{part_idx}_of_{total_vols}_{date_str}.zip"
+            caption = t(user_id, "zip_part", part=part_idx, total_parts=total_vols, count=len(vol), size_mb=size_mb)
+        else:
+            fname = f"MathAm_{safe_title}_{date_str}.zip"
+            caption = t(user_id, "zip_ready", count=len(vol), size_mb=size_mb)
+
+        doc = types.BufferedInputFile(zip_bytes, filename=fname)
+        await bot.send_document(chat_id, document=doc, caption=caption, parse_mode=ParseMode.HTML)
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -1958,7 +2189,7 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
                          reply_markup=get_main_menu_keyboard(message.from_user.id))
 
 
-@dp.message(Command("language"))
+@dp.message(Command("language", "lang"))
 async def cmd_language(message: types.Message, state: FSMContext):
     await state.clear()
     await safe_send_or_edit(message, t(message.from_user.id, "choose_language"),
@@ -2096,9 +2327,90 @@ async def cb_admin_delcat(callback: types.CallbackQuery):
     await cb_admin_cats(callback, None)
 
 
+@dp.callback_query(F.data == "catalog:zip_all")
+async def cb_catalog_zip_all(callback: types.CallbackQuery):
+    all_files = []
+    seen = set()
+    for cat_key, cat_data in DATABASE.get("categories", {}).items():
+        cat_title = cat_data.get("title", cat_key)
+        for f in cat_data.get("files", []):
+            uid = f.get("file_unique_id")
+            if uid and uid in seen:
+                continue
+            if uid:
+                seen.add(uid)
+            if f.get("file_id"):
+                all_files.append({
+                    "file_id": f["file_id"],
+                    "category": cat_title,
+                    "filename": f.get("caption") or "material",
+                    "uid": uid,
+                })
+    await callback.answer("⏳ Собираем архив...")
+    await create_and_send_zip(
+        chat_id=callback.message.chat.id,
+        user_id=callback.from_user.id,
+        files_to_download=all_files,
+        archive_title="Library"
+    )
+
+
+@dp.callback_query(F.data.startswith("cat:zip:"))
+async def cb_cat_zip(callback: types.CallbackQuery):
+    cat_key = callback.data.split(":", 2)[2]
+    cat_data = DATABASE.get("categories", {}).get(cat_key, {})
+    files = cat_data.get("files", [])
+    files_to_download = []
+    cat_title = cat_data.get("title", cat_key)
+    for f in files:
+        if f.get("file_id"):
+            files_to_download.append({
+                "file_id": f["file_id"],
+                "category": cat_title,
+                "filename": f.get("caption") or "material",
+                "uid": f.get("file_unique_id"),
+            })
+    await callback.answer("⏳ Собираем раздел...")
+    await create_and_send_zip(
+        chat_id=callback.message.chat.id,
+        user_id=callback.from_user.id,
+        files_to_download=files_to_download,
+        archive_title=cat_key
+    )
+
+
+@dp.message(Command("zip", "download_all"))
+async def cmd_download_zip(message: types.Message):
+    all_files = []
+    seen = set()
+    for cat_key, cat_data in DATABASE.get("categories", {}).items():
+        cat_title = cat_data.get("title", cat_key)
+        for f in cat_data.get("files", []):
+            uid = f.get("file_unique_id")
+            if uid and uid in seen:
+                continue
+            if uid:
+                seen.add(uid)
+            if f.get("file_id"):
+                all_files.append({
+                    "file_id": f["file_id"],
+                    "category": cat_title,
+                    "filename": f.get("caption") or "material",
+                    "uid": uid,
+                })
+    await create_and_send_zip(
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        files_to_download=all_files,
+        archive_title="Library"
+    )
+
+
 @dp.callback_query(F.data.startswith("cat:"))
 async def cb_category(callback: types.CallbackQuery):
     cat_key = callback.data.split(":", 1)[1]
+    if cat_key.startswith("zip:"):
+        return
     cat_data = DATABASE.get("categories", {}).get(cat_key)
     if not cat_data:
         await callback.answer(t(callback.from_user.id, "section_missing"), show_alert=True)
@@ -4888,8 +5200,10 @@ async def on_startup(bot: Bot):
     commands = [
         BotCommand(command="start", description="🏠 Menu / Меню"),
         BotCommand(command="catalog", description="📚 Catalog / Каталог"),
-        BotCommand(command="nickname", description="🪪 Сменить ник / Nickname"),
+        BotCommand(command="task", description="🎯 Task of day / Задача дня"),
+        BotCommand(command="zip", description="📦 Download all PDFs / Скачать PDF (ZIP)"),
         BotCommand(command="language", description="🌐 Language / Язык"),
+        BotCommand(command="nickname", description="🪪 Nickname / Никнейм"),
         BotCommand(command="cancel", description="❌ Cancel / Отмена"),
     ]
     await bot.set_my_commands(commands)
