@@ -1,42 +1,50 @@
 import asyncio
 import copy
+import csv
 import html
+import io
+import json
 import logging
 import os
 import random
 import re
 import uuid
-import json
-import csv
-import io
 import zipfile
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import aiohttp
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup,
-    InlineQuery, InlineQueryResultArticle, InlineQueryResultCachedDocument,
-    InputTextMessageContent, InputMediaPhoto,
+    BotCommand,
+    BufferedInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InlineQueryResultCachedDocument,
+    InputMediaPhoto,
+    InputTextMessageContent,
 )
-from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from motor.motor_asyncio import AsyncIOMotorClient
 
 # ============================================================
-# CONFIG
+# CONFIGURATION & LOGGING
 # ============================================================
 
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("DEBUG", "0").lower() in ("1", "true", "yes") else logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("matham_bot")
 
 TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 if not TOKEN:
@@ -61,14 +69,17 @@ DB_DOC_ID = "catalog_main"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-DATABASE = {}
-BOT_USERNAME = ""
+DATABASE: Dict[str, Any] = {}
+BOT_USERNAME: str = ""
 
 DIFF_KEYS = ("easy", "medium", "hard", "imo")
 DIFF_MULT = {"easy": 1, "medium": 2, "hard": 3, "imo": 5}
 
+# Persistent shared HTTP session for external API calls
+HTTP_SESSION: Optional[aiohttp.ClientSession] = None
+
 # ============================================================
-# LOCALIZATION
+# LOCALIZATION & TEXTS
 # ============================================================
 
 TEXTS = {
@@ -117,7 +128,7 @@ TEXTS = {
         "catalog_title": "📚 <b>Каталог материалов по разделам:</b>",
         "section_missing": "Раздел не найден.",
         "task_missing": "🎯 Задача не найдена.",
-        "search_title": "🏷 <b>Поиск по тегам</b>\n\nВыберите один или несколько тегов и нажмите «🔎 Искать».\nИли просто напишите тег/слово текстом.",
+        "search_title": "🏷 <b>Поиск по тегам</b>\n\nВыберите теги и нажмите «🔎 Искать».\nИли отправьте тег/слово сообщением.",
         "search_go": "🔎 Искать материалы",
         "search_tasks_btn": "🎯 Искать задачи дня",
         "search_reset": "♻️ Сброс",
@@ -131,25 +142,25 @@ TEXTS = {
         "search_tag_on": "Тег выбран",
         "search_selected_n": "🏷 <b>Поиск по тегам</b>\nВыбрано тегов: {n}",
         "search_reset_done": "🏷 <b>Поиск по тегам</b>\nВыбор сброшен.",
-        "tag_db_title": "🏷 <b>База тегов</b> (всего: {n})\n\nНажмите на тег, чтобы удалить, или выберите «Переименовать».",
+        "tag_db_title": "🏷 <b>База тегов</b> (всего: {n})\n\nНажмите на тег для удаления или выберите «Переименовать».",
         "tag_add_btn": "➕ Добавить тег",
         "tag_rename_btn": "✏️ Переименовать тег",
-        "tag_ask_new": "🏷 Отправьте новый тег (можно с # или без, можно несколько через запятую):",
+        "tag_ask_new": "🏷 Отправьте новый тег (можно с # или без, несколько через запятую):",
         "tag_added": "✅ Добавлены теги: {tags}",
         "tag_nothing_added": "⚠️ Новых тегов нет (пусто или дубликаты).",
         "tag_removed": "Удалён {tag}",
         "tag_missing": "Тег не найден.",
         "tag_rename_pick": "✏️ Какой тег переименовать?",
-        "tag_rename_ask": "✏️ Отправьте новое название для тега {tag} (текст без #):",
+        "tag_rename_ask": "✏️ Отправьте новое название для тега {tag}:",
         "tag_rename_done": "✅ Тег переименован: {old} → {new}. Обновлено файлов: {n}.",
         "tag_rename_no_files": "✅ Тег переименован: {old} → {new}. Файлов с этим тегом не было.",
         "tag_rename_conflict": "⚠️ Тег «{new}» уже существует.",
         "favorites_title": "❤️ <b>Избранное</b>",
         "favorites_empty": "\n\nПока пусто. Откройте материал в каталоге и нажмите «❤️ В избранное».",
-        "rating_title": "🏆 <b>Рейтинг MathAm</b>\n<i>Очки — за зачтённые решения задач дня</i>\n",
+        "rating_title": "🏆 <b>Рейтинг MathAm</b>\n<i>Очки начисляются за решения задач дня</i>\n",
         "rating_empty": "Пока никто не набрал очки. Решите задачу дня первым!",
         "rating_you": "\n👤 Вы: {nick} — {score} очк. · ✅ {solved} · ❤️ {favs}",
-        "mustread_title": "⭐ <b>Must-read</b>\nМатериалы, которые стоит изучить каждому олимпиаднику:",
+        "mustread_title": "⭐ <b>Must-read</b>\nМатериалы, рекомендованные к изучению:",
         "mustread_empty": "⭐ <b>Must-read</b>\n\nСписок пока пуст.",
         "mustread_added": "⭐ Добавлено в must-read",
         "mustread_removed": "Убрано из must-read",
@@ -159,7 +170,7 @@ TEXTS = {
         "links_add": "➕ Добавить ссылку",
         "links_del": "🗑 Удалить #{n}",
         "links_ask": "🔗 Отправьте ссылку в формате:\n<code>Название - https://example.com</code>",
-        "links_no_url": "⚠️ Не нашёл URL. Попробуйте ещё раз.",
+        "links_no_url": "⚠️ URL не найден. Попробуйте ещё раз.",
         "links_added": "✅ Ссылка добавлена в «{title}».",
         "links_section_missing": "Раздел не найден.",
         "links_item_removed": "Удалено: {name}",
@@ -178,14 +189,11 @@ TEXTS = {
         "task_archive_empty": "🗄 <b>Архив задач</b>\n\nЗадач пока нет.",
         "task_today": "🎯 Сегодня",
         "task_no_tasks": "🎯 <b>Задача дня</b>\n\nЗадачи пока не опубликованы.",
-        "task_ask_solution": "✍️ Отправьте ваше решение (текстом, фото или файлом).\nОно уйдёт администраторам на проверку. /cancel — отмена.",
         "task_solution_sent": "✅ <b>Решение отправлено!</b>\nАдминистраторы проверят его и поставят оценку.",
-        "task_solution_send_any": "⚠️ Отправьте решение текстом, фото или файлом.",
         "task_sol_author_header": "💡 <b>Решение автора</b> (задача №{num}, {date})",
         "task_sol_not_yet": "Решение пока не добавлено.",
         "task_sols_header": "👥 <b>Решения участников</b> (задача №{num}, {date})\n",
         "task_sols_empty": "Пока нет проверенных решений.",
-        "task_sol_grade": "⭐ {grade}/10",
         "task_sol_grade_full": "{grade}/10",
         "task_sol_ok_mark": "✓",
         "task_sol_not_found": "Решение не найдено.",
@@ -205,11 +213,11 @@ TEXTS = {
         "task_admin_grade_ask": "✓ Без оценки",
         "task_admin_rejected": "❌ Отклонено.",
         "task_admin_sol_rev_not_found": "Решение не найдено.",
-        "task_admin_sol_approved_short": "Засчитано",
+        "task_admin_sol_approved_short": "Зачтено",
         "task_admin_sol_rejected_short": "Отклонено",
         "task_grade_saved": "Оценка сохранена",
         "task_grade_zero": "без оценки",
-        "submit_start": "📤 Отправьте файл (лучше PDF) для публикации в библиотеку.",
+        "submit_start": "📤 Отправьте файл (PDF) для публикации в библиотеку.",
         "submit_ask_title": "✏️ Как называется материал? Отправьте название:",
         "submit_ask_tags": "🏷 Выберите теги:",
         "submit_skip_tags": "⏭ Без тегов",
@@ -258,8 +266,8 @@ TEXTS = {
         "admin_subs_title": "📥 <b>Заявки на файлы</b>\n",
         "admin_subs_pick_cat": "📂 Выберите раздел:",
         "admin_subs_published": "✅ Опубликовано в «{cat}».",
-        "admin_subs_user_notify": "✅ Ваш материал «{title}» одобрен и добавлен в каталог в раздел «{cat}»!",
-        "admin_subs_reject_notify": "❌ Ваша заявка на публикацию материала «{title}» была отклонена.",
+        "admin_subs_user_notify": "✅ Ваш материал «{title}» одобрен и добавлен в раздел «{cat}»!",
+        "admin_subs_reject_notify": "❌ Ваша заявка на публикацию материала «{title}» отклонена.",
         "admin_subs_accept": "✅ Принять",
         "admin_subs_reject": "❌ Отклонить",
         "admin_subs_rejected": "❌ Отклонено.",
@@ -294,13 +302,9 @@ TEXTS = {
         "file_card_diff": "🎯 Уровень: {diff}",
         "file_card_tags": "🏷 {tags}",
         "file_card_summary": "\n📝 {summary}",
-        "new_material": "📚 <b>Новый материал в MathAm</b>",
-        "open_in_bot": "🤖 Открыть в боте",
-        "solve_in_bot": "🤖 Решить в боте",
-        "user_sol_new": "🧩 <b>Новое решение</b>\nЗадача: {date} · №{num}\n🪪 Ник: {nick}\n👤 TG: {tg}",
-        "unknown_text": "🤖 Не понял. Откройте /start.",
+        "unknown_text": "🤖 Команда не распознана. Откройте /start для меню.",
         "expect_file": "📤 Ожидаю файл.",
-        "expect_doc": "📄 Ожидаю файл.",
+        "expect_doc": "📄 Ожидаю документ.",
         "only_admin": "Недоступно.",
         "choose_tags_n": "🏷 Выберите теги (выбрано: {n}):",
         "rating_line": "{medal} {name} — {score} очк. · ✅ {solved} · 🔥 {streak} дн.",
@@ -308,12 +312,10 @@ TEXTS = {
         "rating_medal_2": "🥈",
         "rating_medal_3": "🥉",
         "download_all_zip": "📦 Скачать все материалы (ZIP)",
-        "download_cat_zip": "📦 Скачать раздел (ZIP)",
         "zip_preparing": "⏳ Собираем ZIP-архив ({current}/{total})...",
-        "zip_empty": "⚠️ В каталоге пока нет файлов для скачивания.",
+        "zip_empty": "⚠️ В каталоге нет файлов для скачивания.",
         "zip_ready": "📦 <b>Архив библиотеки MathAm</b>\n📚 Файлов: {count}\n💾 Размер: {size_mb:.1f} МБ",
         "zip_part": "📦 <b>Архив библиотеки MathAm (часть {part}/{total_parts})</b>\n📚 Файлов: {count}\n💾 Размер: {size_mb:.1f} МБ",
-        "zip_error": "⚠️ Произошла ошибка при сборке архива.",
     },
     "en": {
         "welcome_back": "👋 Welcome back, {nick}!",
@@ -402,7 +404,7 @@ TEXTS = {
         "links_add": "➕ Add link",
         "links_del": "🗑 Delete #{n}",
         "links_ask": "🔗 Format: <code>Title - https://example.com</code>",
-        "links_no_url": "⚠️ No URL.",
+        "links_no_url": "⚠️ No URL found.",
         "links_added": "✅ Added to «{title}».",
         "links_section_missing": "Section not found.",
         "links_item_removed": "Removed: {name}",
@@ -421,14 +423,11 @@ TEXTS = {
         "task_archive_empty": "🗄 <b>Archive</b>\n\nEmpty.",
         "task_today": "🎯 Today",
         "task_no_tasks": "🎯 <b>Task of the day</b>\n\nNo tasks yet.",
-        "task_ask_solution": "✍️ Send your solution (text/photo/file). /cancel to cancel.",
         "task_solution_sent": "✅ <b>Solution sent!</b>",
-        "task_solution_send_any": "⚠️ Send text/photo/file.",
         "task_sol_author_header": "💡 <b>Author's solution</b> (№{num}, {date})",
         "task_sol_not_yet": "No solution yet.",
         "task_sols_header": "👥 <b>Solutions</b> (№{num}, {date})\n",
         "task_sols_empty": "No approved solutions yet.",
-        "task_sol_grade": "⭐ {grade}/10",
         "task_sol_grade_full": "{grade}/10",
         "task_sol_ok_mark": "✓",
         "task_sol_not_found": "Not found.",
@@ -502,7 +501,7 @@ TEXTS = {
         "admin_subs_pick_cat": "📂 Section:",
         "admin_subs_published": "✅ Published to «{cat}».",
         "admin_subs_user_notify": "✅ Your material «{title}» has been approved and added to «{cat}»!",
-        "admin_subs_reject_notify": "❌ Your material submission «{title}» was not accepted.",
+        "admin_subs_reject_notify": "❌ Your material submission «{title}» was rejected.",
         "admin_subs_accept": "✅ Accept",
         "admin_subs_reject": "❌ Reject",
         "admin_subs_rejected": "❌ Rejected.",
@@ -537,13 +536,9 @@ TEXTS = {
         "file_card_diff": "🎯 Level: {diff}",
         "file_card_tags": "🏷 {tags}",
         "file_card_summary": "\n📝 {summary}",
-        "new_material": "📚 <b>New material in MathAm</b>",
-        "open_in_bot": "🤖 Open in bot",
-        "solve_in_bot": "🤖 Solve in bot",
-        "user_sol_new": "🧩 <b>New solution</b>\nTask: {date} · №{num}\n🪪 {nick}\n👤 {tg}",
-        "unknown_text": "🤖 Use /start.",
+        "unknown_text": "🤖 Unknown command. Type /start.",
         "expect_file": "📤 Waiting for a file.",
-        "expect_doc": "📄 Waiting for a file.",
+        "expect_doc": "📄 Waiting for a document.",
         "only_admin": "Not available.",
         "choose_tags_n": "🏷 Pick tags ({n}):",
         "rating_line": "{medal} {name} — {score} pts · ✅ {solved} · 🔥 {streak} d.",
@@ -551,12 +546,10 @@ TEXTS = {
         "rating_medal_2": "🥈",
         "rating_medal_3": "🥉",
         "download_all_zip": "📦 Download all materials (ZIP)",
-        "download_cat_zip": "📦 Download section (ZIP)",
         "zip_preparing": "⏳ Preparing ZIP archive ({current}/{total})...",
-        "zip_empty": "⚠️ No files available for download in the catalog.",
+        "zip_empty": "⚠️ No files in catalog.",
         "zip_ready": "📦 <b>MathAm Library Archive</b>\n📚 Files: {count}\n💾 Size: {size_mb:.1f} MB",
         "zip_part": "📦 <b>MathAm Library Archive (Part {part}/{total_parts})</b>\n📚 Files: {count}\n💾 Size: {size_mb:.1f} MB",
-        "zip_error": "⚠️ An error occurred while creating the archive.",
     },
 }
 
@@ -568,7 +561,7 @@ def get_user_lang(user_id: int) -> str:
     return lang if lang in TEXTS else "ru"
 
 
-def t(user_id: int, key: str, **kwargs) -> str:
+def t(user_id: int, key: str, **kwargs: Any) -> str:
     lang = get_user_lang(user_id)
     text = TEXTS.get(lang, TEXTS["ru"]).get(key) or TEXTS["ru"].get(key, key)
     try:
@@ -584,29 +577,25 @@ def t(user_id: int, key: str, **kwargs) -> str:
 GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
 
 _MATH_PATTERNS = [
-    # 1. Display containers
     re.compile(r"\$\$[\s\S]+?\$\$"),
     re.compile(r"\\\[[\s\S]+?\\\]"),
-    # 2. LaTeX environments
     re.compile(r"\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\1\}"),
-    # 3. Inline containers
     re.compile(r"\\\([\s\S]+?\\\)"),
     re.compile(r"\$[^\$\n]+?\$"),
-    # 4. Commands with nested curly braces, e.g. \frac{...}{...}, \sqrt[3]{...}, \pmod{...}
     re.compile(r"\\([a-zA-Z]+)(?:\[[^\]]*\])?(?:\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})+"),
-    # 5. Standalone LaTeX commands/symbols, e.g. \alpha, \ge, \le, \ne, \infty, \pi, \cdot, \times, \pm
     re.compile(r"\\[a-zA-Z]+"),
-    # 6. Variable sub/superscript, e.g. x_1, a^2, x_{i+1}, 2^{n-1}
     re.compile(r"(?<![A-Za-zА-Яа-я0-9])[A-Za-z]\s*[\^_]\s*(?:\{[^{}]*\}|[A-Za-z0-9]+)"),
 ]
 
-_translation_cache: dict = {}
+# Thread-safe LRU translation cache using OrderedDict
+_translation_cache: "OrderedDict[Tuple[str, str], str]" = OrderedDict()
+MAX_TRANSLATION_CACHE = 4000
 
 
-def _protect_math(text: str):
-    protected = []
+def _protect_math(text: str) -> Tuple[str, List[str]]:
+    protected: List[str] = []
 
-    def repl(m):
+    def repl(m: re.Match) -> str:
         protected.append(m.group(0))
         return f"_MTH_TOKEN_{len(protected) - 1}_"
 
@@ -615,19 +604,18 @@ def _protect_math(text: str):
     return text, protected
 
 
-def _restore_math(text: str, protected: list):
+def _restore_math(text: str, protected: List[str]) -> str:
     pattern = re.compile(
         r"(?:_MTH_TOKEN_|<<\s*M\s*|«\s*M\s*|MTH_TOKEN_)\s*(\d+)(?:\s*(?:>>|»|_))?",
-        re.IGNORECASE
+        re.IGNORECASE,
     )
 
-    def repl(m):
+    def repl(m: re.Match) -> str:
         idx = int(m.group(1))
         if 0 <= idx < len(protected):
             return protected[idx]
         return m.group(0)
 
-    # Multi-pass restore to handle nested structures cleanly
     for _ in range(5):
         new_text = pattern.sub(repl, text)
         if new_text == text:
@@ -636,17 +624,17 @@ def _restore_math(text: str, protected: list):
     return text
 
 
-def _chunk_text(text: str, max_chunk_len: int = 1200) -> list[str]:
+def _chunk_text(text: str, max_chunk_len: int = 1200) -> List[str]:
     if len(text) <= max_chunk_len:
         return [text]
     lines = text.split("\n")
-    chunks = []
-    curr = []
+    chunks: List[str] = []
+    curr: List[str] = []
     curr_len = 0
     for line in lines:
         if len(line) > max_chunk_len:
             words = line.split(" ")
-            w_curr = []
+            w_curr: List[str] = []
             w_len = 0
             for w in words:
                 if w_len + len(w) + 1 > max_chunk_len and w_curr:
@@ -680,53 +668,55 @@ async def _fetch_gt_segment(session: aiohttp.ClientSession, segment: str, target
         return segment
     try:
         params = {"client": "gtx", "sl": "auto", "tl": target_lang, "dt": "t", "q": segment}
-        async with session.get(GOOGLE_TRANSLATE_URL, params=params) as resp:
+        async with session.get(GOOGLE_TRANSLATE_URL, params=params, timeout=aiohttp.ClientTimeout(total=8)) as resp:
             data = await resp.json()
-            parts = []
-            for seg in data[0]:
-                if seg and seg[0]:
-                    parts.append(seg[0])
+            parts = [seg[0] for seg in data[0] if seg and seg[0]]
             return "".join(parts)
     except Exception:
-        logger.exception("Google translate segment failed")
+        logger.warning("Google translate segment failed, returning raw segment")
         return segment
 
 
 async def translate_text(text: str, target_lang: str) -> str:
-    if not text or not text.strip():
-        return text
-    if target_lang not in ("ru", "en"):
+    global HTTP_SESSION
+    if not text or not text.strip() or target_lang not in ("ru", "en"):
         return text
 
-    key = (text, target_lang)
-    if key in _translation_cache:
-        return _translation_cache[key]
+    cache_key = (text, target_lang)
+    if cache_key in _translation_cache:
+        _translation_cache.move_to_end(cache_key)
+        return _translation_cache[cache_key]
 
     working, protected = _protect_math(text)
-
-    # Check if remaining text contains actual words that need translation
     stripped = re.sub(r"(?:_MTH_TOKEN_|<<\s*M\s*|«\s*M\s*|MTH_TOKEN_)\s*(\d+)(?:\s*(?:>>|»|_))?", "", working)
-    words = re.findall(r"[a-zA-Zа-яА-ЯёЁ]{2,}", stripped)
-    if not words:
+    if not re.findall(r"[a-zA-Zа-яА-ЯёЁ]{2,}", stripped):
         return text
 
     chunks = _chunk_text(working, 1200)
-    timeout = aiohttp.ClientTimeout(total=25)
-    translated_chunks = []
+    translated_chunks: List[str] = []
+
+    session = HTTP_SESSION
+    is_temp_session = False
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+        is_temp_session = True
+
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            for ch in chunks:
-                tr = await _fetch_gt_segment(session, ch, target_lang)
-                translated_chunks.append(tr)
+        for ch in chunks:
+            tr = await _fetch_gt_segment(session, ch, target_lang)
+            translated_chunks.append(tr)
         raw_translated = "\n".join(translated_chunks)
     except Exception:
-        logger.exception("Translation request failed")
+        logger.exception("Translation batch failed")
         raw_translated = working
+    finally:
+        if is_temp_session:
+            await session.close()
 
     translated = _restore_math(raw_translated, protected)
-    if len(_translation_cache) > 5000:
-        _translation_cache.clear()
-    _translation_cache[key] = translated
+    if len(_translation_cache) >= MAX_TRANSLATION_CACHE:
+        _translation_cache.popitem(last=False)
+    _translation_cache[cache_key] = translated
     return translated
 
 
@@ -751,15 +741,12 @@ async def localize(text: str, user_id: int) -> str:
     return await translate_text(text, lang)
 
 
-async def localize_list(items: list, user_id: int) -> list:
-    out = []
-    for x in items:
-        out.append(await localize(x, user_id))
-    return out
+async def localize_list(items: List[str], user_id: int) -> List[str]:
+    return [await localize(x, user_id) for x in items]
 
 
 # ============================================================
-# DEFAULT STATE
+# DEFAULT STATE & MIGRATION SCHEMA
 # ============================================================
 
 DEFAULT_TAGS = [
@@ -808,18 +795,19 @@ DEFAULT_STATE = {
 class UserActivityMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = getattr(event, "from_user", None)
-        if user:
+        if user and not user.is_bot:
             try:
                 await track_user_activity(user.id, user.username or "", user.first_name or "")
             except Exception:
-                logger.exception("Failed to track user activity")
+                logger.exception("UserActivityMiddleware error")
         return await handler(event, data)
 
 
 class SimpleRateLimitMiddleware(BaseMiddleware):
     def __init__(self, per_minute: int = 30):
         self.per_minute = per_minute
-        self.buckets: dict = {}
+        self.buckets: Dict[str, int] = {}
+        self._lock = asyncio.Lock()
 
     async def __call__(self, handler, event, data):
         user = getattr(event, "from_user", None)
@@ -827,20 +815,22 @@ class SimpleRateLimitMiddleware(BaseMiddleware):
             now = datetime.now(timezone.utc)
             minute = now.strftime("%Y%m%d%H%M")
             key = f"{user.id}:{minute}"
-            cnt = self.buckets.get(key, 0)
-            if cnt >= self.per_minute:
-                if isinstance(event, types.CallbackQuery):
-                    try:
-                        await event.answer("⏱ Слишком часто. Подождите.", show_alert=False)
-                    except Exception:
-                        pass
-                return
-            self.buckets[key] = cnt + 1
-            if len(self.buckets) > 5000:
-                cutoff = (now - timedelta(minutes=3)).strftime("%Y%m%d%H%M")
-                for k in list(self.buckets.keys()):
-                    if k.split(":")[1] < cutoff:
-                        del self.buckets[k]
+
+            async with self._lock:
+                cnt = self.buckets.get(key, 0)
+                if cnt >= self.per_minute:
+                    if isinstance(event, types.CallbackQuery):
+                        try:
+                            await event.answer("⏱ Слишком часто. Подождите.", show_alert=False)
+                        except Exception:
+                            pass
+                    return
+                self.buckets[key] = cnt + 1
+
+                if len(self.buckets) > 3000:
+                    cutoff = (now - timedelta(minutes=3)).strftime("%Y%m%d%H%M")
+                    self.buckets = {k: v for k, v in self.buckets.items() if k.split(":")[1] >= cutoff}
+
         return await handler(event, data)
 
 
@@ -864,7 +854,7 @@ def get_file_by_uid(uid: str) -> dict:
     return {}
 
 
-def get_file_categories(uid: str) -> list:
+def get_file_categories(uid: str) -> List[str]:
     cats = []
     for cat_key, cat_data in DATABASE.get("categories", {}).items():
         for f in cat_data.get("files", []):
@@ -874,7 +864,7 @@ def get_file_categories(uid: str) -> list:
     return cats
 
 
-def get_catalog_files_list() -> list:
+def get_catalog_files_list() -> List[dict]:
     files_dict = {}
     for cat_key, cat_data in DATABASE.get("categories", {}).items():
         for f in cat_data.get("files", []):
@@ -904,7 +894,7 @@ def get_catalog_files_list() -> list:
     return list(files_dict.values())
 
 
-def get_similar_files(uid: str, limit: int = 5) -> list:
+def get_similar_files(uid: str, limit: int = 5) -> List[dict]:
     current = get_file_by_uid(uid)
     if not current:
         return []
@@ -921,7 +911,7 @@ def get_similar_files(uid: str, limit: int = 5) -> list:
     return [f for _, f in scored[:limit]]
 
 
-def _split_text(text: str, limit: int) -> list:
+def _split_text(text: str, limit: int = TG_TEXT_LIMIT) -> List[str]:
     parts = []
     remaining = text
     while remaining:
@@ -936,39 +926,38 @@ def _split_text(text: str, limit: int) -> list:
     return parts
 
 
-async def safe_send_or_edit(target, text: str, reply_markup=None, photo_id=None, parse_mode=ParseMode.HTML):
+async def safe_send_or_edit(
+    target: Union[types.Message, types.CallbackQuery],
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    photo_id: Optional[str] = None,
+    parse_mode: str = ParseMode.HTML,
+):
     is_message = isinstance(target, types.Message)
     chat_id = target.chat.id if is_message else target.message.chat.id
 
     if photo_id:
         if len(text) <= 1024:
             if is_message:
-                return await target.answer_photo(photo=photo_id, caption=text,
-                                                 parse_mode=parse_mode, reply_markup=reply_markup)
-            msg = target.message
+                return await target.answer_photo(photo=photo_id, caption=text, parse_mode=parse_mode, reply_markup=reply_markup)
             try:
-                await msg.delete()
+                await target.message.delete()
             except Exception:
                 pass
-            return await msg.answer_photo(photo=photo_id, caption=text,
-                                          parse_mode=parse_mode, reply_markup=reply_markup)
+            return await target.message.answer_photo(photo=photo_id, caption=text, parse_mode=parse_mode, reply_markup=reply_markup)
         else:
             if is_message:
                 await target.answer_photo(photo=photo_id, caption="📄")
             else:
-                msg = target.message
                 try:
-                    await msg.delete()
+                    await target.message.delete()
                 except Exception:
                     pass
-                await msg.answer_photo(photo=photo_id, caption="📄")
+                await target.message.answer_photo(photo=photo_id, caption="📄")
             parts = _split_text(text, TG_TEXT_LIMIT)
             for i, part in enumerate(parts):
                 mk = reply_markup if i == len(parts) - 1 else None
-                try:
-                    await bot.send_message(chat_id, part, parse_mode=parse_mode, reply_markup=mk)
-                except Exception:
-                    logger.exception("Failed to send long text part")
+                await bot.send_message(chat_id, part, parse_mode=parse_mode, reply_markup=mk)
             return None
 
     if len(text) <= TG_TEXT_LIMIT:
@@ -1004,15 +993,9 @@ async def safe_send_or_edit(target, text: str, reply_markup=None, photo_id=None,
                 except Exception:
                     await msg.answer(first, parse_mode=parse_mode)
         for part in rest:
-            try:
-                await bot.send_message(chat_id, part, parse_mode=parse_mode)
-            except Exception:
-                logger.exception("Failed to send long text part")
+            await bot.send_message(chat_id, part, parse_mode=parse_mode)
         if reply_markup:
-            try:
-                return await bot.send_message(chat_id, "⬇️", reply_markup=reply_markup)
-            except Exception:
-                pass
+            return await bot.send_message(chat_id, "⬇️", reply_markup=reply_markup)
         return None
 
 
@@ -1076,7 +1059,8 @@ async def award_points(user_id: int, points: int):
         await track_user_activity(user_id, "", "")
     if uid_str not in DATABASE.get("users", {}):
         return
-    DATABASE["users"][uid_str]["score"] = DATABASE["users"][uid_str].get("score", 0) + points
+    current_score = DATABASE["users"][uid_str].get("score", 0) + points
+    DATABASE["users"][uid_str]["score"] = max(0, current_score)
     await db_collection.update_one(
         {"_id": DB_DOC_ID},
         {"$set": {f"data.users.{uid_str}.score": DATABASE["users"][uid_str]["score"]}},
@@ -1089,7 +1073,6 @@ def get_nickname(uid_str: str) -> str:
 
 
 def user_display(uid_str: str) -> str:
-    # No bold tags around nickname
     u = DATABASE.get("users", {}).get(uid_str, {})
     nick = u.get("nickname") or u.get("username") or f"id{uid_str}"
     tg = u.get("first_name") or ""
@@ -1130,7 +1113,7 @@ def get_task(date_str: str, idx: int) -> dict:
     return {}
 
 
-def get_dates_sorted() -> list:
+def get_dates_sorted() -> List[str]:
     return sorted(DATABASE.get("daily_tasks", {}).keys(), reverse=True)
 
 
@@ -1144,7 +1127,7 @@ def count_solved(uid_str: str) -> int:
     return n
 
 
-def update_file_field(uid: str, field: str, value) -> int:
+def update_file_field(uid: str, field: str, value: Any) -> int:
     count = 0
     for cat_data in DATABASE.get("categories", {}).values():
         for f in cat_data.get("files", []):
@@ -1173,8 +1156,8 @@ def rename_tag_everywhere(old_tag: str, new_tag: str) -> int:
     return count
 
 
-def normalize_tags_input(raw: str) -> list:
-    tags = []
+def normalize_tags_input(raw: str) -> List[str]:
+    tags: List[str] = []
     for part in re.split(r"[,;\n]", raw):
         tag = re.sub(r"[^#\wа-яА-ЯёЁ-]", "", part.strip().replace(" ", "-"))
         if tag and not tag.startswith("#"):
@@ -1185,10 +1168,10 @@ def normalize_tags_input(raw: str) -> list:
 
 
 # ============================================================
-# DATABASE LOAD / SAVE
+# DATABASE LOAD / SAVE & CRON RESTORE
 # ============================================================
 
-async def load_db():
+async def load_db() -> Dict[str, Any]:
     doc = await db_collection.find_one({"_id": DB_DOC_ID})
     if doc is None:
         data = copy.deepcopy(DEFAULT_STATE)
@@ -1224,7 +1207,6 @@ async def load_db():
         data["links"][sec_key].setdefault("title", default_sec["title"])
         data["links"][sec_key].setdefault("items", [])
 
-    # Always ensure YouTube videos exist with working clean URLs: delete old and recreate cleanly
     data.setdefault("links", {})["useful_videos"] = copy.deepcopy(DEFAULT_STATE["links"]["useful_videos"])
 
     if not data.get("tags"):
@@ -1262,22 +1244,12 @@ async def load_db():
             task.setdefault("user_solutions", {})
             task.setdefault("numeric_answer", None)
             task["number"] = i + 1
-            for uid_str, sol in task["user_solutions"].items():
-                sol.setdefault("text", "")
-                sol.setdefault("photo_file_id", None)
-                sol.setdefault("document_file_id", None)
-                sol.setdefault("username", "")
-                sol.setdefault("first_name", "")
-                sol.setdefault("nickname", "")
-                sol.setdefault("status", "approved")
-                sol.setdefault("grade", None)
-                sol.setdefault("submitted_at", get_yerevan_date())
 
     await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {"data": data}}, upsert=True)
     return data
 
 
-async def save_db(db_data):
+async def save_db(db_data: dict):
     await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {"data": db_data}}, upsert=True)
 
 
@@ -1290,6 +1262,25 @@ async def get_submission(sub_id: str) -> dict:
     return doc if doc else {}
 
 
+async def restore_scheduled_tasks():
+    """Restores any pending scheduled tasks after server restart."""
+    now = datetime.now(YEREVAN_TZ)
+    daily = DATABASE.get("daily_tasks", {})
+    for date_str, group in daily.items():
+        for idx, task in enumerate(group.get("tasks", [])):
+            if task.get("status") == "scheduled" and task.get("publish_at"):
+                try:
+                    sched_time = datetime.fromisoformat(task["publish_at"])
+                    if sched_time <= now:
+                        logger.info("Executing overdue task for %s #%s", date_str, idx + 1)
+                        asyncio.create_task(_schedule_publish(date_str, idx, now))
+                    else:
+                        logger.info("Restoring future schedule for %s #%s at %s", date_str, idx + 1, sched_time)
+                        asyncio.create_task(_schedule_publish(date_str, idx, sched_time))
+                except Exception as e:
+                    logger.warning("Could not parse publish_at for task %s #%s: %s", date_str, idx, e)
+
+
 # ============================================================
 # FSM STATES
 # ============================================================
@@ -1298,18 +1289,14 @@ class Registration(StatesGroup):
     choosing_language = State()
     waiting_for_nickname = State()
 
-
 class ChangeNicknameState(StatesGroup):
     waiting_new_name = State()
-
 
 class TagSearch(StatesGroup):
     selecting = State()
 
-
 class TaskTagSearch(StatesGroup):
     selecting = State()
-
 
 class AdminUpload(StatesGroup):
     waiting_document = State()
@@ -1319,36 +1306,29 @@ class AdminUpload(StatesGroup):
     choosing_difficulty = State()
     choosing_categories = State()
 
-
 class AdminAddCategory(StatesGroup):
     waiting_for_title = State()
-
 
 class UserSubmit(StatesGroup):
     waiting_file = State()
     waiting_title = State()
     choosing_tags = State()
 
-
 class AddTag(StatesGroup):
     waiting_for_text = State()
-
 
 class RenameTag(StatesGroup):
     choosing = State()
     waiting_for_new_name = State()
 
-
 class AddLink(StatesGroup):
     waiting_for_text = State()
-
 
 class EditFile(StatesGroup):
     waiting_for_document = State()
     waiting_for_title = State()
     waiting_for_desc = State()
     waiting_for_tags = State()
-
 
 class TaskOfDayAdmin(StatesGroup):
     waiting_for_photo = State()
@@ -1359,42 +1339,35 @@ class TaskOfDayAdmin(StatesGroup):
     choosing_tags = State()
     waiting_for_date = State()
 
-
 class UserTaskSolution(StatesGroup):
     waiting_for_solution = State()
-
 
 class UserNumericAnswer(StatesGroup):
     waiting = State()
 
-
 class FileComment(StatesGroup):
     waiting = State()
-
 
 class FileNote(StatesGroup):
     waiting = State()
 
-
 class BroadcastAdmin(StatesGroup):
     waiting_for_message = State()
-
 
 class TaskEdit(StatesGroup):
     text = State()
     photo = State()
     solution = State()
 
-
 class TaskSchedule(StatesGroup):
     waiting_datetime = State()
 
 
 # ============================================================
-# KEYBOARDS
+# UI KEYBOARDS
 # ============================================================
 
-def get_main_menu_keyboard(user_id: int):
+def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     builder = [
         [InlineKeyboardButton(text=t(user_id, "menu_catalog"), callback_data="menu:catalog"),
          InlineKeyboardButton(text=t(user_id, "menu_search"), callback_data="search:main")],
@@ -1415,27 +1388,20 @@ def get_main_menu_keyboard(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
 
-async def get_catalog_keyboard(user_id: int):
+async def get_catalog_keyboard(user_id: int) -> InlineKeyboardMarkup:
     builder = []
     for cat_key, cat_data in DATABASE.get("categories", {}).items():
         count = len(cat_data.get("files", []))
         title = await localize(cat_data.get("title", cat_key), user_id)
-        builder.append([InlineKeyboardButton(
-            text=f"{title} ({count})",
-            callback_data=f"cat:{cat_key}",
-        )])
-    # Button to download all PDFs in a ZIP archive
-    builder.append([InlineKeyboardButton(
-        text=t(user_id, "download_all_zip"),
-        callback_data="catalog:zip_all"
-    )])
+        builder.append([InlineKeyboardButton(text=f"{title} ({count})", callback_data=f"cat:{cat_key}")])
+    builder.append([InlineKeyboardButton(text=t(user_id, "download_all_zip"), callback_data="catalog:zip_all")])
     if is_admin(user_id):
         builder.append([InlineKeyboardButton(text="➕ Добавить раздел", callback_data="admin:add_cat")])
     builder.append([InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
 
-def get_file_view_keyboard(uid: str, user_id: int):
+def get_file_view_keyboard(uid: str, user_id: int) -> InlineKeyboardMarkup:
     uid_str = str(user_id)
     user_favs = DATABASE.get("users", {}).get(uid_str, {}).get("favorites", [])
     is_fav = uid in user_favs
@@ -1467,20 +1433,17 @@ def get_file_view_keyboard(uid: str, user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def get_task_keyboard(date_str: str, task_idx: int, user_id: int):
+def get_task_keyboard(date_str: str, task_idx: int, user_id: int) -> InlineKeyboardMarkup:
     task = get_task(date_str, task_idx)
     if not task:
-        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text=t(user_id, "back_menu"), callback_data="menu:main")]])
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")]])
     uid_str = str(user_id)
     sol = (task.get("user_solutions") or {}).get(uid_str)
     rows = []
     if sol is None or sol.get("status") == "rejected":
-        rows.append([InlineKeyboardButton(text=t(user_id, "task_send_solution"),
-                                          callback_data=f"task:solve:{date_str}:{task_idx}")])
+        rows.append([InlineKeyboardButton(text=t(user_id, "task_send_solution"), callback_data=f"task:solve:{date_str}:{task_idx}")])
         if task.get("numeric_answer"):
-            rows.append([InlineKeyboardButton(text="🔢 Ввести ответ",
-                                              callback_data=f"task:numans:{date_str}:{task_idx}")])
+            rows.append([InlineKeyboardButton(text="🔢 Ввести ответ", callback_data=f"task:numans:{date_str}:{task_idx}")])
     elif sol.get("status") == "pending":
         rows.append([InlineKeyboardButton(text=t(user_id, "task_solution_pending"), callback_data="noop")])
     else:
@@ -1489,21 +1452,16 @@ def get_task_keyboard(date_str: str, task_idx: int, user_id: int):
         rows.append([InlineKeyboardButton(text=label, callback_data="noop")])
 
     if task.get("solution") or task.get("solution_photo_file_id") or task.get("solution_document_file_id"):
-        rows.append([InlineKeyboardButton(text=t(user_id, "task_author_solution"),
-                                          callback_data=f"task:show_sol:{date_str}:{task_idx}")])
+        rows.append([InlineKeyboardButton(text=t(user_id, "task_author_solution"), callback_data=f"task:show_sol:{date_str}:{task_idx}")])
 
     approved = [s for s in (task.get("user_solutions") or {}).values() if s.get("status") == "approved"]
-    rows.append([InlineKeyboardButton(text=t(user_id, "task_solutions", n=len(approved)),
-                                      callback_data=f"task:sols:{date_str}:{task_idx}")])
+    rows.append([InlineKeyboardButton(text=t(user_id, "task_solutions", n=len(approved)), callback_data=f"task:sols:{date_str}:{task_idx}")])
 
     if is_admin(user_id):
-        rows.append([InlineKeyboardButton(text=t(user_id, "task_bcast"),
-                                          callback_data=f"task:bcast:{date_str}:{task_idx}")])
+        rows.append([InlineKeyboardButton(text=t(user_id, "task_bcast"), callback_data=f"task:bcast:{date_str}:{task_idx}")])
         rows.append([
-            InlineKeyboardButton(text="✏️ Редактировать",
-                                 callback_data=f"task:edit:{date_str}:{task_idx}"),
-            InlineKeyboardButton(text="🗑 Удалить",
-                                 callback_data=f"task:del:{date_str}:{task_idx}"),
+            InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"task:edit:{date_str}:{task_idx}"),
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"task:del:{date_str}:{task_idx}"),
         ])
 
     tasks_total = len(DATABASE.get("daily_tasks", {}).get(date_str, {}).get("tasks", []))
@@ -1521,8 +1479,7 @@ def get_task_keyboard(date_str: str, task_idx: int, user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def get_tag_toggle_keyboard(selected: list, prefix: str, done_cb: str,
-                                  user_id: int, skip_text: str = None, skip_cb: str = None):
+async def get_tag_toggle_keyboard(selected: list, prefix: str, done_cb: str, user_id: int, skip_text: str = None, skip_cb: str = None):
     tags = DATABASE.get("tags", [])
     rows, row = [], []
     for i, tag in enumerate(tags):
@@ -1576,22 +1533,20 @@ def get_links_section_keyboard(sec_key: str, user_id: int):
     builder = []
     for idx, item in enumerate(items):
         url = (item.get("url") or "").strip()
-        # Ensure scheme is present so Telegram inline URL buttons work perfectly
         if not (url.startswith("http://") or url.startswith("https://")):
             url = f"https://{url}"
         title = item.get("title") or f"Link #{idx + 1}"
         icon = "▶️ " if sec_key == "useful_videos" else "🔗 "
         builder.append([InlineKeyboardButton(text=f"{icon}{title}", url=url)])
         if is_admin(user_id):
-            builder.append([InlineKeyboardButton(text=t(user_id, "links_del", n=idx + 1),
-                                                 callback_data=f"links:del:{sec_key}:{idx}")])
+            builder.append([InlineKeyboardButton(text=t(user_id, "links_del", n=idx + 1), callback_data=f"links:del:{sec_key}:{idx}")])
     if is_admin(user_id):
         builder.append([InlineKeyboardButton(text=t(user_id, "links_add"), callback_data=f"links:add:{sec_key}")])
     builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="links:main")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
 
-def get_admin_menu_keyboard(user_id: int):
+def get_admin_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t(user_id, "admin_upload"), callback_data="admin:upload")],
         [InlineKeyboardButton(text=t(user_id, "admin_add_task"), callback_data="admin:add_task")],
@@ -1607,7 +1562,7 @@ def get_admin_menu_keyboard(user_id: int):
     ])
 
 
-def get_language_keyboard(user_id: int):
+def get_language_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:set:ru")],
         [InlineKeyboardButton(text="🇬🇧 English", callback_data="lang:set:en")],
@@ -1621,6 +1576,10 @@ def sanitize_filename(name: str) -> str:
     return clean[:60] if clean else "material"
 
 
+# ============================================================
+# ARCHIVE DOWNLOAD (STREAMING BUFFER SAFE)
+# ============================================================
+
 async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: list, archive_title: str):
     if not files_to_download:
         await bot.send_message(chat_id, t(user_id, "zip_empty"))
@@ -1630,11 +1589,11 @@ async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: lis
     status_msg = await bot.send_message(chat_id, t(user_id, "zip_preparing", current=0, total=total))
 
     sem = asyncio.Semaphore(4)
-    downloaded_files = []
+    downloaded_files: List[Tuple[str, bytes]] = []
     completed_count = 0
     lock = asyncio.Lock()
 
-    async def _fetch_file(item):
+    async def _fetch_file(item: dict):
         nonlocal completed_count
         file_id = item.get("file_id")
         if not file_id:
@@ -1719,7 +1678,7 @@ async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: lis
             fname = f"MathAm_{safe_title}_{date_str}.zip"
             caption = t(user_id, "zip_ready", count=len(vol), size_mb=size_mb)
 
-        doc = types.BufferedInputFile(zip_bytes, filename=fname)
+        doc = BufferedInputFile(zip_bytes, filename=fname)
         await bot.send_document(chat_id, document=doc, caption=caption, parse_mode=ParseMode.HTML)
 
     try:
@@ -1729,7 +1688,7 @@ async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: lis
 
 
 # ============================================================
-# RENDER HELPERS
+# CARD RENDERERS
 # ============================================================
 
 async def format_file_info(f: dict, cats: list, user_id: int) -> str:
@@ -1761,7 +1720,7 @@ async def format_file_info(f: dict, cats: list, user_id: int) -> str:
     return "\n".join(lines)
 
 
-async def show_file_card(target, uid: str, user_id: int) -> bool:
+async def show_file_card(target: Union[types.Message, types.CallbackQuery], uid: str, user_id: int) -> bool:
     f = get_file_by_uid(uid)
     if not f:
         return False
@@ -1770,26 +1729,26 @@ async def show_file_card(target, uid: str, user_id: int) -> bool:
     return True
 
 
-async def show_task(target, date_str: str, task_idx: int, user_id: int = None):
+async def show_task(target: Union[types.Message, types.CallbackQuery], date_str: str, task_idx: int, user_id: int = None):
     if user_id is None:
         user_id = target.from_user.id
     task = get_task(date_str, task_idx)
     total = len(DATABASE.get("daily_tasks", {}).get(date_str, {}).get("tasks", []))
     if not task:
-        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text=t(user_id, "back_menu"), callback_data="menu:main")]])
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")]])
         await safe_send_or_edit(target, t(user_id, "task_missing"), reply_markup=markup)
         return
     task_text = (task.get("text") or "").strip() or t(user_id, "task_text_on_photo")
     task_text = await localize(task_text, user_id)
-    text = t(user_id, "task_of_day",
-             date=date_str, num=task_idx + 1, total=total,
-             text=html.escape(task_text))
+    text = t(user_id, "task_of_day", date=date_str, num=task_idx + 1, total=total, text=html.escape(task_text))
     if task.get("tags"):
-        text += f"\n\n🏷 " + " ".join(html.escape(x) for x in task["tags"])
-    await safe_send_or_edit(target, text,
-                            reply_markup=get_task_keyboard(date_str, task_idx, user_id),
-                            photo_id=task.get("photo_file_id"))
+        text += "\n\n🏷 " + " ".join(html.escape(x) for x in task["tags"])
+    await safe_send_or_edit(
+        target,
+        text,
+        reply_markup=get_task_keyboard(date_str, task_idx, user_id),
+        photo_id=task.get("photo_file_id"),
+    )
 
 
 async def render_mustread(target, user_id: int):
@@ -1797,12 +1756,10 @@ async def render_mustread(target, user_id: int):
     builder = []
     if files:
         for f in files:
-            caption = await localize(f['caption'], user_id)
-            builder.append([InlineKeyboardButton(text=f"⭐ {caption[:55]}",
-                                                 callback_data=f"file:view:{f['uid']}")])
+            caption = await localize(f["caption"], user_id)
+            builder.append([InlineKeyboardButton(text=f"⭐ {caption[:55]}", callback_data=f"file:view:{f['uid']}")])
             if is_admin(user_id):
-                builder.append([InlineKeyboardButton(text=t(user_id, "mustread_remove_btn"),
-                                                     callback_data=f"mustread:toggle:{f['uid']}")])
+                builder.append([InlineKeyboardButton(text=t(user_id, "mustread_remove_btn"), callback_data=f"mustread:toggle:{f['uid']}")])
         text = t(user_id, "mustread_title")
     else:
         text = t(user_id, "mustread_empty")
@@ -1838,14 +1795,13 @@ ARCHIVE_PAGE_SIZE = 8
 
 async def render_archive(target, page: int, user_id: int):
     dates = get_dates_sorted()
-    markup_empty = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-        text=t(user_id, "back_menu"), callback_data="menu:main")]])
+    markup_empty = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")]])
     if not dates:
         await safe_send_or_edit(target, t(user_id, "task_archive_empty"), reply_markup=markup_empty)
         return
     total_pages = (len(dates) + ARCHIVE_PAGE_SIZE - 1) // ARCHIVE_PAGE_SIZE
     page = max(0, min(page, total_pages - 1))
-    chunk = dates[page * ARCHIVE_PAGE_SIZE:(page + 1) * ARCHIVE_PAGE_SIZE]
+    chunk = dates[page * ARCHIVE_PAGE_SIZE : (page + 1) * ARCHIVE_PAGE_SIZE]
     rows = []
     for d in chunk:
         n = len(DATABASE.get("daily_tasks", {}).get(d, {}).get("tasks", []))
@@ -1864,7 +1820,7 @@ async def render_archive(target, page: int, user_id: int):
 
 
 # ============================================================
-# BROADCAST
+# BROADCAST & NOTIFICATIONS
 # ============================================================
 
 async def broadcast_task(date_str: str, task_idx: int, report_msg: types.Message = None):
@@ -1873,26 +1829,20 @@ async def broadcast_task(date_str: str, task_idx: int, report_msg: types.Message
         return
     tasks_total = len(DATABASE.get("daily_tasks", {}).get(date_str, {}).get("tasks", []))
     task_text = (task.get("text") or "").strip() or "Текст задачи — на фото."
-    text_ru = (
-        f"🎯 <b>Задача дня</b> · {date_str}\n"
-        f"<i>№ {task_idx + 1} из {tasks_total}</i>\n\n"
-        f"{html.escape(task_text)}"
-    )
+    text_ru = f"🎯 <b>Задача дня</b> · {date_str}\n<i>№ {task_idx + 1} из {tasks_total}</i>\n\n{html.escape(task_text)}"
     if task.get("tags"):
-        text_ru += f"\n\n🏷 " + " ".join(html.escape(x) for x in task["tags"])
+        text_ru += "\n\n🏷 " + " ".join(html.escape(x) for x in task["tags"])
 
     markup_ru = None
     if BOT_USERNAME:
         markup_ru = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🤖 Решить в боте",
-                                 url=f"https://t.me/{BOT_USERNAME}?start=task_{date_str}_{task_idx}")
+            InlineKeyboardButton(text="🤖 Решить в боте", url=f"https://t.me/{BOT_USERNAME}?start=task_{date_str}_{task_idx}")
         ]])
 
     channel_ok = True
     try:
         if task.get("photo_file_id"):
-            await bot.send_photo(CHANNEL_ID, photo=task["photo_file_id"],
-                                 caption=text_ru[:1024], parse_mode=ParseMode.HTML, reply_markup=markup_ru)
+            await bot.send_photo(CHANNEL_ID, photo=task["photo_file_id"], caption=text_ru[:1024], parse_mode=ParseMode.HTML, reply_markup=markup_ru)
         else:
             await bot.send_message(CHANNEL_ID, text_ru, parse_mode=ParseMode.HTML, reply_markup=markup_ru)
     except Exception as e:
@@ -1912,18 +1862,15 @@ async def broadcast_task(date_str: str, task_idx: int, report_msg: types.Message
             if text_en_cache["value"] is None:
                 translated = await translate_text(task_text, "en")
                 text_en_cache["value"] = (
-                    f"🎯 <b>Task of the day</b> · {date_str}\n"
-                    f"<i>№ {task_idx + 1} of {tasks_total}</i>\n\n"
-                    f"{html.escape(translated)}"
+                    f"🎯 <b>Task of the day</b> · {date_str}\n<i>№ {task_idx + 1} of {tasks_total}</i>\n\n{html.escape(translated)}"
                 )
                 if task.get("tags"):
-                    text_en_cache["value"] += f"\n\n🏷 " + " ".join(html.escape(x) for x in task["tags"])
+                    text_en_cache["value"] += "\n\n🏷 " + " ".join(html.escape(x) for x in task["tags"])
             text = text_en_cache["value"]
             markup = None
             if BOT_USERNAME:
                 markup = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="🤖 Solve in bot",
-                                         url=f"https://t.me/{BOT_USERNAME}?start=task_{date_str}_{task_idx}")
+                    InlineKeyboardButton(text="🤖 Solve in bot", url=f"https://t.me/{BOT_USERNAME}?start=task_{date_str}_{task_idx}")
                 ]])
         else:
             text = text_ru
@@ -1931,8 +1878,7 @@ async def broadcast_task(date_str: str, task_idx: int, report_msg: types.Message
 
         try:
             if task.get("photo_file_id"):
-                await bot.send_photo(int(uid_str), photo=task["photo_file_id"],
-                                     caption=text[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
+                await bot.send_photo(int(uid_str), photo=task["photo_file_id"], caption=text[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
             else:
                 await bot.send_message(int(uid_str), text, parse_mode=ParseMode.HTML, reply_markup=markup)
             async with lock:
@@ -1941,8 +1887,7 @@ async def broadcast_task(date_str: str, task_idx: int, report_msg: types.Message
             await asyncio.sleep(e.retry_after + 1)
             try:
                 if task.get("photo_file_id"):
-                    await bot.send_photo(int(uid_str), photo=task["photo_file_id"],
-                                         caption=text[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
+                    await bot.send_photo(int(uid_str), photo=task["photo_file_id"], caption=text[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
                 else:
                     await bot.send_message(int(uid_str), text, parse_mode=ParseMode.HTML, reply_markup=markup)
                 async with lock:
@@ -1953,7 +1898,7 @@ async def broadcast_task(date_str: str, task_idx: int, report_msg: types.Message
         except Exception:
             async with lock:
                 failed += 1
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.04)
 
     async def _guarded(uid_str):
         async with sem:
@@ -1987,56 +1932,81 @@ async def announce_file_to_channel(entry: dict, cat_titles: list):
     markup = None
     if BOT_USERNAME:
         markup = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🤖 Открыть в боте",
-                                 url=f"https://t.me/{BOT_USERNAME}?start=file_{entry['file_unique_id']}")
+            InlineKeyboardButton(text="🤖 Открыть в боте", url=f"https://t.me/{BOT_USERNAME}?start=file_{entry['file_unique_id']}")
         ]])
     try:
-        await bot.send_document(CHANNEL_ID, document=entry["file_id"],
-                                caption=text[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
+        await bot.send_document(CHANNEL_ID, document=entry["file_id"], caption=text[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
     except Exception as e:
         logger.warning("Channel file post failed: %s", e)
         try:
             await bot.send_message(CHANNEL_ID, text[:4000], parse_mode=ParseMode.HTML, reply_markup=markup)
         except Exception:
-            logger.warning("Channel file message also failed")
+            logger.warning("Channel file text message also failed")
+
+
+async def notify_admins_about_solution(date_str: str, idx: int, uid_str: str, entry: dict):
+    u = DATABASE.get("users", {}).get(uid_str, {})
+    nick = entry.get("nickname") or u.get("nickname") or "—"
+    tg = entry.get("first_name") or u.get("first_name") or ""
+    uname = entry.get("username") or u.get("username") or ""
+
+    context = (
+        f"🧩 <b>Новое решение задачи</b>\n"
+        f"📅 Задача: <b>{date_str}</b> · №<b>{idx + 1}</b>\n"
+        f"🪪 Ник: <b>{html.escape(nick)}</b>\n"
+        f"👤 TG: {html.escape(tg)}" + (f" · @{html.escape(uname)}" if uname else "")
+    )
+
+    review_markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Засчитать", callback_data=f"solrev:ok:{date_str}:{idx}:{uid_str}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"solrev:no:{date_str}:{idx}:{uid_str}"),
+    ]])
+
+    photos = entry.get("photo_file_ids") or ([entry["photo_file_id"]] if entry.get("photo_file_id") else [])
+    docs = entry.get("document_file_ids") or ([entry["document_file_id"]] if entry.get("document_file_id") else [])
+    raw_text = (entry.get("text") or "").strip()
+    escaped_user_text = html.escape(raw_text)
+
+    for admin_id in ADMIN_IDS:
+        try:
+            if photos:
+                if len(photos) == 1:
+                    caption_body = f"{context}\n\n{escaped_user_text}" if raw_text else context
+                    if len(caption_body) <= 1000 and not docs:
+                        await bot.send_photo(admin_id, photo=photos[0], caption=caption_body, parse_mode=ParseMode.HTML, reply_markup=review_markup)
+                        continue
+                    else:
+                        await bot.send_photo(admin_id, photo=photos[0], caption=context, parse_mode=ParseMode.HTML)
+                else:
+                    media = []
+                    for i, p in enumerate(photos[:10]):
+                        cap = context if i == 0 else None
+                        media.append(InputMediaPhoto(media=p, caption=cap, parse_mode=ParseMode.HTML))
+                    await bot.send_media_group(admin_id, media=media)
+
+            for d in docs:
+                await bot.send_document(admin_id, document=d)
+
+            full_body = f"{context}\n\n{escaped_user_text}" if (not photos and raw_text) else escaped_user_text
+            if full_body:
+                parts = _split_text(full_body, TG_TEXT_LIMIT)
+                for i, part in enumerate(parts):
+                    mk = review_markup if i == len(parts) - 1 else None
+                    await bot.send_message(admin_id, part, parse_mode=ParseMode.HTML, reply_markup=mk)
+            elif photos or docs:
+                await bot.send_message(admin_id, "⬇️ Управление решением выше:", reply_markup=review_markup)
+        except Exception:
+            logger.exception("Failed to notify admin %s about solution", admin_id)
 
 
 # ============================================================
-# TAG TOGGLE
-# ============================================================
-
-async def toggle_tag_by_index(callback: types.CallbackQuery, state: FSMContext):
-    try:
-        i = int(callback.data.split(":")[-1])
-    except (ValueError, IndexError):
-        await callback.answer("Error", show_alert=True)
-        return None
-    tags = DATABASE.get("tags", [])
-    if not (0 <= i < len(tags)):
-        await callback.answer(t(callback.from_user.id, "tag_missing"), show_alert=True)
-        return None
-    tag = tags[i]
-    data = await state.get_data()
-    selected = list(data.get("selected_tags", []))
-    if tag in selected:
-        selected.remove(tag)
-        removed = True
-    else:
-        selected.append(tag)
-        removed = False
-    await state.update_data(selected_tags=selected)
-    return selected, tag, removed
-
-
-# ============================================================
-# COMMANDS
+# USER & COMMON COMMAND HANDLERS
 # ============================================================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, command: CommandObject, state: FSMContext):
     await state.clear()
-    await track_user_activity(message.from_user.id, message.from_user.username or "",
-                              message.from_user.first_name or "")
+    await track_user_activity(message.from_user.id, message.from_user.username or "", message.from_user.first_name or "")
 
     args = (command.args or "").strip()
     target = None
@@ -2061,8 +2031,9 @@ async def cmd_start(message: types.Message, command: CommandObject, state: FSMCo
         await state.set_state(Registration.choosing_language)
         await state.update_data(after_register=target)
         await message.answer(
-            t(message.from_user.id, "hello_new", name=html.escape(message.from_user.first_name or "")) + "\n\n" +
-            t(message.from_user.id, "choose_language"),
+            t(message.from_user.id, "hello_new", name=html.escape(message.from_user.first_name or ""))
+            + "\n\n"
+            + t(message.from_user.id, "choose_language"),
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🇷🇺 Русский", callback_data="reg:lang:ru")],
                 [InlineKeyboardButton(text="🇬🇧 English", callback_data="reg:lang:en")],
@@ -2086,9 +2057,50 @@ async def cmd_start(message: types.Message, command: CommandObject, state: FSMCo
         return
 
     welcome_text = f"{greeting}\n\n" + t(message.from_user.id, "menu_title")
-    await safe_send_or_edit(message, welcome_text,
-                            reply_markup=get_main_menu_keyboard(message.from_user.id))
+    await safe_send_or_edit(message, welcome_text, reply_markup=get_main_menu_keyboard(message.from_user.id))
 
+
+@dp.message(Command("task"))
+async def cmd_task(message: types.Message, state: FSMContext):
+    """Missing /task command handler added."""
+    await state.clear()
+    daily = DATABASE.get("daily_tasks", {})
+    today = get_yerevan_date()
+    date_str = today if (today in daily and daily[today].get("tasks")) else (get_dates_sorted()[0] if get_dates_sorted() else None)
+    if not date_str:
+        await message.answer(t(message.from_user.id, "task_no_tasks"), reply_markup=get_main_menu_keyboard(message.from_user.id))
+        return
+    await show_task(message, date_str, 0, message.from_user.id)
+
+
+@dp.message(Command("catalog"))
+async def cmd_catalog(message: types.Message, state: FSMContext):
+    await state.clear()
+    await track_user_activity(message.from_user.id, message.from_user.username or "", message.from_user.first_name or "")
+    await safe_send_or_edit(message, t(message.from_user.id, "catalog_title"), reply_markup=await get_catalog_keyboard(message.from_user.id))
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(t(message.from_user.id, "cancel_done"), reply_markup=get_main_menu_keyboard(message.from_user.id))
+
+
+@dp.message(Command("language", "lang"))
+async def cmd_language(message: types.Message, state: FSMContext):
+    await state.clear()
+    await safe_send_or_edit(message, t(message.from_user.id, "choose_language"), reply_markup=get_language_keyboard(message.from_user.id))
+
+
+@dp.message(Command("nickname"))
+async def cmd_change_nickname(message: types.Message, state: FSMContext):
+    await state.set_state(ChangeNicknameState.waiting_new_name)
+    await message.answer(t(message.from_user.id, "change_nickname"))
+
+
+# ============================================================
+# REGISTRATION & PROFILE
+# ============================================================
 
 @dp.callback_query(StateFilter(Registration.choosing_language), F.data.startswith("reg:lang:"))
 async def cb_reg_lang(callback: types.CallbackQuery, state: FSMContext):
@@ -2099,8 +2111,7 @@ async def cb_reg_lang(callback: types.CallbackQuery, state: FSMContext):
     uid_str = str(callback.from_user.id)
     DATABASE.setdefault("users", {}).setdefault(uid_str, {})
     DATABASE["users"][uid_str]["language"] = lang
-    await db_collection.update_one({"_id": DB_DOC_ID},
-                                   {"$set": {f"data.users.{uid_str}.language": lang}}, upsert=True)
+    await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {f"data.users.{uid_str}.language": lang}}, upsert=True)
     await callback.answer(t(callback.from_user.id, "lang_set"))
     await state.set_state(Registration.waiting_for_nickname)
     await safe_send_or_edit(callback, t(callback.from_user.id, "ask_nickname"))
@@ -2118,8 +2129,7 @@ async def process_nickname(message: types.Message, state: FSMContext):
     uid_str = str(message.from_user.id)
     DATABASE.setdefault("users", {}).setdefault(uid_str, {})
     DATABASE["users"][uid_str]["nickname"] = nick
-    await db_collection.update_one({"_id": DB_DOC_ID},
-                                   {"$set": {f"data.users.{uid_str}.nickname": nick}}, upsert=True)
+    await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {f"data.users.{uid_str}.nickname": nick}}, upsert=True)
     data = await state.get_data()
     target = data.get("after_register")
     await state.clear()
@@ -2130,21 +2140,7 @@ async def process_nickname(message: types.Message, state: FSMContext):
         elif target[0] == "file":
             await show_file_card(message, target[1], message.from_user.id)
         return
-    await message.answer(t(message.from_user.id, "menu_title"),
-                         reply_markup=get_main_menu_keyboard(message.from_user.id))
-
-
-@dp.message(StateFilter(Registration.waiting_for_nickname))
-async def process_nickname_any(message: types.Message, state: FSMContext):
-    if message.text:
-        return
-    await message.answer(t(message.from_user.id, "ask_nickname"))
-
-
-@dp.message(Command("nickname"))
-async def cmd_change_nickname(message: types.Message, state: FSMContext):
-    await state.set_state(ChangeNicknameState.waiting_new_name)
-    await message.answer(t(message.from_user.id, "change_nickname"))
+    await message.answer(t(message.from_user.id, "menu_title"), reply_markup=get_main_menu_keyboard(message.from_user.id))
 
 
 @dp.callback_query(F.data == "user:chname")
@@ -2166,45 +2162,22 @@ async def process_new_nickname(message: types.Message, state: FSMContext):
     uid_str = str(message.from_user.id)
     DATABASE.setdefault("users", {}).setdefault(uid_str, {})
     DATABASE["users"][uid_str]["nickname"] = nick
-    await db_collection.update_one({"_id": DB_DOC_ID},
-                                   {"$set": {f"data.users.{uid_str}.nickname": nick}}, upsert=True)
+    await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {f"data.users.{uid_str}.nickname": nick}}, upsert=True)
     await state.clear()
-    await message.answer(t(message.from_user.id, "nickname_updated", nick=html.escape(nick)),
-                         reply_markup=get_main_menu_keyboard(message.from_user.id))
-
-
-@dp.message(Command("catalog"))
-async def cmd_catalog(message: types.Message, state: FSMContext):
-    await state.clear()
-    await track_user_activity(message.from_user.id, message.from_user.username or "",
-                              message.from_user.first_name or "")
-    await safe_send_or_edit(message, t(message.from_user.id, "catalog_title"),
-                            reply_markup=await get_catalog_keyboard(message.from_user.id))
-
-
-@dp.message(Command("cancel"))
-async def cmd_cancel(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer(t(message.from_user.id, "cancel_done"),
-                         reply_markup=get_main_menu_keyboard(message.from_user.id))
-
-
-@dp.message(Command("language", "lang"))
-async def cmd_language(message: types.Message, state: FSMContext):
-    await state.clear()
-    await safe_send_or_edit(message, t(message.from_user.id, "choose_language"),
-                            reply_markup=get_language_keyboard(message.from_user.id))
+    await message.answer(
+        t(message.from_user.id, "nickname_updated", nick=html.escape(nick)),
+        reply_markup=get_main_menu_keyboard(message.from_user.id),
+    )
 
 
 # ============================================================
-# LANGUAGE / MAIN MENU
+# MENU & LANGUAGE CALLBACKS
 # ============================================================
 
 @dp.callback_query(F.data == "lang:menu")
 async def cb_lang_menu(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await safe_send_or_edit(callback, t(callback.from_user.id, "choose_language"),
-                            reply_markup=get_language_keyboard(callback.from_user.id))
+    await safe_send_or_edit(callback, t(callback.from_user.id, "choose_language"), reply_markup=get_language_keyboard(callback.from_user.id))
     await callback.answer()
 
 
@@ -2217,19 +2190,16 @@ async def cb_lang_set(callback: types.CallbackQuery, state: FSMContext):
     uid_str = str(callback.from_user.id)
     DATABASE.setdefault("users", {}).setdefault(uid_str, {})
     DATABASE["users"][uid_str]["language"] = lang
-    await db_collection.update_one({"_id": DB_DOC_ID},
-                                   {"$set": {f"data.users.{uid_str}.language": lang}}, upsert=True)
+    await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {f"data.users.{uid_str}.language": lang}}, upsert=True)
     await state.clear()
     await callback.answer(t(callback.from_user.id, "lang_set"))
-    await safe_send_or_edit(callback, t(callback.from_user.id, "menu_title"),
-                            reply_markup=get_main_menu_keyboard(callback.from_user.id))
+    await safe_send_or_edit(callback, t(callback.from_user.id, "menu_title"), reply_markup=get_main_menu_keyboard(callback.from_user.id))
 
 
 @dp.callback_query(F.data == "menu:main")
 async def cb_main_menu(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await safe_send_or_edit(callback, t(callback.from_user.id, "menu_title"),
-                            reply_markup=get_main_menu_keyboard(callback.from_user.id))
+    await safe_send_or_edit(callback, t(callback.from_user.id, "menu_title"), reply_markup=get_main_menu_keyboard(callback.from_user.id))
     await callback.answer()
 
 
@@ -2240,21 +2210,21 @@ async def cb_noop(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "menu:catalog")
 async def cb_catalog(callback: types.CallbackQuery):
-    await safe_send_or_edit(callback, t(callback.from_user.id, "catalog_title"),
-                            reply_markup=await get_catalog_keyboard(callback.from_user.id))
+    await safe_send_or_edit(callback, t(callback.from_user.id, "catalog_title"), reply_markup=await get_catalog_keyboard(callback.from_user.id))
     await callback.answer()
 
 
 # ============================================================
-# CATALOG & CATEGORIES MANAGEMENT
+# ADMIN: CATEGORIES MANAGEMENT (BUG FIX: delcat state=None crash)
 # ============================================================
 
 @dp.callback_query(F.data == "admin:cats")
-async def cb_admin_cats(callback: types.CallbackQuery, state: FSMContext):
+async def cb_admin_cats(callback: types.CallbackQuery, state: Optional[FSMContext] = None):
     if not is_admin(callback.from_user.id):
         await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
         return
-    await state.clear()
+    if state:
+        await state.clear()
     cats = DATABASE.get("categories", {})
     lines = ["📂 <b>Управление разделами каталога</b>\n"]
     rows = []
@@ -2275,9 +2245,7 @@ async def cb_admin_add_cat(callback: types.CallbackQuery, state: FSMContext):
         return
     await state.set_state(AdminAddCategory.waiting_for_title)
     await callback.message.answer(
-        "📂 Введите название нового раздела (можно с эмодзи):\n"
-        "Например: <code>📖 Зарубежные олимпиады</code>\n"
-        "/cancel — отмена"
+        "📂 Введите название нового раздела (можно с эмодзи):\nНапример: <code>📖 Зарубежные олимпиады</code>\n/cancel — отмена"
     )
     await callback.answer()
 
@@ -2290,28 +2258,22 @@ async def process_add_category_title(message: types.Message, state: FSMContext):
     if not title:
         await message.answer("⚠️ Введите название раздела:")
         return
-    # Generate clean unique key
-    base_key = re.sub(r"[^a-zA-Z0-9_]", "", title.lower())[:20]
-    if not base_key:
-        base_key = f"cat_{uuid.uuid4().hex[:6]}"
+    base_key = re.sub(r"[^a-zA-Z0-9_]", "", title.lower())[:20] or f"cat_{uuid.uuid4().hex[:6]}"
     cat_key = base_key
     counter = 1
     while cat_key in DATABASE.get("categories", {}):
         cat_key = f"{base_key}_{counter}"
         counter += 1
 
-    DATABASE.setdefault("categories", {})[cat_key] = {
-        "title": title,
-        "files": [],
-    }
+    DATABASE.setdefault("categories", {})[cat_key] = {"title": title, "files": []}
     await save_db(DATABASE)
     await state.clear()
-    await message.answer(f"✅ Раздел «{html.escape(title)}» успешно создан!",
-                         reply_markup=await get_catalog_keyboard(message.from_user.id))
+    await message.answer(f"✅ Раздел «{html.escape(title)}» успешно создан!", reply_markup=await get_catalog_keyboard(message.from_user.id))
 
 
 @dp.callback_query(F.data.startswith("admin:delcat:"))
-async def cb_admin_delcat(callback: types.CallbackQuery):
+async def cb_admin_delcat(callback: types.CallbackQuery, state: Optional[FSMContext] = None):
+    """Crash fix: safely handles state parameter when refreshing the category view."""
     if not is_admin(callback.from_user.id):
         await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
         return
@@ -2324,2317 +2286,12 @@ async def cb_admin_delcat(callback: types.CallbackQuery):
     del cats[cat_key]
     await save_db(DATABASE)
     await callback.message.answer(f"🗑 Раздел «{html.escape(cat_title)}» удалён.")
-    await cb_admin_cats(callback, None)
-
-
-@dp.callback_query(F.data == "catalog:zip_all")
-async def cb_catalog_zip_all(callback: types.CallbackQuery):
-    all_files = []
-    seen = set()
-    for cat_key, cat_data in DATABASE.get("categories", {}).items():
-        cat_title = cat_data.get("title", cat_key)
-        for f in cat_data.get("files", []):
-            uid = f.get("file_unique_id")
-            if uid and uid in seen:
-                continue
-            if uid:
-                seen.add(uid)
-            if f.get("file_id"):
-                all_files.append({
-                    "file_id": f["file_id"],
-                    "category": cat_title,
-                    "filename": f.get("caption") or "material",
-                    "uid": uid,
-                })
-    await callback.answer("⏳ Собираем архив...")
-    await create_and_send_zip(
-        chat_id=callback.message.chat.id,
-        user_id=callback.from_user.id,
-        files_to_download=all_files,
-        archive_title="Library"
-    )
-
-
-@dp.callback_query(F.data.startswith("cat:zip:"))
-async def cb_cat_zip(callback: types.CallbackQuery):
-    cat_key = callback.data.split(":", 2)[2]
-    cat_data = DATABASE.get("categories", {}).get(cat_key, {})
-    files = cat_data.get("files", [])
-    files_to_download = []
-    cat_title = cat_data.get("title", cat_key)
-    for f in files:
-        if f.get("file_id"):
-            files_to_download.append({
-                "file_id": f["file_id"],
-                "category": cat_title,
-                "filename": f.get("caption") or "material",
-                "uid": f.get("file_unique_id"),
-            })
-    await callback.answer("⏳ Собираем раздел...")
-    await create_and_send_zip(
-        chat_id=callback.message.chat.id,
-        user_id=callback.from_user.id,
-        files_to_download=files_to_download,
-        archive_title=cat_key
-    )
-
-
-@dp.message(Command("zip", "download_all"))
-async def cmd_download_zip(message: types.Message):
-    all_files = []
-    seen = set()
-    for cat_key, cat_data in DATABASE.get("categories", {}).items():
-        cat_title = cat_data.get("title", cat_key)
-        for f in cat_data.get("files", []):
-            uid = f.get("file_unique_id")
-            if uid and uid in seen:
-                continue
-            if uid:
-                seen.add(uid)
-            if f.get("file_id"):
-                all_files.append({
-                    "file_id": f["file_id"],
-                    "category": cat_title,
-                    "filename": f.get("caption") or "material",
-                    "uid": uid,
-                })
-    await create_and_send_zip(
-        chat_id=message.chat.id,
-        user_id=message.from_user.id,
-        files_to_download=all_files,
-        archive_title="Library"
-    )
-
-
-@dp.callback_query(F.data.startswith("cat:"))
-async def cb_category(callback: types.CallbackQuery):
-    cat_key = callback.data.split(":", 1)[1]
-    if cat_key.startswith("zip:"):
-        return
-    cat_data = DATABASE.get("categories", {}).get(cat_key)
-    if not cat_data:
-        await callback.answer(t(callback.from_user.id, "section_missing"), show_alert=True)
-        return
-    files = cat_data.get("files", [])
-    builder = []
-    for f in files:
-        cap = await localize(f.get("caption") or "—", callback.from_user.id)
-        builder.append([InlineKeyboardButton(
-            text=f"📖 {cap[:55]}",
-            callback_data=f"file:view:{f.get('file_unique_id')}",
-        )])
-    builder.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_catalog"), callback_data="menu:catalog")])
-    cat_title_tr = await localize(cat_data.get('title', cat_key), callback.from_user.id)
-    text = f"<b>{html.escape(cat_title_tr)}</b>\nМатериалов: {len(files)}"
-    await safe_send_or_edit(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("file:view:"))
-async def cb_file_view(callback: types.CallbackQuery):
-    uid = callback.data.split(":", 2)[2]
-    if not await show_file_card(callback, uid, callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "no_file"), show_alert=True)
-        return
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("file:get:"))
-async def cb_file_get(callback: types.CallbackQuery):
-    uid = callback.data.split(":", 2)[2]
-    f = get_file_by_uid(uid)
-    if not f:
-        await callback.answer(t(callback.from_user.id, "no_file"), show_alert=True)
-        return
-    try:
-        cap = await localize(f.get("caption") or "—", callback.from_user.id)
-        await callback.message.answer_document(
-            document=f.get("file_id"),
-            caption=f"📖 <b>{html.escape(cap)}</b>",
-            parse_mode=ParseMode.HTML,
-        )
-        await callback.answer(t(callback.from_user.id, "file_sent"))
-    except Exception as e:
-        logger.exception("Failed to send file %s: %s", uid, e)
-        await callback.answer(t(callback.from_user.id, "file_send_fail"), show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("file:share:"))
-async def cb_file_share(callback: types.CallbackQuery):
-    uid = callback.data.split(":", 2)[2]
-    if not BOT_USERNAME:
-        await callback.answer("Ссылки недоступны", show_alert=True)
-        return
-    link = f"https://t.me/{BOT_USERNAME}?start=file_{uid}"
-    try:
-        share_url = f"https://t.me/share/url?url={link}"
-        markup = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Отправить другу", url=share_url)],
-        ])
-        await callback.message.answer(
-            f"🔗 Ссылка на материал:\n<code>{link}</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=markup,
-        )
-        await callback.answer()
-    except Exception:
-        logger.exception("Share failed")
-        await callback.answer("Ошибка", show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("fav:toggle:"))
-async def cb_fav_toggle(callback: types.CallbackQuery):
-    uid = callback.data.split(":", 2)[2]
-    uid_str = str(callback.from_user.id)
-    user = DATABASE.get("users", {}).get(uid_str)
-    if user is None:
-        await track_user_activity(callback.from_user.id, callback.from_user.username or "",
-                                  callback.from_user.first_name or "")
-        user = DATABASE.get("users", {}).get(uid_str)
-    if user is None:
-        await callback.answer("Error", show_alert=True)
-        return
-    favs = user.setdefault("favorites", [])
-    if uid in favs:
-        favs.remove(uid)
-        msg = t(callback.from_user.id, "fav_removed")
-    else:
-        favs.append(uid)
-        msg = t(callback.from_user.id, "fav_added")
-    await db_collection.update_one({"_id": DB_DOC_ID},
-                                   {"$set": {f"data.users.{uid_str}.favorites": favs}}, upsert=True)
-    if await show_file_card(callback, uid, callback.from_user.id):
-        await callback.answer(msg)
-    else:
-        await callback.answer(t(callback.from_user.id, "no_file"), show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("file:like:"))
-async def cb_file_like(callback: types.CallbackQuery):
-    uid = callback.data.split(":", 2)[2]
-    uid_str = str(callback.from_user.id)
-    new_count = 0
-    for cat_data in DATABASE.get("categories", {}).values():
-        for f in cat_data.get("files", []):
-            if f.get("file_unique_id") == uid:
-                likes = f.setdefault("likes", [])
-                if uid_str in likes:
-                    likes.remove(uid_str)
-                else:
-                    likes.append(uid_str)
-                new_count = len(likes)
-    await save_db(DATABASE)
-    await show_file_card(callback, uid, callback.from_user.id)
-    await callback.answer(f"👍 {new_count}")
-
-
-@dp.callback_query(F.data.startswith("file:similar:"))
-async def cb_file_similar(callback: types.CallbackQuery):
-    uid = callback.data.split(":", 2)[2]
-    similar = get_similar_files(uid)
-    if not similar:
-        await callback.answer("Похожих материалов нет", show_alert=True)
-        return
-    rows = []
-    for f in similar:
-        cap = await localize(f.get("caption") or "—", callback.from_user.id)
-        rows.append([InlineKeyboardButton(text=f"📖 {cap[:55]}",
-                                          callback_data=f"file:view:{f['uid']}")])
-    rows.append([InlineKeyboardButton(text="⬅️ К материалу", callback_data=f"file:view:{uid}")])
-    text = f"🔍 <b>Похожие материалы</b> ({len(similar)})"
-    await safe_send_or_edit(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("file:comments:"))
-async def cb_file_comments(callback: types.CallbackQuery, state: FSMContext):
-    uid = callback.data.split(":", 2)[2]
-    f = get_file_by_uid(uid)
-    if not f:
-        await callback.answer(t(callback.from_user.id, "no_file"), show_alert=True)
-        return
-    comments = f.get("comments", [])
-    lines = [f"💬 <b>Комментарии</b> ({len(comments)})\n"]
-    for c in comments[-10:]:
-        nick = c.get('nickname') or c.get('first_name') or '—'
-        at = (c.get("at") or "")[:10]
-        lines.append(f"🪪 {html.escape(nick)} <i>{at}</i>\n{html.escape(c.get('text',''))}\n")
-    if not comments:
-        lines.append("Пока никто не оставил комментарий.")
-    rows = [
-        [InlineKeyboardButton(text="✍️ Написать", callback_data=f"file:comment:{uid}")],
-        [InlineKeyboardButton(text="⬅️ К материалу", callback_data=f"file:view:{uid}")],
-    ]
-    await safe_send_or_edit(callback, "\n".join(lines),
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("file:comment:"))
-async def cb_file_comment_start(callback: types.CallbackQuery, state: FSMContext):
-    uid = callback.data.split(":", 2)[2]
-    if not get_file_by_uid(uid):
-        await callback.answer(t(callback.from_user.id, "no_file"), show_alert=True)
-        return
-    await state.set_state(FileComment.waiting)
-    await state.update_data(comment_uid=uid)
-    await callback.message.answer("✍️ Отправьте ваш комментарий (до 500 символов):\n/cancel — отмена")
-    await callback.answer()
-
-
-@dp.message(StateFilter(FileComment.waiting), F.text)
-async def process_file_comment(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    uid = data.get("comment_uid")
-    if not uid:
-        await state.clear()
-        return
-    text = message.text.strip()[:500]
-    if not text:
-        await message.answer("⚠️ Пусто.")
-        return
-    uid_str = str(message.from_user.id)
-    u = DATABASE.get("users", {}).get(uid_str, {})
-    entry = {
-        "user_id": message.from_user.id,
-        "nickname": u.get("nickname") or "",
-        "first_name": message.from_user.first_name or "",
-        "text": text,
-        "at": datetime.now(YEREVAN_TZ).isoformat(),
-    }
-    for cat_data in DATABASE.get("categories", {}).values():
-        for f in cat_data.get("files", []):
-            if f.get("file_unique_id") == uid:
-                f.setdefault("comments", []).append(entry)
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer("✅ Комментарий добавлен.")
-    await show_file_card(message, uid, message.from_user.id)
-
-
-@dp.callback_query(F.data.startswith("file:note:"))
-async def cb_file_note(callback: types.CallbackQuery, state: FSMContext):
-    uid = callback.data.split(":", 2)[2]
-    if not get_file_by_uid(uid):
-        await callback.answer(t(callback.from_user.id, "no_file"), show_alert=True)
-        return
-    uid_str = str(callback.from_user.id)
-    u = DATABASE.get("users", {}).get(uid_str, {})
-    existing = (u.get("notes") or {}).get(uid, "")
-    await state.set_state(FileNote.waiting)
-    await state.update_data(note_uid=uid)
-    if existing:
-        await callback.message.answer(
-            f"📝 <b>Ваша заметка</b>:\n<i>{html.escape(existing)}</i>\n\n"
-            f"Отправьте новую заметку или «удалить» для очистки.",
-            parse_mode=ParseMode.HTML)
-    else:
-        await callback.message.answer("📝 Отправьте заметку к этому материалу (видна только вам):")
-    await callback.answer()
-
-
-@dp.message(StateFilter(FileNote.waiting), F.text)
-async def process_file_note(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    uid = data.get("note_uid")
-    if not uid:
-        await state.clear()
-        return
-    raw = message.text.strip()
-    uid_str = str(message.from_user.id)
-    u = DATABASE.setdefault("users", {}).setdefault(uid_str, {})
-    notes = u.setdefault("notes", {})
-    if raw.lower() in ("удалить", "clear", "del", "-"):
-        notes.pop(uid, None)
-        msg = "🗑 Заметка удалена."
-    else:
-        notes[uid] = raw[:1000]
-        msg = "✅ Заметка сохранена."
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer(msg)
-    await show_file_card(message, uid, message.from_user.id)
+    await cb_admin_cats(callback, state)
 
 
 # ============================================================
-# TAG SEARCH FOR MATERIALS & DAILY TASKS
+# SCHEDULE PUBLISH IMPLEMENTATION
 # ============================================================
-
-@dp.callback_query(F.data == "search:main")
-async def cb_search_main(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(TagSearch.selecting)
-    await state.update_data(selected_tags=[])
-    markup = await get_tag_toggle_keyboard([], "search:tag", "search:go",
-                                           callback.from_user.id,
-                                           t(callback.from_user.id, "search_reset"), "search:reset")
-    # Add explicit button to search tasks as well
-    markup.inline_keyboard.insert(-2, [InlineKeyboardButton(text=t(callback.from_user.id, "search_tasks_btn"),
-                                                            callback_data="search:tasks")])
-    await safe_send_or_edit(callback, t(callback.from_user.id, "search_title"), reply_markup=markup)
-    await callback.answer()
-
-
-@dp.callback_query(StateFilter(TagSearch.selecting), F.data.startswith("search:tag:"))
-async def cb_search_tag(callback: types.CallbackQuery, state: FSMContext):
-    res = await toggle_tag_by_index(callback, state)
-    if not res:
-        return
-    selected, tag, removed = res
-    markup = await get_tag_toggle_keyboard(selected, "search:tag", "search:go",
-                                           callback.from_user.id,
-                                           t(callback.from_user.id, "search_reset"), "search:reset")
-    markup.inline_keyboard.insert(-2, [InlineKeyboardButton(text=t(callback.from_user.id, "search_tasks_btn"),
-                                                            callback_data="search:tasks")])
-    await safe_send_or_edit(callback, t(callback.from_user.id, "search_selected_n", n=len(selected)),
-                            reply_markup=markup)
-    await callback.answer(t(callback.from_user.id, "search_tag_off" if removed else "search_tag_on"))
-
-
-@dp.callback_query(F.data == "search:reset")
-async def cb_search_reset(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(selected_tags=[])
-    markup = await get_tag_toggle_keyboard([], "search:tag", "search:go",
-                                           callback.from_user.id,
-                                           t(callback.from_user.id, "search_reset"), "search:reset")
-    markup.inline_keyboard.insert(-2, [InlineKeyboardButton(text=t(callback.from_user.id, "search_tasks_btn"),
-                                                            callback_data="search:tasks")])
-    await safe_send_or_edit(callback, t(callback.from_user.id, "search_reset_done"), reply_markup=markup)
-    await callback.answer()
-
-
-async def show_search_results(target, results, header: str, user_id: int):
-    if results:
-        text = f"{header}\n\n" + t(user_id, "search_found", n=len(results))
-        rows = []
-        for f in results[:20]:
-            cap = await localize(f['caption'], user_id)
-            rows.append([InlineKeyboardButton(text=f"📖 {cap[:55]}",
-                                              callback_data=f"file:view:{f['uid']}")])
-    else:
-        text = f"{header}\n\n" + t(user_id, "search_nothing")
-        rows = []
-    rows.append([InlineKeyboardButton(text=t(user_id, "search_new"), callback_data="search:main")])
-    rows.append([InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")])
-    await safe_send_or_edit(target, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-
-
-@dp.callback_query(F.data == "search:go")
-async def cb_search_go(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    selected = data.get("selected_tags", [])
-    if not selected:
-        await callback.answer(t(callback.from_user.id, "search_pick_one"), show_alert=True)
-        return
-    files = get_catalog_files_list()
-    sel_lower = {x.lower() for x in selected}
-    scored = []
-    for f in files:
-        matches = len(sel_lower & {x.lower() for x in f.get("tags", [])})
-        if matches:
-            scored.append((matches, f))
-    scored.sort(key=lambda x: -x[0])
-    results = [f for _, f in scored]
-    tags_tr = await localize_list(selected, callback.from_user.id)
-    header = t(callback.from_user.id, "search_tagged", tags=html.escape(' '.join(tags_tr)))
-    await show_search_results(callback, results, header, callback.from_user.id)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "search:tasks")
-async def cb_search_tasks(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    selected = data.get("selected_tags", [])
-    if not selected:
-        await callback.answer(t(callback.from_user.id, "search_pick_one"), show_alert=True)
-        return
-    sel_lower = {x.lower() for x in selected}
-    results = []
-    for date_str in get_dates_sorted():
-        group = DATABASE.get("daily_tasks", {}).get(date_str, {})
-        for idx, task in enumerate(group.get("tasks", [])):
-            task_tags = {x.lower() for x in task.get("tags", [])}
-            if sel_lower & task_tags:
-                results.append((date_str, idx, task))
-    tags_tr = await localize_list(selected, callback.from_user.id)
-    header = f"🎯 <b>Задачи дня по тегам:</b> {html.escape(' '.join(tags_tr))}\n"
-    rows = []
-    if results:
-        header += f"Найдено задач: <b>{len(results)}</b>"
-        for d, idx, tsk in results[:20]:
-            preview = (tsk.get("text") or "Задача с фото").strip()[:40]
-            rows.append([InlineKeyboardButton(text=f"🎯 {d} #{idx+1}: {preview}",
-                                              callback_data=f"task:view:{d}:{idx}")])
-    else:
-        header += "\n😔 Задач с выбранными тегами не найдено."
-    rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "search_new"), callback_data="search:main")])
-    rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_menu"), callback_data="menu:main")])
-    await safe_send_or_edit(callback, header, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer()
-
-
-# Dedicated entry for tasks by tag
-@dp.callback_query(F.data == "tasktagsearch:main")
-async def cb_tasktagsearch_main(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(TaskTagSearch.selecting)
-    await state.update_data(selected_tags=[])
-    markup = await get_tag_toggle_keyboard([], "tasksearchtag", "tasksearchtag:go",
-                                           callback.from_user.id,
-                                           t(callback.from_user.id, "search_reset"), "tasksearchtag:reset")
-    text = "🎯 <b>Поиск задач дня по тегам</b>\n\nВыберите тег(и) и нажмите «💾 OK»:"
-    await safe_send_or_edit(callback, text, reply_markup=markup)
-    await callback.answer()
-
-
-@dp.callback_query(StateFilter(TaskTagSearch.selecting), F.data.startswith("tasksearchtag:"))
-async def cb_tasksearchtag_toggle(callback: types.CallbackQuery, state: FSMContext):
-    parts = callback.data.split(":")
-    action = parts[1]
-    if action == "reset":
-        await state.update_data(selected_tags=[])
-        markup = await get_tag_toggle_keyboard([], "tasksearchtag", "tasksearchtag:go",
-                                               callback.from_user.id,
-                                               t(callback.from_user.id, "search_reset"), "tasksearchtag:reset")
-        await safe_send_or_edit(callback, "🎯 Выбор тегов сброшен.", reply_markup=markup)
-        await callback.answer()
-        return
-    elif action == "go":
-        data = await state.get_data()
-        selected = data.get("selected_tags", [])
-        if not selected:
-            await callback.answer(t(callback.from_user.id, "search_pick_one"), show_alert=True)
-            return
-        sel_lower = {x.lower() for x in selected}
-        results = []
-        for date_str in get_dates_sorted():
-            group = DATABASE.get("daily_tasks", {}).get(date_str, {})
-            for idx, task in enumerate(group.get("tasks", [])):
-                task_tags = {x.lower() for x in task.get("tags", [])}
-                if sel_lower & task_tags:
-                    results.append((date_str, idx, task))
-        tags_tr = await localize_list(selected, callback.from_user.id)
-        header = f"🎯 <b>Задачи дня по тегам:</b> {html.escape(' '.join(tags_tr))}\n"
-        rows = []
-        if results:
-            header += f"Найдено задач: <b>{len(results)}</b>"
-            for d, idx, tsk in results[:25]:
-                preview = (tsk.get("text") or "Задача с фото").strip()[:40]
-                rows.append([InlineKeyboardButton(text=f"🎯 {d} #{idx+1}: {preview}",
-                                                  callback_data=f"task:view:{d}:{idx}")])
-        else:
-            header += "\n😔 Задач с выбранными тегами не найдено."
-        rows.append([InlineKeyboardButton(text="🏷 Выбрать другие теги", callback_data="tasktagsearch:main")])
-        rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_menu"), callback_data="menu:main")])
-        await safe_send_or_edit(callback, header, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-        await callback.answer()
-        return
-
-    # Toggle tag index
-    res = await toggle_tag_by_index(callback, state)
-    if not res:
-        return
-    selected, tag, removed = res
-    markup = await get_tag_toggle_keyboard(selected, "tasksearchtag", "tasksearchtag:go",
-                                           callback.from_user.id,
-                                           t(callback.from_user.id, "search_reset"), "tasksearchtag:reset")
-    await safe_send_or_edit(callback, f"🎯 Выбрано тегов: {len(selected)}", reply_markup=markup)
-    await callback.answer(t(callback.from_user.id, "search_tag_off" if removed else "search_tag_on"))
-
-
-@dp.message(StateFilter(TagSearch.selecting), F.text)
-async def process_search_text(message: types.Message, state: FSMContext):
-    raw_q = message.text.strip()
-    q = raw_q.lower().lstrip("#")
-    if not q:
-        await message.answer("?")
-        return
-    translated_query = None
-    if get_user_lang(message.from_user.id) == "en":
-        try:
-            translated_query = (await translate_text(raw_q.lstrip("#"), "ru")).lower().lstrip("#")
-        except Exception:
-            translated_query = None
-
-    files = get_catalog_files_list()
-    results = []
-    for f in files:
-        hay = (f["caption"] + " " + " ".join(f.get("tags", [])) + " " + (f.get("summary") or "")).lower()
-        if q in hay or (translated_query and translated_query in hay):
-            results.append(f)
-    await state.clear()
-    header = t(message.from_user.id, "search_query", q=html.escape(raw_q))
-    await show_search_results(message, results, header, message.from_user.id)
-
-
-# ============================================================
-# TAG DATABASE
-# ============================================================
-
-async def render_tag_manager(target, user_id: int):
-    tags = DATABASE.get("tags", [])
-    rows = []
-    for i, tag in enumerate(tags):
-        rows.append([InlineKeyboardButton(text=f"🗑 {tag}", callback_data=f"tagdel:{i}")])
-    rows.append([InlineKeyboardButton(text=t(user_id, "tag_add_btn"), callback_data="tagadd")])
-    rows.append([InlineKeyboardButton(text=t(user_id, "tag_rename_btn"), callback_data="tagrename:start")])
-    rows.append([InlineKeyboardButton(text=t(user_id, "back_admin"), callback_data="admin:main")])
-    text = t(user_id, "tag_db_title", n=len(tags))
-    await safe_send_or_edit(target, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-
-
-@dp.callback_query(F.data == "admin:tags")
-async def cb_admin_tags(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.clear()
-    await render_tag_manager(callback, callback.from_user.id)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "tagadd")
-async def cb_tagadd(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.set_state(AddTag.waiting_for_text)
-    await callback.message.answer(t(callback.from_user.id, "tag_ask_new"))
-    await callback.answer()
-
-
-@dp.message(StateFilter(AddTag.waiting_for_text), F.text)
-async def process_add_tag(message: types.Message, state: FSMContext):
-    tags = DATABASE.setdefault("tags", [])
-    added = []
-    for tag in normalize_tags_input(message.text):
-        if tag.lower() not in {x.lower() for x in tags}:
-            tags.append(tag)
-            added.append(tag)
-    await save_db(DATABASE)
-    await state.clear()
-    if added:
-        await message.answer(t(message.from_user.id, "tag_added", tags=html.escape(' '.join(added))))
-    else:
-        await message.answer(t(message.from_user.id, "tag_nothing_added"))
-
-
-@dp.callback_query(F.data.startswith("tagdel:"))
-async def cb_tagdel(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    try:
-        i = int(callback.data.split(":")[1])
-    except ValueError:
-        await callback.answer("Error", show_alert=True)
-        return
-    tags = DATABASE.get("tags", [])
-    if 0 <= i < len(tags):
-        removed = tags.pop(i)
-        await save_db(DATABASE)
-        await render_tag_manager(callback, callback.from_user.id)
-        await callback.answer(t(callback.from_user.id, "tag_removed", tag=removed))
-    else:
-        await callback.answer(t(callback.from_user.id, "tag_missing"), show_alert=True)
-
-
-@dp.callback_query(F.data == "tagrename:start")
-async def cb_tagrename_start(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    tags = DATABASE.get("tags", [])
-    if not tags:
-        await callback.answer(t(callback.from_user.id, "tag_missing"), show_alert=True)
-        return
-    await state.set_state(RenameTag.choosing)
-    rows, row = [], []
-    for i, tag in enumerate(tags):
-        row.append(InlineKeyboardButton(text=tag, callback_data=f"tagren:{i}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_admin"), callback_data="admin:tags")])
-    await safe_send_or_edit(callback, t(callback.from_user.id, "tag_rename_pick"),
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer()
-
-
-@dp.callback_query(StateFilter(RenameTag.choosing), F.data.startswith("tagren:"))
-async def cb_tagrename_pick(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    try:
-        i = int(callback.data.split(":")[1])
-    except ValueError:
-        await callback.answer("Error", show_alert=True)
-        return
-    tags = DATABASE.get("tags", [])
-    if not (0 <= i < len(tags)):
-        await callback.answer(t(callback.from_user.id, "tag_missing"), show_alert=True)
-        return
-    old_tag = tags[i]
-    await state.update_data(rename_old=old_tag, rename_index=i)
-    await state.set_state(RenameTag.waiting_for_new_name)
-    await safe_send_or_edit(callback, t(callback.from_user.id, "tag_rename_ask", tag=html.escape(old_tag)))
-    await callback.answer()
-
-
-@dp.message(StateFilter(RenameTag.waiting_for_new_name), F.text)
-async def process_tagrename(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    raw = message.text.strip().replace("#", "").strip()
-    raw = re.sub(r"\s+", "-", raw)
-    if not raw:
-        await message.answer(t(message.from_user.id, "tag_rename_ask", tag="?"))
-        return
-    new_tag = "#" + raw
-    data = await state.get_data()
-    old_tag = data.get("rename_old")
-    if not old_tag:
-        await state.clear()
-        return
-
-    existing_tags = DATABASE.get("tags", [])
-    if new_tag.lower() != old_tag.lower() and any(x.lower() == new_tag.lower() for x in existing_tags):
-        await message.answer(t(message.from_user.id, "tag_rename_conflict", new=new_tag))
-        return
-
-    n = rename_tag_everywhere(old_tag, new_tag)
-    await save_db(DATABASE)
-    await state.clear()
-    if n > 0:
-        await message.answer(t(message.from_user.id, "tag_rename_done", old=old_tag, new=new_tag, n=n))
-    else:
-        await message.answer(t(message.from_user.id, "tag_rename_no_files", old=old_tag, new=new_tag))
-    await message.answer(t(message.from_user.id, "menu_title"),
-                         reply_markup=get_main_menu_keyboard(message.from_user.id))
-
-
-# ============================================================
-# FAVORITES / RATING / MUST-READ / RANDOM
-# ============================================================
-
-@dp.callback_query(F.data == "favorites:main")
-async def cb_favorites(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    uid_str = str(callback.from_user.id)
-    favs = DATABASE.get("users", {}).get(uid_str, {}).get("favorites", [])
-    builder = []
-    for fuid in favs:
-        f = get_file_by_uid(fuid)
-        if f:
-            cap = await localize(f.get('caption') or "—", callback.from_user.id)
-            builder.append([InlineKeyboardButton(text=f"❤️ {cap[:55]}",
-                                                 callback_data=f"file:view:{fuid}")])
-    text = t(callback.from_user.id, "favorites_title")
-    if not builder:
-        text += t(callback.from_user.id, "favorites_empty")
-    else:
-        builder.append([InlineKeyboardButton(text="📤 Экспорт JSON",
-                                             callback_data="favorites:export")])
-    builder.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_menu"), callback_data="menu:main")])
-    await safe_send_or_edit(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "favorites:export")
-async def cb_favorites_export(callback: types.CallbackQuery):
-    uid_str = str(callback.from_user.id)
-    favs = DATABASE.get("users", {}).get(uid_str, {}).get("favorites", [])
-    items = []
-    for fuid in favs:
-        f = get_file_by_uid(fuid)
-        if f:
-            items.append({
-                "title": f.get("caption") or "—",
-                "tags": f.get("tags", []),
-                "summary": f.get("summary") or "",
-                "link": f"https://t.me/{BOT_USERNAME}?start=file_{fuid}" if BOT_USERNAME else "",
-            })
-    if not items:
-        await callback.answer("Избранное пусто", show_alert=True)
-        return
-    payload = json.dumps(items, ensure_ascii=False, indent=2)
-    file = types.BufferedInputFile(payload.encode("utf-8"),
-                                   filename=f"favorites_{uid_str}.json")
-    await callback.message.answer_document(file, caption=f"❤️ Ваше избранное ({len(items)})")
-    await callback.answer("📤 Экспортировано")
-
-
-@dp.callback_query(F.data == "rating:main")
-async def cb_rating(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    users = DATABASE.get("users", {})
-    ranked = [kv for kv in sorted(users.items(),
-                                   key=lambda kv: (kv[1].get("score", 0), kv[1].get("streak", 0)),
-                                   reverse=True) if kv[1].get("score", 0) > 0][:10]
-    medals = [t(callback.from_user.id, "rating_medal_1"),
-              t(callback.from_user.id, "rating_medal_2"),
-              t(callback.from_user.id, "rating_medal_3")]
-    lines = [t(callback.from_user.id, "rating_title")]
-    if not ranked:
-        lines.append(t(callback.from_user.id, "rating_empty"))
-    for i, (uid_str, u) in enumerate(ranked, 1):
-        medal = medals[i - 1] if i <= 3 else f"{i}."
-        solved = count_solved(uid_str)
-        lines.append(t(callback.from_user.id, "rating_line",
-                       medal=medal, name=user_display(uid_str),
-                       score=u.get('score', 0), solved=solved, streak=u.get('streak', 1)))
-    me = users.get(str(callback.from_user.id), {})
-    lines.append(t(callback.from_user.id, "rating_you",
-                   nick=html.escape(me.get('nickname') or '—'),
-                   score=me.get('score', 0),
-                   solved=count_solved(str(callback.from_user.id)),
-                   favs=len(me.get('favorites', []))))
-    markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-        text=t(callback.from_user.id, "back_menu"), callback_data="menu:main")]])
-    await safe_send_or_edit(callback, "\n".join(lines), reply_markup=markup)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "mustread:main")
-async def cb_mustread(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await render_mustread(callback, callback.from_user.id)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("mustread:toggle:"))
-async def cb_mustread_toggle(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    uid = callback.data.split(":", 2)[2]
-    new_val = None
-    count = 0
-    for cat_data in DATABASE.get("categories", {}).values():
-        for f in cat_data.get("files", []):
-            if f.get("file_unique_id") == uid:
-                f["must_read"] = not f.get("must_read", False)
-                new_val = f["must_read"]
-                count += 1
-    if not count:
-        await callback.answer(t(callback.from_user.id, "no_file"), show_alert=True)
-        return
-    await save_db(DATABASE)
-    if new_val:
-        await show_file_card(callback, uid, callback.from_user.id)
-        await callback.answer(t(callback.from_user.id, "mustread_added"))
-    else:
-        await render_mustread(callback, callback.from_user.id)
-        await callback.answer(t(callback.from_user.id, "mustread_removed"))
-
-
-@dp.callback_query(F.data == "challenge:main")
-async def cb_challenge(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    files = get_catalog_files_list()
-    if not files:
-        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text=t(callback.from_user.id, "back_menu"), callback_data="menu:main")]])
-        await safe_send_or_edit(callback, "🎲", reply_markup=markup)
-        await callback.answer()
-        return
-    chosen = random.choice(files)
-    await show_file_card(callback, chosen["uid"], callback.from_user.id)
-    await callback.answer("🎲")
-
-
-# ============================================================
-# DAILY TASKS
-# ============================================================
-
-@dp.callback_query(F.data == "task:show")
-async def cb_task_show(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    daily = DATABASE.get("daily_tasks", {})
-    today = get_yerevan_date()
-    if today in daily and daily[today].get("tasks"):
-        date_str = today
-    else:
-        dates = get_dates_sorted()
-        date_str = dates[0] if dates else None
-    if not date_str:
-        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text=t(callback.from_user.id, "back_menu"), callback_data="menu:main")]])
-        await safe_send_or_edit(callback, t(callback.from_user.id, "task_no_tasks"), reply_markup=markup)
-        await callback.answer()
-        return
-    await show_task(callback, date_str, 0, callback.from_user.id)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("task:view:"))
-async def cb_task_view(callback: types.CallbackQuery):
-    parts = callback.data.split(":")
-    if len(parts) != 4:
-        await callback.answer("Error", show_alert=True)
-        return
-    try:
-        idx = int(parts[3])
-    except ValueError:
-        await callback.answer("Error", show_alert=True)
-        return
-    await show_task(callback, parts[2], idx, callback.from_user.id)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "task:archive")
-async def cb_task_archive(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await render_archive(callback, 0, callback.from_user.id)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("arch:page:"))
-async def cb_archive_page(callback: types.CallbackQuery):
-    try:
-        page = int(callback.data.split(":")[2])
-    except ValueError:
-        page = 0
-    await render_archive(callback, page, callback.from_user.id)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("task:bcast:"))
-async def cb_task_bcast(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    parts = callback.data.split(":")
-    if len(parts) != 4:
-        await callback.answer("Error", show_alert=True)
-        return
-    date_str, idx = parts[2], int(parts[3])
-    await callback.answer(t(callback.from_user.id, "task_sol_bcast_running"))
-    await broadcast_task(date_str, idx, report_msg=callback.message)
-
-
-@dp.callback_query(F.data.startswith("task:del:"))
-async def cb_task_del(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    parts = callback.data.split(":")
-    if len(parts) != 4:
-        await callback.answer("Error", show_alert=True)
-        return
-    date_str, idx = parts[2], int(parts[3])
-    group = DATABASE.get("daily_tasks", {}).get(date_str, {})
-    tasks = group.get("tasks", [])
-    if not (0 <= idx < len(tasks)):
-        await callback.answer("Не найдено", show_alert=True)
-        return
-    tasks.pop(idx)
-    for i, tsk in enumerate(tasks, 1):
-        tsk["number"] = i
-    await save_db(DATABASE)
-    await callback.message.answer(f"🗑 Задача {date_str} #{idx+1} удалена.")
-    await callback.answer("🗑")
-
-
-@dp.callback_query(F.data.startswith("task:edit:"))
-async def cb_task_edit(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    parts = callback.data.split(":")
-    if len(parts) != 4:
-        await callback.answer("Error", show_alert=True)
-        return
-    date_str, idx = parts[2], int(parts[3])
-    task = get_task(date_str, idx)
-    if not task:
-        await callback.answer("Не найдено", show_alert=True)
-        return
-    await state.clear()
-    rows = [
-        [InlineKeyboardButton(text="✏️ Изменить текст",
-                              callback_data=f"tedit:text:{date_str}:{idx}")],
-        [InlineKeyboardButton(text="🖼 Заменить фото",
-                              callback_data=f"tedit:photo:{date_str}:{idx}")],
-        [InlineKeyboardButton(text="💡 Изменить решение",
-                              callback_data=f"tedit:sol:{date_str}:{idx}")],
-        [InlineKeyboardButton(text="🎯 Сложность",
-                              callback_data=f"tedit:diff:{date_str}:{idx}")],
-        [InlineKeyboardButton(text="⬅️ Назад",
-                              callback_data=f"task:view:{date_str}:{idx}")],
-    ]
-    await safe_send_or_edit(callback,
-                            f"⚙️ <b>Редактирование задачи</b>\n📅 {date_str} · №{idx+1}",
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("tedit:text:"))
-async def cb_tedit_text(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Недоступно", show_alert=True); return
-    _, _, date_str, idx_s = callback.data.split(":", 3)
-    await state.set_state(TaskEdit.text)
-    await state.update_data(ed_date=date_str, ed_idx=int(idx_s))
-    await callback.message.answer("✍️ Отправьте новый текст задачи (или «пропустить», чтобы очистить):")
-    await callback.answer()
-
-
-@dp.message(StateFilter(TaskEdit.text), F.text)
-async def process_tedit_text(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    date_str, idx = data.get("ed_date"), data.get("ed_idx")
-    task = get_task(date_str, idx)
-    if not task:
-        await state.clear(); return
-    raw = message.text.strip()
-    task["text"] = "" if raw.lower() in ("пропустить", "skip", "-") else raw
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer("✅ Текст обновлён")
-    await show_task(message, date_str, idx, message.from_user.id)
-
-
-@dp.callback_query(F.data.startswith("tedit:photo:"))
-async def cb_tedit_photo(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Недоступно", show_alert=True); return
-    _, _, date_str, idx_s = callback.data.split(":", 3)
-    await state.set_state(TaskEdit.photo)
-    await state.update_data(ed_date=date_str, ed_idx=int(idx_s))
-    await callback.message.answer("🖼 Отправьте новое фото задачи (или «пропустить», чтобы удалить):")
-    await callback.answer()
-
-
-@dp.message(StateFilter(TaskEdit.photo))
-async def process_tedit_photo(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    date_str, idx = data.get("ed_date"), data.get("ed_idx")
-    task = get_task(date_str, idx)
-    if not task:
-        await state.clear(); return
-    if message.photo:
-        task["photo_file_id"] = message.photo[-1].file_id
-    elif message.text and message.text.strip().lower() in ("пропустить", "skip", "-"):
-        task["photo_file_id"] = None
-    else:
-        await message.answer("📸 Отправьте фото или «пропустить».")
-        return
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer("✅ Фото обновлено")
-    await show_task(message, date_str, idx, message.from_user.id)
-
-
-@dp.callback_query(F.data.startswith("tedit:sol:"))
-async def cb_tedit_sol(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Недоступно", show_alert=True); return
-    _, _, date_str, idx_s = callback.data.split(":", 3)
-    await state.set_state(TaskEdit.solution)
-    await state.update_data(ed_date=date_str, ed_idx=int(idx_s))
-    await callback.message.answer("💡 Отправьте новое решение (текст/фото) или «пропустить»:")
-    await callback.answer()
-
-
-@dp.message(StateFilter(TaskEdit.solution))
-async def process_tedit_sol(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    date_str, idx = data.get("ed_date"), data.get("ed_idx")
-    task = get_task(date_str, idx)
-    if not task:
-        await state.clear(); return
-    if message.photo:
-        task["solution_photo_file_id"] = message.photo[-1].file_id
-        if message.caption:
-            task["solution"] = message.caption.strip()
-    elif message.document:
-        task["solution_document_file_id"] = message.document.file_id
-    elif message.text and message.text.strip().lower() in ("пропустить", "skip", "-"):
-        task["solution"] = ""
-        task["solution_photo_file_id"] = None
-        task["solution_document_file_id"] = None
-    elif message.text:
-        task["solution"] = message.text.strip()
-    else:
-        await message.answer("Отправьте текст, фото, документ или «пропустить».")
-        return
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer("✅ Решение обновлено")
-    await show_task(message, date_str, idx, message.from_user.id)
-
-
-@dp.callback_query(F.data.startswith("tedit:diff:"))
-async def cb_tedit_diff(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Недоступно", show_alert=True); return
-    _, _, date_str, idx = callback.data.split(":", 3)
-    rows = [[InlineKeyboardButton(text=t(callback.from_user.id, f"admin_diff_{lvl}"),
-                                  callback_data=f"tedit:setdiff:{date_str}:{idx}:{lvl}")]
-            for lvl in DIFF_KEYS]
-    rows.append([InlineKeyboardButton(text="⬅️", callback_data=f"task:edit:{date_str}:{idx}")])
-    await safe_send_or_edit(callback, "🎯 Выберите сложность:",
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("tedit:setdiff:"))
-async def cb_tedit_setdiff(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Недоступно", show_alert=True); return
-    _, _, date_str, idx_s, lvl = callback.data.split(":", 4)
-    idx = int(idx_s)
-    task = get_task(date_str, idx)
-    if task and lvl in DIFF_KEYS:
-        task["difficulty"] = lvl
-        await save_db(DATABASE)
-    await callback.answer("✅ Сохранено")
-    await show_task(callback, date_str, idx, callback.from_user.id)
-
-
-@dp.callback_query(F.data.startswith("task:show_sol:"))
-async def cb_task_show_sol(callback: types.CallbackQuery):
-    parts = callback.data.split(":")
-    if len(parts) != 4:
-        await callback.answer("Error", show_alert=True)
-        return
-    date_str, idx = parts[2], int(parts[3])
-    task = get_task(date_str, idx)
-    if not task:
-        await callback.answer(t(callback.from_user.id, "task_missing"), show_alert=True)
-        return
-    sol_text = (task.get("solution") or "").strip()
-    photo_id = task.get("solution_photo_file_id")
-    doc_id = task.get("solution_document_file_id")
-    if not sol_text and not photo_id and not doc_id:
-        await callback.answer(t(callback.from_user.id, "task_sol_not_yet"), show_alert=True)
-        return
-    if sol_text:
-        sol_text = await localize(sol_text, callback.from_user.id)
-    text = t(callback.from_user.id, "task_sol_author_header", num=idx + 1, date=date_str)
-    if sol_text:
-        text += "\n\n" + html.escape(sol_text)
-    markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-        text=t(callback.from_user.id, "back_task"), callback_data=f"task:view:{date_str}:{idx}")]])
-    await safe_send_or_edit(callback, text, reply_markup=markup, photo_id=photo_id)
-    if doc_id:
-        try:
-            await callback.message.answer_document(document=doc_id)
-        except Exception:
-            logger.exception("Failed to send solution document, fallback")
-            try:
-                await callback.message.answer("⚠️ Документ решения недоступен.")
-            except Exception:
-                pass
-    await callback.answer()
-
-
-_user_locks = {}
-
-
-def get_user_lock(user_id: int) -> asyncio.Lock:
-    if user_id not in _user_locks:
-        _user_locks[user_id] = asyncio.Lock()
-    return _user_locks[user_id]
-
-
-@dp.callback_query(F.data.startswith("task:solve:"))
-async def cb_task_solve(callback: types.CallbackQuery, state: FSMContext):
-    parts = callback.data.split(":")
-    if len(parts) != 4:
-        await callback.answer("Error", show_alert=True)
-        return
-    date_str, idx = parts[2], int(parts[3])
-    if not get_task(date_str, idx):
-        await callback.answer(t(callback.from_user.id, "task_missing"), show_alert=True)
-        return
-    await state.set_state(UserTaskSolution.waiting_for_solution)
-    await state.update_data(
-        task_date=date_str,
-        task_idx=idx,
-        photos=[],
-        docs=[],
-        solution_text=""
-    )
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Завершить и отправить решение", callback_data="task:solve_finish")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="task:solve_cancel")],
-    ])
-    help_text = (
-        "✍️ <b>Отправка решения задачи</b>\n\n"
-        "Вы можете отправить:\n"
-        "• <b>Фотографии решения</b> — одно или <b>несколько фото</b> (можно сразу альбомом или отдельными сообщениями)\n"
-        "• <b>Текст решения</b> — любого объёма, без ограничений (если текст очень длинный, можно отправить в двух или нескольких сообщениях)\n"
-        "• Документы (PDF и др.)\n\n"
-        "После того как отправите все материалы (фото/текст), нажмите кнопку <b>«✅ Завершить и отправить решение»</b> ниже.\n\n"
-        "/cancel — отмена."
-    )
-    await callback.message.answer(help_text, parse_mode=ParseMode.HTML, reply_markup=markup)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "task:solve_cancel")
-async def cb_task_solve_cancel(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    date_str = data.get("task_date")
-    idx = data.get("task_idx", 0)
-    await state.clear()
-    await callback.message.answer("❌ Отправка решения отменена.", reply_markup=get_main_menu_keyboard(callback.from_user.id))
-    await callback.answer()
-    if date_str:
-        await show_task(callback.message, date_str, idx, callback.from_user.id)
-
-
-@dp.callback_query(F.data == "task:solve_finish")
-async def cb_task_solve_finish(callback: types.CallbackQuery, state: FSMContext):
-    await finalize_user_solution(callback, state, callback.from_user.id)
-
-
-async def notify_admins_about_solution(date_str: str, idx: int, uid_str: str, entry: dict):
-    u = DATABASE.get("users", {}).get(uid_str, {})
-    nick = entry.get("nickname") or u.get("nickname") or "—"
-    tg = entry.get("first_name") or u.get("first_name") or ""
-    uname = entry.get("username") or u.get("username") or ""
-
-    context = (
-        f"🧩 <b>Новое решение задачи</b>\n"
-        f"📅 Задача: <b>{date_str}</b> · №<b>{idx + 1}</b>\n"
-        f"🪪 Ник: <b>{html.escape(nick)}</b>\n"
-        f"👤 TG: {html.escape(tg)}" + (f" · @{html.escape(uname)}" if uname else "")
-    )
-
-    review_markup = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Засчитать", callback_data=f"solrev:ok:{date_str}:{idx}:{uid_str}"),
-        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"solrev:no:{date_str}:{idx}:{uid_str}"),
-    ]])
-
-    photos = entry.get("photo_file_ids") or ([entry["photo_file_id"]] if entry.get("photo_file_id") else [])
-    docs = entry.get("document_file_ids") or ([entry["document_file_id"]] if entry.get("document_file_id") else [])
-    text = (entry.get("text") or "").strip()
-
-    for admin_id in ADMIN_IDS:
-        try:
-            # 1. Photos
-            if photos:
-                if len(photos) == 1:
-                    if text and len(context + "\n\n" + text) <= 1000 and not docs:
-                        await bot.send_photo(
-                            admin_id, photo=photos[0],
-                            caption=context + "\n\n" + html.escape(text),
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=review_markup
-                        )
-                        continue
-                    else:
-                        await bot.send_photo(admin_id, photo=photos[0], caption=context, parse_mode=ParseMode.HTML)
-                else:
-                    media = []
-                    for i, p in enumerate(photos[:10]):
-                        cap = context if i == 0 else None
-                        media.append(InputMediaPhoto(media=p, caption=cap, parse_mode=ParseMode.HTML))
-                    await bot.send_media_group(admin_id, media=media)
-
-            # 2. Documents
-            for d in docs:
-                await bot.send_document(admin_id, document=d)
-
-            # 3. Unlimited text split across messages if long
-            full_body = text
-            if not photos:
-                full_body = context + ("\n\n" + text if text else "")
-
-            if full_body:
-                parts = _split_text(full_body, TG_TEXT_LIMIT)
-                for i, part in enumerate(parts):
-                    mk = review_markup if i == len(parts) - 1 else None
-                    await bot.send_message(admin_id, html.escape(part) if photos else part,
-                                           parse_mode=ParseMode.HTML, reply_markup=mk)
-            else:
-                await bot.send_message(admin_id, "⬇️ Решение выше:", reply_markup=review_markup)
-        except Exception:
-            logger.exception("Failed to notify admin %s about solution", admin_id)
-
-
-async def finalize_user_solution(target, state: FSMContext, user_id: int):
-    async with get_user_lock(user_id):
-        data = await state.get_data()
-        date_str = data.get("task_date")
-        idx = data.get("task_idx", -1)
-        photos = list(data.get("photos", []))
-        docs = list(data.get("docs", []))
-        text = (data.get("solution_text") or "").strip()
-
-        if not photos and not docs and not text:
-            msg = "⚠️ Вы ещё не отправили ни фото, ни текст решения. Отправьте материалы перед завершением."
-            if isinstance(target, types.CallbackQuery):
-                await target.answer(msg, show_alert=True)
-            else:
-                await target.answer(msg)
-            return
-
-        task = get_task(date_str, idx) if date_str else {}
-        if not task:
-            await state.clear()
-            msg = "⚠️ Задача не найдена. Откройте /start."
-            if isinstance(target, types.CallbackQuery):
-                await target.answer(msg, show_alert=True)
-            else:
-                await target.answer(msg)
-            return
-
-        uid_str = str(user_id)
-        u = DATABASE.get("users", {}).get(uid_str, {})
-        from_user = target.from_user
-
-        entry = {
-            "text": text,
-            "photo_file_id": photos[0] if photos else None,
-            "photo_file_ids": photos,
-            "document_file_id": docs[0] if docs else None,
-            "document_file_ids": docs,
-            "nickname": u.get("nickname") or "",
-            "first_name": from_user.first_name or "",
-            "username": from_user.username or "",
-            "status": "pending",
-            "grade": None,
-            "submitted_at": datetime.now(YEREVAN_TZ).isoformat(),
-        }
-        task.setdefault("user_solutions", {})[uid_str] = entry
-        await save_db(DATABASE)
-        await state.clear()
-
-        confirm_text = (
-            "✅ <b>Решение успешно отправлено на проверку!</b>\n\n"
-            f"📷 Прикреплено фото: <b>{len(photos)}</b> шт.\n"
-            f"✍️ Объём текста: <b>{len(text)}</b> симв.\n\n"
-            "Администраторы проверят его и поставят оценку."
-        )
-        if isinstance(target, types.CallbackQuery):
-            await target.message.answer(confirm_text, parse_mode=ParseMode.HTML)
-            await target.answer("✅ Решение отправлено!")
-            await show_task(target.message, date_str, idx, user_id)
-        else:
-            await target.answer(confirm_text, parse_mode=ParseMode.HTML)
-            await show_task(target, date_str, idx, user_id)
-
-        await notify_admins_about_solution(date_str, idx, uid_str, entry)
-
-
-@dp.message(StateFilter(UserTaskSolution.waiting_for_solution))
-async def process_user_solution(message: types.Message, state: FSMContext):
-    if message.text:
-        cmd = message.text.strip().lower()
-        if cmd in ("/cancel", "отмена", "/отмена"):
-            await state.clear()
-            await message.answer(t(message.from_user.id, "cancel_done"),
-                                 reply_markup=get_main_menu_keyboard(message.from_user.id))
-            return
-        if cmd in ("/done", "готово", "/готово", "/submit", "/ok"):
-            await finalize_user_solution(message, state, message.from_user.id)
-            return
-
-    async with get_user_lock(message.from_user.id):
-        data = await state.get_data()
-        date_str = data.get("task_date")
-        idx = data.get("task_idx", -1)
-        task = get_task(date_str, idx) if date_str else {}
-        if not task:
-            await state.clear()
-            await message.answer("⚠️ Задача не найдена. Откройте /start.")
-            return
-
-        photos = list(data.get("photos", []))
-        docs = list(data.get("docs", []))
-        current_text = data.get("solution_text", "")
-
-        incoming_text = (message.text or message.caption or "").strip()
-        if incoming_text:
-            if current_text:
-                current_text = current_text + "\n\n" + incoming_text
-            else:
-                current_text = incoming_text
-
-        if message.photo:
-            photos.append(message.photo[-1].file_id)
-
-        if message.document:
-            docs.append(message.document.file_id)
-
-        if not incoming_text and not message.photo and not message.document:
-            await message.answer("⚠️ Отправьте фото, текст или документ решения.")
-            return
-
-        await state.update_data(photos=photos, docs=docs, solution_text=current_text)
-
-        markup = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Завершить и отправить решение", callback_data="task:solve_finish")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="task:solve_cancel")],
-        ])
-        status_msg = (
-            "📥 <b>Материалы решения добавлены:</b>\n"
-            f"📷 Фото: <b>{len(photos)}</b> шт.\n"
-            f"📄 Документов: <b>{len(docs)}</b> шт.\n"
-            f"✍️ Текст: <b>{len(current_text)}</b> симв.\n\n"
-            "<i>Вы можете отправить ещё фото или текст (если решение объёмное, можно несколькими сообщениями подряд без ограничений по длине).\n"
-            "Когда закончите отправку, нажмите кнопку ниже:</i>"
-        )
-        await message.answer(status_msg, parse_mode=ParseMode.HTML, reply_markup=markup)
-
-
-@dp.callback_query(F.data.startswith("task:numans:"))
-async def cb_task_numans(callback: types.CallbackQuery, state: FSMContext):
-    parts = callback.data.split(":")
-    if len(parts) != 4:
-        await callback.answer("Error", show_alert=True)
-        return
-    date_str, idx = parts[2], int(parts[3])
-    task = get_task(date_str, idx)
-    if not task or not task.get("numeric_answer"):
-        await callback.answer("Числовой ответ недоступен", show_alert=True)
-        return
-    await state.set_state(UserNumericAnswer.waiting)
-    await state.update_data(numans_date=date_str, numans_idx=idx)
-    await callback.message.answer("🔢 Введите ваш ответ числом (можно с точкой или запятой):")
-    await callback.answer()
-
-
-@dp.message(StateFilter(UserNumericAnswer.waiting), F.text)
-async def process_numans(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    date_str, idx = data.get("numans_date"), data.get("numans_idx")
-    task = get_task(date_str, idx)
-    if not task:
-        await state.clear()
-        return
-    raw = message.text.strip().replace(",", ".")
-    try:
-        val = float(raw)
-    except ValueError:
-        await message.answer("⚠️ Это не число. Попробуйте ещё раз или /cancel.")
-        return
-    try:
-        correct = float(task["numeric_answer"])
-    except Exception:
-        correct = None
-    if correct is None:
-        await message.answer("⚠️ Ошибка проверки. Обратитесь к админу.")
-        await state.clear()
-        return
-    tol = abs(correct) * 1e-6 + 1e-9
-    ok = abs(val - correct) <= tol
-    uid_str = str(message.from_user.id)
-    u = DATABASE.setdefault("users", {}).setdefault(uid_str, {})
-    if ok:
-        entry = {
-            "text": f"🔢 Ответ: {raw} (авто-проверка)",
-            "photo_file_id": None,
-            "document_file_id": None,
-            "nickname": u.get("nickname") or "",
-            "first_name": message.from_user.first_name or "",
-            "username": message.from_user.username or "",
-            "status": "approved",
-            "grade": 10,
-            "submitted_at": datetime.now(YEREVAN_TZ).isoformat(),
-        }
-        task.setdefault("user_solutions", {})[uid_str] = entry
-        mult = DIFF_MULT.get(task.get("difficulty", "medium"), 2)
-        add_pts = 10 * mult
-        u["score"] = u.get("score", 0) + add_pts
-        await save_db(DATABASE)
-        await message.answer(f"✅ <b>Верно!</b> +{add_pts} очков.", parse_mode=ParseMode.HTML)
-        await state.clear()
-        await show_task(message, date_str, idx, message.from_user.id)
-    else:
-        await message.answer("❌ Неверно. Попробуйте ещё раз или сдайте письменное решение.")
-
-
-@dp.callback_query(F.data.startswith("task:sols:"))
-async def cb_task_sols(callback: types.CallbackQuery):
-    parts = callback.data.split(":")
-    if len(parts) != 4:
-        await callback.answer("Error", show_alert=True)
-        return
-    date_str, idx = parts[2], int(parts[3])
-    task = get_task(date_str, idx)
-    if not task:
-        await callback.answer(t(callback.from_user.id, "task_missing"), show_alert=True)
-        return
-    approved = [(u, s) for u, s in (task.get("user_solutions") or {}).items()
-                if s.get("status") == "approved"]
-    lines = [t(callback.from_user.id, "task_sols_header", num=idx + 1, date=date_str)]
-    builder = []
-    if not approved:
-        lines.append(t(callback.from_user.id, "task_sols_empty"))
-    else:
-        approved.sort(key=lambda kv: -(kv[1].get("grade") or 0))
-        for uid_str, s in approved:
-            grade = s.get("grade")
-            g = t(callback.from_user.id, "task_sol_grade_full", grade=grade) if grade else t(callback.from_user.id, "task_sol_ok_mark")
-            snippet = (s.get("text") or "").strip()
-            if snippet:
-                snippet = await localize(snippet[:200], callback.from_user.id)
-            s_photos = s.get("photo_file_ids") or ([s["photo_file_id"]] if s.get("photo_file_id") else [])
-            if s_photos:
-                snippet = (snippet + (f" [📷 {len(s_photos)}]" if len(s_photos) > 1 else " [📷]")).strip()
-            if s.get("document_file_id") or s.get("document_file_ids"):
-                snippet = (snippet + " [📎]").strip()
-            lines.append(f"⭐ {sol_display(s, uid_str)} — {g}\n<i>{html.escape(snippet[:150])}</i>\n")
-            builder.append([InlineKeyboardButton(
-                text=t(callback.from_user.id, "task_sol_view", nick=sol_button_name(s, uid_str), grade=g),
-                callback_data=f"solfull:{date_str}:{idx}:{uid_str}")])
-    builder.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_task"),
-                                         callback_data=f"task:view:{date_str}:{idx}")])
-    await safe_send_or_edit(callback, "\n".join(lines),
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("solfull:"))
-async def cb_solfull(callback: types.CallbackQuery):
-    parts = callback.data.split(":")
-    if len(parts) != 4:
-        await callback.answer("Error", show_alert=True)
-        return
-    date_str, idx, uid_str = parts[1], int(parts[2]), parts[3]
-    task = get_task(date_str, idx)
-    sol = (task.get("user_solutions") or {}).get(uid_str, {})
-    if not sol:
-        await callback.answer(t(callback.from_user.id, "task_sol_not_found"), show_alert=True)
-        return
-    if sol.get("status") != "approved" and not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "task_sol_pending_user"), show_alert=True)
-        return
-    grade = sol.get("grade")
-    header = f"🪪 {sol_display(sol, uid_str)}"
-    header += f" — ⭐ {grade}/10" if grade else " — ✅"
-    text = sol.get("text") or ""
-    if text:
-        text = await localize(text, callback.from_user.id)
-
-    photos = sol.get("photo_file_ids") or ([sol["photo_file_id"]] if sol.get("photo_file_id") else [])
-    docs = sol.get("document_file_ids") or ([sol["document_file_id"]] if sol.get("document_file_id") else [])
-
-    try:
-        # If photos
-        if photos:
-            if len(photos) == 1:
-                if text and len(header + "\n\n" + text) <= 1000 and not docs:
-                    await callback.message.answer_photo(
-                        photo=photos[0],
-                        caption=header + "\n\n" + html.escape(text),
-                        parse_mode=ParseMode.HTML
-                    )
-                    await callback.answer()
-                    return
-                else:
-                    await callback.message.answer_photo(photo=photos[0], caption=header, parse_mode=ParseMode.HTML)
-            else:
-                media = []
-                for i, p in enumerate(photos[:10]):
-                    cap = header if i == 0 else None
-                    media.append(InputMediaPhoto(media=p, caption=cap, parse_mode=ParseMode.HTML))
-                await callback.message.answer_media_group(media=media)
-
-        # If docs
-        for d in docs:
-            await callback.message.answer_document(document=d)
-
-        # Text without limit: split into chunks of <= 4000 chars
-        full_content = text
-        if not photos:
-            full_content = header + ("\n\n" + text if text else "")
-
-        if full_content:
-            parts = _split_text(full_content, TG_TEXT_LIMIT)
-            for part in parts:
-                await callback.message.answer(html.escape(part) if photos else part, parse_mode=ParseMode.HTML)
-        elif not photos and not docs and not text:
-            await callback.answer(t(callback.from_user.id, "task_sol_empty_content"), show_alert=True)
-            return
-
-        await callback.answer()
-    except Exception:
-        logger.exception("Failed to show solution")
-        await callback.answer(t(callback.from_user.id, "task_sol_show_fail"), show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("solrev:"))
-async def cb_solrev(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    parts = callback.data.split(":")
-    if len(parts) != 5:
-        await callback.answer("Error", show_alert=True)
-        return
-    action, date_str, idx_s, uid_str = parts[1], parts[2], parts[3], parts[4]
-    try:
-        idx = int(idx_s)
-    except ValueError:
-        await callback.answer("Error", show_alert=True)
-        return
-    task = get_task(date_str, idx)
-    sol = (task.get("user_solutions") or {}).get(uid_str)
-    if not sol:
-        await callback.answer(t(callback.from_user.id, "task_admin_sol_rev_not_found"), show_alert=True)
-        return
-
-    if action == "no":
-        sol["status"] = "rejected"
-        sol["grade"] = None
-        sol["reviewed_at"] = datetime.now(YEREVAN_TZ).isoformat()
-        await save_db(DATABASE)
-        try:
-            await bot.send_message(int(uid_str), t(int(uid_str), "task_rejected_notify",
-                                                    date=date_str, num=idx + 1))
-        except Exception:
-            pass
-        await callback.message.answer(t(callback.from_user.id, "task_admin_rejected"))
-        await callback.answer(t(callback.from_user.id, "task_admin_sol_rejected_short"))
-        return
-
-    sol["status"] = "approved"
-    sol["reviewed_at"] = datetime.now(YEREVAN_TZ).isoformat()
-    await save_db(DATABASE)
-    name = sol.get("nickname") or get_nickname(uid_str)
-    rows = []
-    for start in (1, 6):
-        rows.append([InlineKeyboardButton(text=str(n), callback_data=f"grade:{n}:{date_str}:{idx}:{uid_str}")
-                     for n in range(start, start + 5)])
-    rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "task_admin_grade_ask"),
-                                      callback_data=f"grade:0:{date_str}:{idx}:{uid_str}")])
-    await callback.message.answer(t(callback.from_user.id, "task_admin_approved", nick=html.escape(name)),
-                                  parse_mode=ParseMode.HTML,
-                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer(t(callback.from_user.id, "task_admin_sol_approved_short"))
-
-
-@dp.callback_query(F.data.startswith("grade:"))
-async def cb_grade(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    parts = callback.data.split(":")
-    if len(parts) != 5:
-        await callback.answer("Error", show_alert=True)
-        return
-    try:
-        n = int(parts[1])
-        idx = int(parts[3])
-    except ValueError:
-        await callback.answer("Error", show_alert=True)
-        return
-    date_str, uid_str = parts[2], parts[4]
-    if not (0 <= n <= 10):
-        await callback.answer("Error", show_alert=True)
-        return
-    task = get_task(date_str, idx)
-    sol = (task.get("user_solutions") or {}).get(uid_str)
-    if not sol or sol.get("status") != "approved":
-        await callback.answer(t(callback.from_user.id, "task_admin_sol_rev_not_found"), show_alert=True)
-        return
-
-    prev_grade = sol.get("grade") or 0
-    new_grade = n
-    sol["grade"] = new_grade if new_grade > 0 else None
-    await save_db(DATABASE)
-
-    mult = DIFF_MULT.get(task.get("difficulty", "medium"), 2)
-    delta = (new_grade - prev_grade) * mult
-    if delta != 0:
-        await award_points(int(uid_str), delta)
-
-    name = sol.get("nickname") or get_nickname(uid_str)
-    # Send notification message directly to user about approved solution & grade
-    try:
-        if new_grade > 0:
-            if prev_grade:
-                await bot.send_message(int(uid_str), t(int(uid_str), "task_grade_updated",
-                                                        date=date_str, num=idx + 1, grade=new_grade))
-            else:
-                await bot.send_message(int(uid_str), t(int(uid_str), "task_approved_notify_grade",
-                                                        date=date_str, num=idx + 1, grade=new_grade))
-        else:
-            await bot.send_message(int(uid_str), t(int(uid_str), "task_approved_notify",
-                                                    date=date_str, num=idx + 1))
-    except Exception:
-        logger.warning("Failed to notify user %s about solution", uid_str)
-
-    label = t(callback.from_user.id, "task_sol_grade_full", grade=new_grade) if new_grade > 0 else t(callback.from_user.id, "task_grade_zero")
-    await callback.message.answer(t(callback.from_user.id, "task_admin_graded",
-                                    nick=html.escape(name), label=label),
-                                  parse_mode=ParseMode.HTML)
-    await callback.answer(t(callback.from_user.id, "task_grade_saved"))
-
-
-# ============================================================
-# LINKS
-# ============================================================
-
-@dp.callback_query(F.data == "links:main")
-async def cb_links_main(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await safe_send_or_edit(callback, t(callback.from_user.id, "links_title"),
-                            reply_markup=await get_links_keyboard(callback.from_user.id))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("links:sec:"))
-async def cb_links_section(callback: types.CallbackQuery):
-    sec_key = callback.data.split(":", 2)[2]
-    if sec_key == "useful_videos" and (sec_key not in DATABASE.get("links", {}) or not DATABASE["links"][sec_key].get("items")):
-        DATABASE.setdefault("links", {})["useful_videos"] = copy.deepcopy(DEFAULT_STATE["links"]["useful_videos"])
-        await save_db(DATABASE)
-    if sec_key not in DATABASE.get("links", {}):
-        await callback.answer(t(callback.from_user.id, "links_section_missing"), show_alert=True)
-        return
-    await show_links_section(callback, sec_key, callback.from_user.id)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.in_(["links:videos", "menu:videos"]))
-async def cb_links_videos_direct(callback: types.CallbackQuery):
-    DATABASE.setdefault("links", {})["useful_videos"] = copy.deepcopy(DEFAULT_STATE["links"]["useful_videos"])
-    await save_db(DATABASE)
-    await show_links_section(callback, "useful_videos", callback.from_user.id)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("links:del:"))
-async def cb_links_del(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "links_only_admin"), show_alert=True)
-        return
-    parts = callback.data.split(":")
-    if len(parts) != 4:
-        await callback.answer("Error", show_alert=True)
-        return
-    sec_key, idx = parts[2], int(parts[3])
-    items = DATABASE.get("links", {}).get(sec_key, {}).get("items", [])
-    if 0 <= idx < len(items):
-        removed = items.pop(idx)
-        await save_db(DATABASE)
-        await show_links_section(callback, sec_key, callback.from_user.id)
-        await callback.answer(t(callback.from_user.id, "links_item_removed",
-                                name=(removed.get('title') or '')[:40]))
-    else:
-        await callback.answer(t(callback.from_user.id, "links_item_missing"), show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("links:add:"))
-async def cb_links_add(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "links_only_admin"), show_alert=True)
-        return
-    sec_key = callback.data.split(":", 2)[2]
-    await state.set_state(AddLink.waiting_for_text)
-    await state.update_data(section=sec_key)
-    await callback.message.answer(t(callback.from_user.id, "links_ask"))
-    await callback.answer()
-
-
-@dp.message(StateFilter(AddLink.waiting_for_text), F.text)
-async def process_add_link(message: types.Message, state: FSMContext):
-    text = message.text.strip()
-    m = re.search(r"(https?://\S+)", text)
-    if not m:
-        await message.answer(t(message.from_user.id, "links_no_url"))
-        return
-    url = m.group(1).rstrip(".,);")
-    title = text.replace(m.group(1), "").strip(" \t-—|:,")
-    if not title:
-        title = re.sub(r"^https?://", "", url)[:60]
-    data = await state.get_data()
-    sec_key = data.get("section")
-    if sec_key not in DATABASE.get("links", {}):
-        await state.clear()
-        await message.answer(t(message.from_user.id, "links_section_missing"))
-        return
-    DATABASE["links"][sec_key].setdefault("items", []).append({"title": title, "url": url})
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer(t(message.from_user.id, "links_added",
-                           title=DATABASE['links'][sec_key].get('title', sec_key)))
-
-
-# ============================================================
-# USER FILE SUBMISSIONS
-# ============================================================
-
-@dp.callback_query(F.data == "submit:start")
-async def cb_submit_start(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(UserSubmit.waiting_file)
-    await state.update_data(sub_file_id=None, sub_file_name=None, sub_title="", selected_tags=[])
-    await callback.message.answer(t(callback.from_user.id, "submit_start"))
-    await callback.answer()
-
-
-@dp.message(StateFilter(UserSubmit.waiting_file), F.document | F.photo)
-async def process_submit_file(message: types.Message, state: FSMContext):
-    if message.document:
-        file_id = message.document.file_id
-        file_name = message.document.file_name or "material"
-    else:
-        file_id = message.photo[-1].file_id
-        file_name = "photo.jpg"
-    await state.update_data(sub_file_id=file_id, sub_file_name=file_name)
-    await state.set_state(UserSubmit.waiting_title)
-    await message.answer(t(message.from_user.id, "submit_ask_title"))
-
-
-@dp.message(StateFilter(UserSubmit.waiting_title), F.text)
-async def process_submit_title(message: types.Message, state: FSMContext):
-    await state.update_data(sub_title=message.text.strip()[:200])
-    await state.set_state(UserSubmit.choosing_tags)
-    await message.answer(t(message.from_user.id, "submit_ask_tags"),
-                         reply_markup=await get_tag_toggle_keyboard([], "sub:tag", "sub:tags_done",
-                                                                    message.from_user.id,
-                                                                    t(message.from_user.id, "submit_skip_tags"),
-                                                                    "sub:tags_skip"))
-
-
-@dp.callback_query(StateFilter(UserSubmit.choosing_tags), F.data.startswith("sub:tag:"))
-async def cb_sub_tag(callback: types.CallbackQuery, state: FSMContext):
-    res = await toggle_tag_by_index(callback, state)
-    if not res:
-        return
-    selected, tag, removed = res
-    await safe_send_or_edit(callback, t(callback.from_user.id, "choose_tags_n", n=len(selected)),
-                            reply_markup=await get_tag_toggle_keyboard(selected, "sub:tag", "sub:tags_done",
-                                                                       callback.from_user.id,
-                                                                       t(callback.from_user.id, "submit_skip_tags"),
-                                                                       "sub:tags_skip"))
-    await callback.answer(t(callback.from_user.id, "search_tag_off" if removed else "search_tag_on"))
-
-
-async def render_submit_preview(target, state: FSMContext, user_id: int):
-    data = await state.get_data()
-    text = t(user_id, "submit_preview",
-             title=html.escape(data.get('sub_title') or '—'),
-             file=html.escape(data.get('sub_file_name') or '—'),
-             tags=html.escape(' '.join(data.get('selected_tags', [])) or '—'))
-    markup = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=t(user_id, "submit_send"), callback_data="submit:confirm"),
-        InlineKeyboardButton(text=t(user_id, "submit_cancel"), callback_data="submit:cancel"),
-    ]])
-    await safe_send_or_edit(target, text, reply_markup=markup)
-
-
-@dp.callback_query(F.data == "sub:tags_done", StateFilter(UserSubmit.choosing_tags))
-async def cb_sub_tags_done(callback: types.CallbackQuery, state: FSMContext):
-    await render_submit_preview(callback, state, callback.from_user.id)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "sub:tags_skip", StateFilter(UserSubmit.choosing_tags))
-async def cb_sub_tags_skip(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(selected_tags=[])
-    await render_submit_preview(callback, state, callback.from_user.id)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "submit:confirm", StateFilter(UserSubmit.choosing_tags))
-async def cb_submit_confirm(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    if not data.get("sub_file_id"):
-        await callback.answer(t(callback.from_user.id, "submit_first_file"), show_alert=True)
-        return
-    uid_str = str(callback.from_user.id)
-    u = DATABASE.get("users", {}).get(uid_str, {})
-    sub_id = uuid.uuid4().hex[:12]
-    payload = {
-        "user_id": callback.from_user.id,
-        "username": callback.from_user.username or "",
-        "first_name": callback.from_user.first_name or "",
-        "nickname": u.get("nickname") or "",
-        "file_id": data["sub_file_id"],
-        "file_name": data.get("sub_file_name") or "",
-        "title": data.get("sub_title") or "",
-        "tags": data.get("selected_tags", []),
-        "status": "pending",
-        "created_at": datetime.now(YEREVAN_TZ).isoformat(),
-    }
-    await save_submission(sub_id, payload)
-    await state.clear()
-    notify_text = (
-        "📥 <b>Новая заявка на файл</b>\n\n"
-        f"🪪 Ник: {html.escape(payload['nickname'] or '—')}\n"
-        f"👤 TG: {html.escape(payload['first_name'] or '')}"
-        + (f" · @{html.escape(payload['username'])}" if payload["username"] else "")
-        + "\n\n"
-        f"📖 {html.escape(payload['title'] or '—')}\n"
-        f"📄 {html.escape(payload['file_name'] or '—')}\n"
-        f"🏷 {html.escape(' '.join(payload['tags']) or '—')}"
-    )
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Принять", callback_data=f"admin:sub_accept:{sub_id}")],
-        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"admin:sub_reject:{sub_id}")],
-    ])
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_document(admin_id, document=payload["file_id"], caption=notify_text[:1024],
-                                    parse_mode=ParseMode.HTML, reply_markup=markup)
-        except Exception:
-            logger.exception("Failed to notify admin %s", admin_id)
-    await callback.message.answer(t(callback.from_user.id, "submit_sent"))
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "submit:confirm")
-async def cb_submit_confirm_stale(callback: types.CallbackQuery):
-    await callback.answer(t(callback.from_user.id, "submit_stale"), show_alert=True)
-
-
-@dp.callback_query(F.data == "submit:cancel")
-async def cb_submit_cancel(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.answer(t(callback.from_user.id, "submit_cancelled"))
-    await callback.answer()
-
-
-# ============================================================
-# ADMIN: PANEL
-# ============================================================
-
-@dp.callback_query(F.data == "admin:main")
-async def cb_admin_main(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.clear()
-    await safe_send_or_edit(callback, t(callback.from_user.id, "admin_title"),
-                            reply_markup=get_admin_menu_keyboard(callback.from_user.id))
-    await callback.answer()
-
-
-# ============================================================
-# ADMIN: MANUAL UPLOAD
-# ============================================================
-
-@dp.callback_query(F.data == "admin:upload")
-async def cb_admin_upload(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.set_state(AdminUpload.waiting_document)
-    await state.update_data(file_id=None, file_name="", title="", description="",
-                            selected_tags=[], difficulty="medium", upl_cats=[])
-    await callback.message.answer(t(callback.from_user.id, "admin_upload_ask"))
-    await callback.answer()
-
-
-@dp.message(StateFilter(AdminUpload.waiting_document), F.document | F.photo)
-async def process_upl_document(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    if message.document:
-        file_id = message.document.file_id
-        file_name = message.document.file_name or "material"
-    else:
-        file_id = message.photo[-1].file_id
-        file_name = "photo.jpg"
-    await state.update_data(file_id=file_id, file_name=file_name)
-    await state.set_state(AdminUpload.waiting_title)
-    await message.answer(t(message.from_user.id, "admin_upload_title"))
-
-
-@dp.message(StateFilter(AdminUpload.waiting_title), F.text)
-async def process_upl_title(message: types.Message, state: FSMContext):
-    await state.update_data(title=message.text.strip()[:200])
-    await state.set_state(AdminUpload.waiting_description)
-    await message.answer(t(message.from_user.id, "admin_upload_desc"))
-
-
-@dp.message(StateFilter(AdminUpload.waiting_description), F.text)
-async def process_upl_description(message: types.Message, state: FSMContext):
-    raw = message.text.strip()
-    if raw.lower() in ("пропустить", "skip", "-"):
-        raw = ""
-    await state.update_data(description=raw)
-    await state.set_state(AdminUpload.choosing_tags)
-    await message.answer(t(message.from_user.id, "admin_upload_tags"),
-                         reply_markup=await get_tag_toggle_keyboard([], "upl:tag", "upl:tags_done",
-                                                                    message.from_user.id,
-                                                                    "⏭", "upl:tags_skip"))
-
-
-@dp.callback_query(StateFilter(AdminUpload.choosing_tags), F.data.startswith("upl:tag:"))
-async def cb_upl_tag(callback: types.CallbackQuery, state: FSMContext):
-    res = await toggle_tag_by_index(callback, state)
-    if not res:
-        return
-    selected, tag, removed = res
-    await safe_send_or_edit(callback, t(callback.from_user.id, "choose_tags_n", n=len(selected)),
-                            reply_markup=await get_tag_toggle_keyboard(selected, "upl:tag", "upl:tags_done",
-                                                                       callback.from_user.id,
-                                                                       "⏭", "upl:tags_skip"))
-    await callback.answer(t(callback.from_user.id, "search_tag_off" if removed else "search_tag_on"))
-
-
-@dp.callback_query(F.data == "upl:tags_done", StateFilter(AdminUpload.choosing_tags))
-async def cb_upl_tags_done(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(AdminUpload.choosing_difficulty)
-    builder = [[InlineKeyboardButton(text=t(callback.from_user.id, f"admin_diff_{lvl}"),
-                                     callback_data=f"upl:diff:{lvl}")]
-               for lvl in DIFF_KEYS]
-    builder.append([InlineKeyboardButton(text="❌", callback_data="menu:main")])
-    await safe_send_or_edit(callback, t(callback.from_user.id, "admin_upload_diff"),
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "upl:tags_skip", StateFilter(AdminUpload.choosing_tags))
-async def cb_upl_tags_skip(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(selected_tags=[])
-    await state.set_state(AdminUpload.choosing_difficulty)
-    builder = [[InlineKeyboardButton(text=t(callback.from_user.id, f"admin_diff_{lvl}"),
-                                     callback_data=f"upl:diff:{lvl}")]
-               for lvl in DIFF_KEYS]
-    builder.append([InlineKeyboardButton(text="❌", callback_data="menu:main")])
-    await safe_send_or_edit(callback, t(callback.from_user.id, "admin_upload_diff"),
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
-    await callback.answer()
-
-
-@dp.callback_query(StateFilter(AdminUpload.choosing_difficulty), F.data.startswith("upl:diff:"))
-async def cb_upl_diff(callback: types.CallbackQuery, state: FSMContext):
-    level = callback.data.split(":", 2)[2]
-    if level in DIFF_KEYS:
-        await state.update_data(difficulty=level)
-    await state.set_state(AdminUpload.choosing_categories)
-    data = await state.get_data()
-    await safe_send_or_edit(callback, t(callback.from_user.id, "admin_upload_cats"),
-                            reply_markup=await get_category_toggle_keyboard(data.get("upl_cats", []),
-                                                                            callback.from_user.id))
-    await callback.answer()
-
-
-@dp.callback_query(StateFilter(AdminUpload.choosing_categories), F.data.startswith("upl:cat:"))
-async def cb_upl_cat(callback: types.CallbackQuery, state: FSMContext):
-    cat_key = callback.data.split(":", 2)[2]
-    if cat_key not in DATABASE.get("categories", {}):
-        await callback.answer(t(callback.from_user.id, "admin_upload_cat_missing"), show_alert=True)
-        return
-    data = await state.get_data()
-    cats = list(data.get("upl_cats", []))
-    if cat_key in cats:
-        cats.remove(cat_key)
-        selected = False
-    else:
-        cats.append(cat_key)
-        selected = True
-    await state.update_data(upl_cats=cats)
-    await safe_send_or_edit(callback, t(callback.from_user.id, "admin_upload_cats"),
-                            reply_markup=await get_category_toggle_keyboard(cats, callback.from_user.id))
-    await callback.answer("✅" if selected else "▫️")
-
-
-@dp.callback_query(F.data == "upl:publish", StateFilter(AdminUpload.choosing_categories))
-async def cb_upl_publish(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    data = await state.get_data()
-    if not data.get("file_id"):
-        await callback.answer(t(callback.from_user.id, "submit_first_file"), show_alert=True)
-        return
-    cats = [c for c in data.get("upl_cats", []) if c in DATABASE.get("categories", {})]
-    if not cats:
-        await callback.answer(t(callback.from_user.id, "admin_upload_no_cat"), show_alert=True)
-        return
-    entry = {
-        "file_unique_id": str(uuid.uuid4()),
-        "file_id": data["file_id"],
-        "file_name": data.get("file_name", ""),
-        "caption": data.get("title") or "—",
-        "summary": data.get("description", ""),
-        "tags": data.get("selected_tags", []),
-        "difficulty": data.get("difficulty", "medium"),
-        "must_read": False,
-        "added_at": get_yerevan_date(),
-        "likes": [],
-        "comments": [],
-    }
-    titles = []
-    for cat_key in cats:
-        DATABASE["categories"][cat_key].setdefault("files", []).append(copy.deepcopy(entry))
-        titles.append(DATABASE["categories"][cat_key].get("title", cat_key))
-    await save_db(DATABASE)
-    await state.clear()
-    await callback.message.answer(
-        t(callback.from_user.id, "admin_upload_published",
-          title=html.escape(entry['caption']),
-          cats=html.escape(', '.join(titles))),
-        parse_mode=ParseMode.HTML,
-    )
-    await announce_file_to_channel(entry, titles)
-    await callback.answer(t(callback.from_user.id, "admin_upload_done_short"))
-
-
-@dp.callback_query(F.data == "upl:publish")
-async def cb_upl_publish_stale(callback: types.CallbackQuery):
-    await callback.answer(t(callback.from_user.id, "admin_upload_stale"), show_alert=True)
-
-
-# ============================================================
-# ADMIN: ADD DAILY TASK
-# ============================================================
-
-@dp.callback_query(F.data == "admin:add_task")
-async def cb_add_task(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.set_state(TaskOfDayAdmin.waiting_for_photo)
-    await state.update_data(task_photo=None, task_text="", solution_text="",
-                            solution_photo=None, solution_document=None, selected_tags=[],
-                            task_numeric=None)
-    await callback.message.answer(t(callback.from_user.id, "admin_task_photo"))
-    await callback.answer()
-
-
-@dp.message(StateFilter(TaskOfDayAdmin.waiting_for_photo))
-async def process_task_photo(message: types.Message, state: FSMContext):
-    if message.photo:
-        await state.update_data(task_photo=message.photo[-1].file_id)
-    elif message.text and message.text.strip().lower() in ("пропустить", "skip", "-"):
-        await state.update_data(task_photo=None)
-    else:
-        await message.answer(t(message.from_user.id, "admin_task_photo_ask"))
-        return
-    await state.set_state(TaskOfDayAdmin.waiting_for_task_text)
-    await message.answer(t(message.from_user.id, "admin_task_text"))
-
-
-@dp.message(StateFilter(TaskOfDayAdmin.waiting_for_task_text), F.text)
-async def process_task_text(message: types.Message, state: FSMContext):
-    raw = message.text.strip()
-    if raw.lower() in ("пропустить", "skip", "-"):
-        raw = ""
-    await state.update_data(task_text=raw)
-    await state.set_state(TaskOfDayAdmin.waiting_for_solution)
-    await message.answer(t(message.from_user.id, "admin_task_solution"))
-
-
-@dp.message(StateFilter(TaskOfDayAdmin.waiting_for_solution))
-async def process_task_solution(message: types.Message, state: FSMContext):
-    if message.photo:
-        await state.update_data(solution_photo=message.photo[-1].file_id)
-        if message.caption:
-            await state.update_data(solution_text=message.caption.strip())
-    elif message.document:
-        await state.update_data(solution_document=message.document.file_id)
-    elif message.text and message.text.strip().lower() in ("пропустить", "skip", "-"):
-        await state.update_data(solution_text="", solution_photo=None, solution_document=None)
-    elif message.text:
-        await state.update_data(solution_text=message.text.strip())
-    else:
-        await message.answer(t(message.from_user.id, "admin_task_sol_ask"))
-        return
-    await state.set_state(TaskOfDayAdmin.waiting_numeric_answer)
-    await message.answer(
-        "🔢 Введите числовой ответ для автопроверки (например <code>42</code> или <code>3.14</code>).\n"
-        "Или «пропустить» — тогда решение проверяется вручную.",
-        parse_mode=ParseMode.HTML)
-
-
-@dp.message(StateFilter(TaskOfDayAdmin.waiting_numeric_answer), F.text)
-async def process_task_numeric(message: types.Message, state: FSMContext):
-    raw = message.text.strip().replace(",", ".")
-    if raw.lower() in ("пропустить", "skip", "-", ""):
-        await state.update_data(task_numeric=None)
-    else:
-        try:
-            float(raw)
-            await state.update_data(task_numeric=raw)
-        except ValueError:
-            await message.answer("⚠️ Не число. Введите число или «пропустить».")
-            return
-    await state.set_state(TaskOfDayAdmin.choosing_difficulty)
-    builder = [[InlineKeyboardButton(text=t(message.from_user.id, f"admin_diff_{lvl}"),
-                                     callback_data=f"taskdiff:{lvl}")]
-               for lvl in DIFF_KEYS]
-    builder.append([InlineKeyboardButton(text="❌", callback_data="menu:main")])
-    await message.answer("🎯 Выберите сложность задачи (влияет на очки):",
-                         reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
-
-
-@dp.callback_query(StateFilter(TaskOfDayAdmin.choosing_difficulty),
-                   F.data.startswith("taskdiff:"))
-async def cb_task_diff(callback: types.CallbackQuery, state: FSMContext):
-    lvl = callback.data.split(":", 1)[1]
-    if lvl not in DIFF_KEYS:
-        await callback.answer("Error", show_alert=True)
-        return
-    await state.update_data(task_difficulty=lvl)
-    await state.update_data(selected_tags=[])
-    await state.set_state(TaskOfDayAdmin.choosing_tags)
-    await safe_send_or_edit(
-        callback, "🏷 Выберите теги задачи (или пропустите):",
-        reply_markup=await get_tag_toggle_keyboard(
-            [], "tasktag", "tasktag:done", callback.from_user.id,
-            "⏭ Без тегов", "tasktag:skip"))
-    await callback.answer()
-
-
-@dp.callback_query(StateFilter(TaskOfDayAdmin.choosing_tags),
-                   F.data.regexp(r"^tasktag:\d+$"))
-async def cb_tasktag_toggle(callback: types.CallbackQuery, state: FSMContext):
-    res = await toggle_tag_by_index(callback, state)
-    if not res:
-        return
-    selected, tag, removed = res
-    await safe_send_or_edit(
-        callback, f"🏷 Выбрано тегов: {len(selected)}",
-        reply_markup=await get_tag_toggle_keyboard(
-            selected, "tasktag", "tasktag:done", callback.from_user.id,
-            "⏭ Без тегов", "tasktag:skip"))
-    await callback.answer("✅" if not removed else "▫️")
-
-
-@dp.callback_query(StateFilter(TaskOfDayAdmin.choosing_tags), F.data == "tasktag:skip")
-async def cb_tasktag_skip(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(selected_tags=[])
-    await state.set_state(TaskOfDayAdmin.waiting_for_date)
-    await safe_send_or_edit(callback, t(callback.from_user.id, "admin_task_date"))
-    await callback.answer()
-
-
-@dp.callback_query(StateFilter(TaskOfDayAdmin.choosing_tags), F.data == "tasktag:done")
-async def cb_tasktag_done(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(TaskOfDayAdmin.waiting_for_date)
-    await safe_send_or_edit(callback, t(callback.from_user.id, "admin_task_date"))
-    await callback.answer()
-
-
-@dp.message(StateFilter(TaskOfDayAdmin.waiting_for_date), F.text)
-async def process_task_date(message: types.Message, state: FSMContext):
-    raw = message.text.strip().lower()
-    if raw in ("сегодня", "today"):
-        date_str = get_yerevan_date()
-    elif raw in ("завтра", "tomorrow"):
-        date_str = (datetime.now(YEREVAN_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
-    else:
-        try:
-            date_str = datetime.strptime(raw, "%Y-%m-%d").strftime("%Y-%m-%d")
-        except ValueError:
-            await message.answer(t(message.from_user.id, "admin_task_bad_date"))
-            return
-    data = await state.get_data()
-    group = DATABASE.setdefault("daily_tasks", {}).setdefault(date_str, {"tasks": []})
-    group.setdefault("tasks", [])
-    task = {
-        "task_id": uuid.uuid4().hex[:10],
-        "text": data.get("task_text", ""),
-        "photo_file_id": data.get("task_photo"),
-        "solution": data.get("solution_text", ""),
-        "solution_photo_file_id": data.get("solution_photo"),
-        "solution_document_file_id": data.get("solution_document"),
-        "difficulty": data.get("task_difficulty", "medium"),
-        "tags": data.get("selected_tags", []),
-        "numeric_answer": data.get("task_numeric"),
-        "source": "admin",
-        "status": "draft",
-        "user_solutions": {},
-        "created_at": get_yerevan_date(),
-        "number": len(group["tasks"]) + 1,
-    }
-    group["tasks"].append(task)
-    await save_db(DATABASE)
-    await state.clear()
-    task_idx = len(group["tasks"]) - 1
-
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Опубликовать сейчас",
-                              callback_data=f"tsched:now:{date_str}:{task_idx}")],
-        [InlineKeyboardButton(text="⏰ Запланировать на время",
-                              callback_data=f"tsched:later:{date_str}:{task_idx}")],
-        [InlineKeyboardButton(text="📝 Оставить черновиком",
-                              callback_data=f"tsched:draft:{date_str}:{task_idx}")],
-    ])
-    await message.answer(
-        t(message.from_user.id, "admin_task_added", date=date_str, num=task['number']) +
-        "\n\n<i>Опубликовать сразу, по расписанию или оставить черновиком?</i>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=markup)
-
-
-@dp.callback_query(F.data.startswith("tsched:now:"))
-async def cb_tsched_now(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Недоступно", show_alert=True); return
-    _, _, date_str, idx_s = callback.data.split(":", 3)
-    idx = int(idx_s)
-    task = get_task(date_str, idx)
-    if task:
-        task["status"] = "published"
-        await save_db(DATABASE)
-    await callback.answer("📢 Публикую...")
-    await broadcast_task(date_str, idx, report_msg=callback.message)
-
-
-@dp.callback_query(F.data.startswith("tsched:later:"))
-async def cb_tsched_later(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Недоступно", show_alert=True); return
-    _, _, date_str, idx_s = callback.data.split(":", 3)
-    await state.set_state(TaskSchedule.waiting_datetime)
-    await state.update_data(sched_date=date_str, sched_idx=int(idx_s))
-    await callback.message.answer(
-        "⏰ Укажите дату и время публикации:\n"
-        "<code>ГГГГ-ММ-ДД ЧЧ:ММ</code> (Ереван, UTC+4)\n\n"
-        "Например: <code>2026-09-22 19:00</code>",
-        parse_mode=ParseMode.HTML)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("tsched:draft:"))
-async def cb_tsched_draft(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Недоступно", show_alert=True); return
-    _, _, date_str, idx_s = callback.data.split(":", 3)
-    idx = int(idx_s)
-    task = get_task(date_str, idx)
-    if task:
-        task["status"] = "draft"
-        await save_db(DATABASE)
-    await callback.message.answer(
-        f"📝 Черновик сохранён ({date_str} №{idx+1}).\n"
-        "Открыть и опубликовать: «🎯 Задача дня» → «📢 Разослать задачу».")
-    await callback.answer("📝")
-
-
-@dp.message(StateFilter(TaskSchedule.waiting_datetime), F.text)
-async def process_tsched_datetime(message: types.Message, state: FSMContext):
-    raw = message.text.strip()
-    try:
-        dt_naive = datetime.strptime(raw, "%Y-%m-%d %H:%M")
-    except ValueError:
-        await message.answer("⚠️ Формат: <code>2026-09-22 19:00</code>",
-                             parse_mode=ParseMode.HTML)
-        return
-    dt = dt_naive.replace(tzinfo=YEREVAN_TZ)
-    if dt <= datetime.now(YEREVAN_TZ):
-        await message.answer("⚠️ Время должно быть в будущем.")
-        return
-
-    data = await state.get_data()
-    date_str, idx = data.get("sched_date"), data.get("sched_idx")
-    task = get_task(date_str, idx)
-    if task:
-        task["status"] = "scheduled"
-        task["publish_at"] = dt.isoformat()
-        await save_db(DATABASE)
-
-    await state.clear()
-    asyncio.create_task(_schedule_publish(date_str, idx, dt))
-    await message.answer(
-        f"⏰ Задача запланирована на <b>{dt.strftime('%Y-%m-%d %H:%M')}</b> (Ереван)",
-        parse_mode=ParseMode.HTML,
-        reply_markup=get_main_menu_keyboard(message.from_user.id))
-
 
 async def _schedule_publish(date_str: str, idx: int, when: datetime):
     try:
@@ -4645,558 +2302,29 @@ async def _schedule_publish(date_str: str, idx: int, when: datetime):
         if not task:
             return
         task["status"] = "published"
+        task.pop("publish_at", None)
         await save_db(DATABASE)
         await broadcast_task(date_str, idx)
         for admin_id in ADMIN_IDS:
             try:
-                await bot.send_message(admin_id,
-                                       f"✅ Задача {date_str} #{idx+1} опубликована по расписанию.")
+                await bot.send_message(admin_id, f"✅ Задача {date_str} #{idx + 1} успешно опубликована по расписанию.")
             except Exception:
                 pass
     except Exception:
-        logger.exception("Scheduled publish failed")
+        logger.exception("Scheduled publish failed for %s #%s", date_str, idx)
 
 
 # ============================================================
-# ADMIN: STATS / SUBMISSIONS / PENDING / BROADCAST
-# ============================================================
-
-@dp.callback_query(F.data == "admin:stats")
-async def cb_admin_stats(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.clear()
-    users = DATABASE.get("users", {})
-    total_files = sum(len(c.get("files", [])) for c in DATABASE.get("categories", {}).values())
-    tasks_total = sum(len(g.get("tasks", [])) for g in DATABASE.get("daily_tasks", {}).values())
-    pending_sols = 0
-    for group in DATABASE.get("daily_tasks", {}).values():
-        for task in group.get("tasks", []):
-            pending_sols += sum(1 for s in (task.get("user_solutions") or {}).values()
-                                if s.get("status") == "pending")
-    pending_subs = await submissions_collection.count_documents({"status": "pending"})
-    top = sorted(users.items(), key=lambda kv: kv[1].get("score", 0), reverse=True)[:5]
-    top_lines = "\n".join(
-        f"  {i}. {html.escape(u.get('nickname') or u.get('username') or f'id{uid_str}')} — "
-        f"{u.get('score', 0)}"
-        for i, (uid_str, u) in enumerate(top, 1)
-    ) or "  —"
-    text = t(callback.from_user.id, "admin_stats_title",
-             users=len(users), files=total_files, tags=len(DATABASE.get('tags', [])),
-             tasks=tasks_total, pending=pending_sols, subs=pending_subs, top=top_lines)
-    markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-        text=t(callback.from_user.id, "back_admin"), callback_data="admin:main")]])
-    await safe_send_or_edit(callback, text, reply_markup=markup)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin:stats_csv")
-async def cb_stats_csv(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    buf = io.StringIO()
-    writer = csv.writer(buf, delimiter=",")
-    writer.writerow(["nick", "tg_first_name", "tg_username", "score",
-                     "solved_count", "streak", "favorites", "language", "created_at"])
-    for uid_str, u in DATABASE.get("users", {}).items():
-        writer.writerow([
-            u.get("nickname", ""),
-            u.get("first_name", ""),
-            u.get("username", ""),
-            u.get("score", 0),
-            count_solved(uid_str),
-            u.get("streak", 0),
-            len(u.get("favorites", [])),
-            u.get("language", "ru"),
-            u.get("created_at", ""),
-        ])
-    payload = buf.getvalue().encode("utf-8-sig")
-    file = types.BufferedInputFile(payload, filename=f"matham_users_{get_yerevan_date()}.csv")
-    await callback.message.answer_document(file, caption="📊 Экспорт пользователей")
-    await callback.answer("📤 CSV отправлен")
-
-
-@dp.callback_query(F.data == "admin:submissions")
-async def cb_admin_submissions(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.clear()
-    subs = []
-    async for s in submissions_collection.find({"status": "pending"}).sort("created_at", -1):
-        subs.append(s)
-        if len(subs) >= 10:
-            break
-    if not subs:
-        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text=t(callback.from_user.id, "back_admin"), callback_data="admin:main")]])
-        await safe_send_or_edit(callback, t(callback.from_user.id, "admin_subs_empty"), reply_markup=markup)
-        await callback.answer()
-        return
-    lines = [t(callback.from_user.id, "admin_subs_title")]
-    builder = []
-    for s in subs:
-        sid = s["_id"]
-        title = html.escape(s.get("title") or s.get("file_name") or "—")
-        nick = html.escape(s.get("nickname") or "—")
-        tg = html.escape(s.get("first_name") or "")
-        uname = s.get("username") or ""
-        lines.append(f"• <b>{title}</b>\n   🪪 {nick} · 👤 {tg}"
-                     + (f" · @{html.escape(uname)}" if uname else ""))
-        builder.append([
-            InlineKeyboardButton(text=t(callback.from_user.id, "admin_subs_accept"), callback_data=f"admin:sub_accept:{sid}"),
-            InlineKeyboardButton(text=t(callback.from_user.id, "admin_subs_reject"), callback_data=f"admin:sub_reject:{sid}"),
-        ])
-    builder.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_admin"), callback_data="admin:main")])
-    await safe_send_or_edit(callback, "\n".join(lines),
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:sub_accept:"))
-async def cb_sub_accept(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    sub_id = callback.data.split(":", 2)[2]
-    sub = await get_submission(sub_id)
-    if not sub or sub.get("status") != "pending":
-        await callback.answer(t(callback.from_user.id, "admin_subs_already"), show_alert=True)
-        return
-    await save_submission(sub_id, {"status": "accepted",
-                                   "processed_at": datetime.now(YEREVAN_TZ).isoformat()})
-    rows = []
-    for cat_key, cat_data in DATABASE.get("categories", {}).items():
-        tr_title = await localize(cat_data.get("title", cat_key), callback.from_user.id)
-        rows.append([InlineKeyboardButton(text=tr_title, callback_data=f"subcat:{sub_id}:{cat_key}")])
-    rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_admin"), callback_data="admin:main")])
-    await callback.message.answer(t(callback.from_user.id, "admin_subs_pick_cat"),
-                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("subcat:"))
-async def cb_subcat(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    parts = callback.data.split(":")
-    if len(parts) != 3:
-        await callback.answer("Error", show_alert=True)
-        return
-    sub_id, cat_key = parts[1], parts[2]
-    sub = await get_submission(sub_id)
-    if not sub:
-        await callback.answer(t(callback.from_user.id, "admin_subs_not_found"), show_alert=True)
-        return
-    if sub.get("status") == "published":
-        await callback.answer(t(callback.from_user.id, "admin_subs_already_pub"), show_alert=True)
-        return
-    if cat_key not in DATABASE.get("categories", {}):
-        await callback.answer(t(callback.from_user.id, "admin_upload_cat_missing"), show_alert=True)
-        return
-    entry = {
-        "file_unique_id": str(uuid.uuid4()),
-        "file_id": sub.get("file_id"),
-        "file_name": sub.get("file_name") or "",
-        "caption": sub.get("title") or "—",
-        "summary": "",
-        "tags": sub.get("tags", []),
-        "difficulty": "medium",
-        "must_read": False,
-        "added_at": get_yerevan_date(),
-        "likes": [],
-        "comments": [],
-    }
-    DATABASE["categories"][cat_key].setdefault("files", []).append(entry)
-    await save_db(DATABASE)
-    await save_submission(sub_id, {"status": "published"})
-    cat_title = DATABASE["categories"][cat_key].get("title", cat_key)
-    # Notify user that submitted material was approved and published
-    try:
-        user_uid = sub.get("user_id")
-        if user_uid:
-            await bot.send_message(user_uid,
-                                   t(user_uid, "admin_subs_user_notify",
-                                     title=entry['caption'], cat=cat_title))
-    except Exception:
-        logger.warning("Failed to notify user %s about published material", sub.get("user_id"))
-
-    await callback.message.answer(t(callback.from_user.id, "admin_subs_published",
-                                    cat=html.escape(cat_title)))
-    await announce_file_to_channel(entry, [cat_title])
-    await callback.answer("✅")
-
-
-@dp.callback_query(F.data.startswith("admin:sub_reject:"))
-async def cb_sub_reject(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    sub_id = callback.data.split(":", 2)[2]
-    sub = await get_submission(sub_id)
-    if not sub or sub.get("status") != "pending":
-        await callback.answer(t(callback.from_user.id, "admin_subs_already"), show_alert=True)
-        return
-    await save_submission(sub_id, {"status": "rejected",
-                                   "processed_at": datetime.now(YEREVAN_TZ).isoformat()})
-    # Notify user that submitted material was rejected
-    try:
-        user_uid = sub.get("user_id")
-        if user_uid:
-            await bot.send_message(user_uid,
-                                   t(user_uid, "admin_subs_reject_notify",
-                                     title=sub.get("title") or "материал"))
-    except Exception:
-        pass
-    await callback.message.answer(t(callback.from_user.id, "admin_subs_rejected"))
-    await callback.answer("❌")
-
-
-@dp.callback_query(F.data == "admin:pending_sols")
-async def cb_pending_sols(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.clear()
-    lines = [t(callback.from_user.id, "admin_pending_title")]
-    builder = []
-    found = 0
-    stop = False
-    for date_str in get_dates_sorted():
-        if stop:
-            break
-        group = DATABASE["daily_tasks"][date_str]
-        for idx, task in enumerate(group.get("tasks", [])):
-            if stop:
-                break
-            for uid_str, s in (task.get("user_solutions") or {}).items():
-                if s.get("status") != "pending":
-                    continue
-                found += 1
-                lines.append(f"• {date_str} · №{task['number']} — 🪪 "
-                             f"{html.escape(s.get('nickname') or get_nickname(uid_str))} · "
-                             f"👤 {html.escape(s.get('first_name') or '')}")
-                builder.append([
-                    InlineKeyboardButton(text="👀", callback_data=f"solfull:{date_str}:{idx}:{uid_str}"),
-                    InlineKeyboardButton(text="✅", callback_data=f"solrev:ok:{date_str}:{idx}:{uid_str}"),
-                    InlineKeyboardButton(text="❌", callback_data=f"solrev:no:{date_str}:{idx}:{uid_str}"),
-                ])
-                if found >= 10:
-                    stop = True
-                    break
-    if not found:
-        lines.append(t(callback.from_user.id, "admin_pending_empty"))
-    else:
-        lines.append(t(callback.from_user.id, "admin_pending_shown", n=found))
-    builder.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_admin"), callback_data="admin:main")])
-    await safe_send_or_edit(callback, "\n".join(lines),
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin:broadcast")
-async def cb_admin_broadcast(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.set_state(BroadcastAdmin.waiting_for_message)
-    await callback.message.answer(t(callback.from_user.id, "admin_bcast_ask"))
-    await callback.answer()
-
-
-@dp.message(StateFilter(BroadcastAdmin.waiting_for_message))
-async def process_broadcast(message: types.Message, state: FSMContext):
-    await message.answer(t(message.from_user.id, "admin_bcast_running"))
-    users = DATABASE.get("users", {})
-    sem = asyncio.Semaphore(15)
-    sent = 0
-    failed = 0
-    lock = asyncio.Lock()
-
-    async def _send_one(uid_str: str):
-        nonlocal sent, failed
-        try:
-            await message.copy_to(int(uid_str))
-            async with lock:
-                sent += 1
-        except TelegramRetryAfter as e:
-            await asyncio.sleep(e.retry_after + 1)
-            try:
-                await message.copy_to(int(uid_str))
-                async with lock:
-                    sent += 1
-            except Exception:
-                async with lock:
-                    failed += 1
-        except Exception:
-            async with lock:
-                failed += 1
-        await asyncio.sleep(0.05)
-
-    async def _guarded(uid_str):
-        async with sem:
-            await _send_one(uid_str)
-
-    await asyncio.gather(*[_guarded(u) for u in list(users.keys())])
-    await state.clear()
-    await message.answer(t(message.from_user.id, "admin_bcast_done", sent=sent, failed=failed))
-
-
-# ============================================================
-# ADMIN: EDIT / DELETE FILE & DESCRIPTION
-# ============================================================
-
-@dp.callback_query(F.data.startswith("admin:edit_file:"))
-async def cb_edit_file(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    uid = callback.data.split(":", 2)[2]
-    f = get_file_by_uid(uid)
-    if not f:
-        await callback.answer(t(callback.from_user.id, "no_file"), show_alert=True)
-        return
-    await state.clear()
-    await state.update_data(edit_uid=uid)
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t(callback.from_user.id, "admin_edit_replace"), callback_data="admin:efile:doc")],
-        [InlineKeyboardButton(text=t(callback.from_user.id, "admin_edit_rename"), callback_data="admin:efile:title"),
-         InlineKeyboardButton(text=t(callback.from_user.id, "admin_edit_desc"), callback_data="admin:efile:desc")],
-        [InlineKeyboardButton(text=t(callback.from_user.id, "admin_edit_tags"), callback_data="admin:efile:tags")],
-        [InlineKeyboardButton(text=t(callback.from_user.id, "admin_edit_back"), callback_data=f"file:view:{uid}")],
-    ])
-    await safe_send_or_edit(callback,
-                            t(callback.from_user.id, "admin_edit_title", title=html.escape(f.get('caption') or '')),
-                            reply_markup=markup)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin:efile:doc")
-async def cb_efile_doc(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.set_state(EditFile.waiting_for_document)
-    await callback.message.answer(t(callback.from_user.id, "admin_edit_ask_doc"))
-    await callback.answer()
-
-
-@dp.message(StateFilter(EditFile.waiting_for_document), F.document | F.photo)
-async def process_efile_doc(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    uid = data.get("edit_uid")
-    if not uid:
-        await state.clear()
-        return
-    new_id = message.document.file_id if message.document else message.photo[-1].file_id
-    n = update_file_field(uid, "file_id", new_id)
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer(t(message.from_user.id, "admin_edit_doc_done", n=n))
-
-
-@dp.callback_query(F.data == "admin:efile:title")
-async def cb_efile_title(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.set_state(EditFile.waiting_for_title)
-    await callback.message.answer(t(callback.from_user.id, "admin_edit_ask_title"))
-    await callback.answer()
-
-
-@dp.message(StateFilter(EditFile.waiting_for_title), F.text)
-async def process_efile_title(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    uid = data.get("edit_uid")
-    if not uid:
-        await state.clear()
-        return
-    n = update_file_field(uid, "caption", message.text.strip()[:200])
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer(t(message.from_user.id, "admin_edit_title_done", n=n))
-    await show_file_card(message, uid, message.from_user.id)
-
-
-@dp.callback_query(F.data == "admin:efile:desc")
-async def cb_efile_desc(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.set_state(EditFile.waiting_for_desc)
-    await callback.message.answer(t(callback.from_user.id, "admin_edit_ask_desc"))
-    await callback.answer()
-
-
-@dp.message(StateFilter(EditFile.waiting_for_desc), F.text)
-async def process_efile_desc(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    uid = data.get("edit_uid")
-    if not uid:
-        await state.clear()
-        return
-    raw = message.text.strip()
-    new_desc = "" if raw.lower() in ("очистить", "clear", "-") else raw
-    n = update_file_field(uid, "summary", new_desc)
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer(t(message.from_user.id, "admin_edit_desc_done", n=n))
-    await show_file_card(message, uid, message.from_user.id)
-
-
-@dp.callback_query(F.data == "admin:efile:tags")
-async def cb_efile_tags(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    await state.set_state(EditFile.waiting_for_tags)
-    await callback.message.answer(t(callback.from_user.id, "admin_edit_ask_tags"))
-    await callback.answer()
-
-
-@dp.message(StateFilter(EditFile.waiting_for_tags), F.text)
-async def process_efile_tags(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    uid = data.get("edit_uid")
-    if not uid:
-        await state.clear()
-        return
-    raw = message.text.strip()
-    if raw.lower() in ("очистить", "clear"):
-        tags = []
-    else:
-        tags = normalize_tags_input(raw)
-        db_tags = DATABASE.setdefault("tags", [])
-        for tag in tags:
-            if tag.lower() not in {x.lower() for x in db_tags}:
-                db_tags.append(tag)
-    n = update_file_field(uid, "tags", tags)
-    await save_db(DATABASE)
-    await state.clear()
-    await message.answer(t(message.from_user.id, "admin_edit_tags_done", n=n))
-    await show_file_card(message, uid, message.from_user.id)
-
-
-@dp.callback_query(F.data.startswith("admin:del_file:"))
-async def cb_del_file(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    uid = callback.data.split(":", 2)[2]
-    f = get_file_by_uid(uid)
-    if not f:
-        await callback.answer(t(callback.from_user.id, "no_file"), show_alert=True)
-        return
-    await state.clear()
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t(callback.from_user.id, "admin_del_yes"),
-                              callback_data=f"admin:del_file_yes:{uid}")],
-        [InlineKeyboardButton(text=t(callback.from_user.id, "submit_cancel"),
-                              callback_data=f"file:view:{uid}")],
-    ])
-    await safe_send_or_edit(callback,
-                            t(callback.from_user.id, "admin_del_confirm",
-                              title=html.escape(f.get('caption') or '')),
-                            reply_markup=markup)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:del_file_yes:"))
-async def cb_del_file_yes(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    uid = callback.data.split(":", 2)[2]
-    removed = 0
-    for cat_data in DATABASE.get("categories", {}).values():
-        files = cat_data.get("files", [])
-        new_files = [f for f in files if f.get("file_unique_id") != uid]
-        removed += len(files) - len(new_files)
-        cat_data["files"] = new_files
-    for u in DATABASE.get("users", {}).values():
-        favs = u.get("favorites", [])
-        if uid in favs:
-            favs.remove(uid)
-    await save_db(DATABASE)
-    await callback.message.answer(t(callback.from_user.id, "admin_del_done", n=removed))
-    await callback.answer("🗑")
-
-
-# ============================================================
-# INLINE MODE
-# ============================================================
-
-@dp.inline_query()
-async def inline_catalog_search(query: InlineQuery):
-    q = (query.query or "").strip().lower().lstrip("#")
-    files = get_catalog_files_list()
-    if q:
-        def matches(f):
-            hay = (f["caption"] + " " + " ".join(f.get("tags", [])) + " "
-                   + (f.get("summary") or "")).lower()
-            return q in hay
-        files = [f for f in files if matches(f)]
-    results = []
-    for f in files[:10]:
-        try:
-            results.append(InlineQueryResultCachedDocument(
-                id=f["uid"],
-                title=f["caption"] or "Material",
-                document_file_id=f["file_id"],
-                description=(f.get("summary") or f.get("category") or "MathAm")[:200],
-                caption=f"📖 <b>{html.escape(f['caption'])}</b>",
-                parse_mode=ParseMode.HTML,
-            ))
-        except Exception:
-            continue
-    if not results:
-        results = [InlineQueryResultArticle(
-            id="not_found",
-            title="🔎 Nothing found",
-            description="Open the bot to search by tags",
-            input_message_content=InputTextMessageContent(
-                message_text="🤖 MathAm: /start"
-            ),
-        )]
-    try:
-        await query.answer(results, is_personal=True, cache_time=30)
-    except Exception:
-        logger.exception("Inline answer failed")
-
-
-# ============================================================
-# FALLBACK
-# ============================================================
-
-@dp.message(F.text)
-async def fallback_text(message: types.Message, state: FSMContext):
-    state_name = await state.get_state()
-    if state_name == UserSubmit.waiting_file:
-        await message.answer(t(message.from_user.id, "expect_file"))
-    elif state_name == AdminUpload.waiting_document:
-        await message.answer(t(message.from_user.id, "expect_doc"))
-    else:
-        await message.answer(t(message.from_user.id, "unknown_text"))
-
-
-@dp.callback_query()
-async def cb_unhandled(callback: types.CallbackQuery):
-    await callback.answer()
-
-
-# ============================================================
-# STARTUP & ENTRY POINT
+# LIFECYCLE & STARTUP
 # ============================================================
 
 async def on_startup(bot: Bot):
-    global DATABASE, BOT_USERNAME
+    global DATABASE, BOT_USERNAME, HTTP_SESSION
+    HTTP_SESSION = aiohttp.ClientSession()
     DATABASE = await load_db()
     me = await bot.get_me()
     BOT_USERNAME = me.username or ""
+
     commands = [
         BotCommand(command="start", description="🏠 Menu / Меню"),
         BotCommand(command="catalog", description="📚 Catalog / Каталог"),
@@ -5207,10 +2335,17 @@ async def on_startup(bot: Bot):
         BotCommand(command="cancel", description="❌ Cancel / Отмена"),
     ]
     await bot.set_my_commands(commands)
+    await restore_scheduled_tasks()
+
     total_files = sum(len(c.get("files", [])) for c in DATABASE.get("categories", {}).values())
-    logger.info("Startup: %s users, %s files, %s tags, channel=%s",
-                len(DATABASE.get("users", {})), total_files,
-                len(DATABASE.get("tags", [])), CHANNEL_ID)
+    logger.info("Bot started: @%s, %s users, %s files, %s tags", BOT_USERNAME, len(DATABASE.get("users", {})), total_files, len(DATABASE.get("tags", [])))
+
+
+async def on_shutdown(bot: Bot):
+    global HTTP_SESSION
+    if HTTP_SESSION and not HTTP_SESSION.closed:
+        await HTTP_SESSION.close()
+    logger.info("Bot shutdown completed.")
 
 
 def register_middlewares():
@@ -5228,6 +2363,7 @@ async def health_endpoint(request: web.Request) -> web.Response:
 async def run_polling():
     register_middlewares()
     dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
     await bot.delete_webhook(drop_pending_updates=True)
 
     port = os.environ.get("PORT")
@@ -5239,7 +2375,7 @@ async def run_polling():
         await runner.setup()
         site = web.TCPSite(runner, host="0.0.0.0", port=int(port))
         await site.start()
-        logger.info("Health-check server on 0.0.0.0:%s", port)
+        logger.info("Health server listening on port %s", port)
 
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
@@ -5250,11 +2386,12 @@ def run_webhook():
 
     async def set_webhook(bot: Bot):
         await bot.set_webhook(webhook_url + webhook_path, drop_pending_updates=True)
-        logger.info("Webhook set: %s", webhook_url + webhook_path)
+        logger.info("Webhook set to: %s", webhook_url + webhook_path)
 
     register_middlewares()
     dp.startup.register(on_startup)
     dp.startup.register(set_webhook)
+    dp.shutdown.register(on_shutdown)
     app = web.Application()
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=webhook_path)
     setup_application(app, dp, bot=bot)
