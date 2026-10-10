@@ -16,7 +16,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -26,6 +26,7 @@ from aiogram.types import (
     InputTextMessageContent, InputMediaPhoto,
 )
 from aiohttp import web
+from motor.motor_asyncio import AsyncIOMotorClient
 
 # ============================================================
 # CONFIG
@@ -44,17 +45,19 @@ if not TOKEN:
 ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit()]
 
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "matham_bot")
 YEREVAN_TZ = timezone(timedelta(hours=4))
+
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@matham123456").strip() or "@matham123456"
 TG_TEXT_LIMIT = 4000
-RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "60"))
+RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "30"))
 
-# Local JSON Storage
-DATA_DIR = os.environ.get("DATA_DIR", "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-DB_FILE = os.path.join(DATA_DIR, "catalog.json")
-SUBMISSIONS_FILE = os.path.join(DATA_DIR, "submissions.json")
-_db_lock = asyncio.Lock()
+mongo_client = AsyncIOMotorClient(MONGO_URI)
+mongo_db = mongo_client[MONGO_DB_NAME]
+db_collection = mongo_db["catalog"]
+submissions_collection = mongo_db["submissions"]
+DB_DOC_ID = "catalog_main"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -65,254 +68,695 @@ DIFF_KEYS = ("easy", "medium", "hard", "imo")
 DIFF_MULT = {"easy": 1, "medium": 2, "hard": 3, "imo": 5}
 
 # ============================================================
-# LOCALIZATION TEXTS (RUSSIAN ONLY)
+# LOCALIZATION
 # ============================================================
 
 TEXTS = {
-    "welcome_back": "👋 С возвращением, {nick}!",
-    "hello_new": "👋 Привет, {name}!\n\nДобро пожаловать в <b>MathAm</b>!",
-    "ask_nickname": "🪪 Напишите ваш <b>никнейм</b> — под ним вас будут видеть в рейтинге, решениях и заявках.",
-    "change_nickname": "🪪 Введите новый <b>никнейм</b>:\n/cancel — отмена.",
-    "nickname_bad_slash": "⚠️ Никнейм не может начинаться с «/». Напишите другой:",
-    "nickname_bad_len": "⚠️ Никнейм должен быть от 2 до 30 символов. Попробуйте ещё раз:",
-    "nickname_welcome": "✅ Приятно познакомиться, {nick}! 🎉",
-    "nickname_updated": "✅ Ваш никнейм успешно изменён на: {nick}",
-    "menu_title": "🏠 <b>Главное меню</b>\nВыберите раздел:",
-    "menu_catalog": "📚 Каталог",
-    "menu_search": "🏷 Поиск по тегам",
-    "menu_task": "🎯 Задача дня",
-    "menu_archive": "🗄 Архив задач",
-    "menu_task_tags": "🏷 Задачи по тегам",
-    "menu_mustread": "⭐ Must-read",
-    "menu_fav": "❤️ Избранное",
-    "menu_rating": "🏆 Рейтинг",
-    "menu_random": "🎲 Случайный материал",
-    "menu_links": "🔗 Полезные ссылки",
-    "menu_submit": "📤 Предложить файл",
-    "menu_name": "🪪 Сменить ник",
-    "menu_admin": "👑 Админ-панель",
-    "cancel_done": "❌ Отменено. /start — главное меню.",
-    "no_file": "Файл не найден.",
-    "file_sent": "Файл отправлен ✅",
-    "file_send_fail": "Не удалось отправить файл.",
-    "get_file": "📥 Получить файл",
-    "add_fav": "❤️ В избранное",
-    "remove_fav": "💔 Убрать из избранного",
-    "fav_added": "❤️ Добавлено в избранное",
-    "fav_removed": "💔 Удалено из избранного",
-    "edit": "✏️ Изменить",
-    "mustread_btn": "⭐ Must-read",
-    "delete": "🗑 Удалить",
-    "back_catalog": "⬅️ Каталог",
-    "back_menu": "⬅️ Главное меню",
-    "back_admin": "⬅️ Админ-панель",
-    "back_task": "⬅️ К задаче",
-    "catalog_title": "📚 <b>Каталог материалов по разделам:</b>",
-    "section_missing": "Раздел не найден.",
-    "task_missing": "🎯 Задача не найдена.",
-    "search_title": "🏷 <b>Поиск по тегам</b>\n\nВыберите один или несколько тегов и нажмите «🔎 Искать».\nИли просто напишите тег/слово текстом.",
-    "search_go": "🔎 Искать материалы",
-    "search_tasks_btn": "🎯 Искать задачи дня",
-    "search_reset": "♻️ Сброс",
-    "search_new": "🏷 Новый поиск",
-    "search_pick_one": "Выберите хотя бы один тег!",
-    "search_tagged": "🔎 <b>Результаты по тегам:</b> {tags}",
-    "search_query": "🔎 <b>Результаты по запросу:</b> <i>{q}</i>",
-    "search_found": "Найдено материалов: <b>{n}</b>",
-    "search_nothing": "😔 Ничего не найдено. Попробуйте другие теги.",
-    "search_tag_off": "Тег снят",
-    "search_tag_on": "Тег выбран",
-    "search_selected_n": "🏷 <b>Поиск по тегам</b>\nВыбрано тегов: {n}",
-    "search_reset_done": "🏷 <b>Поиск по тегам</b>\nВыбор сброшен.",
-    "tag_db_title": "🏷 <b>База тегов</b> (всего: {n})\n\nНажмите на тег, чтобы удалить, или выберите «Переименовать».",
-    "tag_add_btn": "➕ Добавить тег",
-    "tag_rename_btn": "✏️ Переименовать тег",
-    "tag_ask_new": "🏷 Отправьте новый тег (можно с # или без, можно несколько через запятую):",
-    "tag_added": "✅ Добавлены теги: {tags}",
-    "tag_nothing_added": "⚠️ Новых тегов нет (пусто или дубликаты).",
-    "tag_removed": "Удалён {tag}",
-    "tag_missing": "Тег не найден.",
-    "tag_rename_pick": "✏️ Какой тег переименовать?",
-    "tag_rename_ask": "✏️ Отправьте новое название для тега {tag} (текст без #):",
-    "tag_rename_done": "✅ Тег переименован: {old} → {new}. Обновлено файлов: {n}.",
-    "tag_rename_no_files": "✅ Тег переименован: {old} → {new}. Файлов с этим тегом не было.",
-    "tag_rename_conflict": "⚠️ Тег «{new}» уже существует.",
-    "favorites_title": "❤️ <b>Избранное</b>",
-    "favorites_empty": "\n\nПока пусто. Откройте материал в каталоге и нажмите «❤️ В избранное».",
-    "rating_title": "🏆 <b>Рейтинг MathAm</b>\n<i>Очки — за зачтённые решения задач дня</i>\n",
-    "rating_empty": "Пока никто не набрал очки. Решите задачу дня первым!",
-    "rating_you": "\n👤 Вы: {nick} — {score} очк. · ✅ {solved} · ❤️ {favs}",
-    "mustread_title": "⭐ <b>Must-read</b>\nМатериалы, которые стоит изучить каждому олимпиаднику:",
-    "mustread_empty": "⭐ <b>Must-read</b>\n\nСписок пока пуст.",
-    "mustread_added": "⭐ Добавлено в must-read",
-    "mustread_removed": "Убрано из must-read",
-    "mustread_remove_btn": "✩ Убрать из must-read",
-    "links_title": "🔗 <b>Полезные ресурсы</b>\nВыберите раздел:",
-    "links_empty_section": "🔗 <b>{title}</b>\n\nВ этом разделе пока нет ссылок.",
-    "links_add": "➕ Добавить ссылку",
-    "links_del": "🗑 Удалить #{n}",
-    "links_ask": "🔗 Отправьте ссылку в формате:\n<code>Название - https://example.com</code>",
-    "links_no_url": "⚠️ Не нашёл URL. Попробуйте ещё раз.",
-    "links_added": "✅ Ссылка добавлена в «{title}».",
-    "links_section_missing": "Раздел не найден.",
-    "links_item_removed": "Удалено: {name}",
-    "links_item_missing": "Элемент не найден.",
-    "links_only_admin": "Только администратор.",
-    "task_of_day": "🎯 <b>Задача дня</b> · {date}\n<i>№ {num} из {total}</i>\n\n{text}",
-    "task_text_on_photo": "Текст задачи — на фото.",
-    "task_solutions": "👥 Решения участников ({n})",
-    "task_send_solution": "📝 Отправить решение",
-    "task_solution_pending": "⏳ Решение на проверке",
-    "task_solution_ok": "✅ Зачтено · {grade}/10",
-    "task_solution_ok_no_grade": "✅ Зачтено",
-    "task_author_solution": "💡 Решение автора",
-    "task_bcast": "📢 Разослать задачу",
-    "task_archive_title": "🗄 <b>Архив задач</b>\nДней с задачами: {n}\nСтраница {page} из {total}",
-    "task_archive_empty": "🗄 <b>Архив задач</b>\n\nЗадач пока нет.",
-    "task_today": "🎯 Сегодня",
-    "task_no_tasks": "🎯 <b>Задача дня</b>\n\nЗадачи пока не опубликованы.",
-    "task_solution_sent": "✅ <b>Решение отправлено!</b>\nАдминистраторы проверят его и поставят оценку.",
-    "task_sol_author_header": "💡 <b>Решение автора</b> (задача №{num}, {date})",
-    "task_sol_not_yet": "Решение пока не добавлено.",
-    "task_sols_header": "👥 <b>Решения участников</b> (задача №{num}, {date})\n",
-    "task_sols_empty": "Пока нет проверенных решений.",
-    "task_sol_grade": "⭐ {grade}/10",
-    "task_sol_grade_full": "{grade}/10",
-    "task_sol_ok_mark": "✓",
-    "task_sol_not_found": "Решение не найдено.",
-    "task_sol_pending_user": "Решение ещё на проверке.",
-    "task_sol_view": "👀 {nick} · {grade}",
-    "task_sol_empty_content": "Решение без содержимого.",
-    "task_sol_show_fail": "Не удалось показать решение.",
-    "task_sol_bcast_done": "✅ Задача опубликована.\n👥 Доставлено: {sent} · Ошибок: {failed}.",
-    "task_sol_bcast_channel_fail": "\n⚠️ Не удалось отправить в канал.",
-    "task_sol_bcast_running": "⏳ Рассылаю...",
-    "task_approved_notify": "✅ Ваше решение задачи {date} (№{num}) зачтено!",
-    "task_approved_notify_grade": "✅ Ваше решение задачи {date} (№{num}) зачтено!\n⭐ Оценка: {grade}/10",
-    "task_grade_updated": "⭐ Оценка обновлена: {grade}/10",
-    "task_rejected_notify": "❌ Ваше решение задачи {date} (№{num}) не зачтено.",
-    "task_admin_graded": "⭐ Оценка для {nick}: <b>{label}</b>.",
-    "task_admin_approved": "✅ Решение от {nick} зачтено.\n⭐ Поставьте оценку:",
-    "task_admin_grade_ask": "✓ Без оценки",
-    "task_admin_rejected": "❌ Отклонено.",
-    "task_admin_sol_rev_not_found": "Решение не найдено.",
-    "task_admin_sol_approved_short": "Зачтено",
-    "task_admin_sol_rejected_short": "Отклонено",
-    "task_grade_saved": "Оценка сохранена",
-    "task_grade_zero": "без оценки",
-    "submit_start": "📤 Отправьте файл (PDF) для публикации в библиотеку.",
-    "submit_ask_title": "✏️ Как называется материал? Отправьте название:",
-    "submit_ask_tags": "🏷 Выберите теги:",
-    "submit_skip_tags": "⏭ Без тегов",
-    "submit_preview": "📋 <b>Заявка на публикацию</b>\n\n📖 Название: {title}\n📄 Файл: {file}\n🏷 Теги: {tags}",
-    "submit_send": "✅ Отправить",
-    "submit_cancel": "❌ Отмена",
-    "submit_sent": "✅ Заявка отправлена!",
-    "submit_cancelled": "❌ Отправка отменена.",
-    "submit_stale": "Заявка устарела.",
-    "submit_first_file": "Сначала отправьте файл!",
-    "admin_title": "👑 <b>Админ-панель MathAm</b>\nВыберите действие:",
-    "admin_upload": "➕ Загрузить материал",
-    "admin_add_task": "🎯 Добавить задачу дня",
-    "admin_cats": "📂 Управление разделами",
-    "admin_tags": "🏷 Управление тегами",
-    "admin_stats": "📊 Статистика",
-    "admin_subs": "📥 Заявки на файлы",
-    "admin_pending": "🧩 Решения на проверку",
-    "admin_bcast": "📢 Рассылка",
-    "admin_upload_ask": "📤 Отправьте файл (PDF):",
-    "admin_upload_title": "✏️ Отправьте название материала:",
-    "admin_upload_desc": "📝 Отправьте описание (необязательно) или «пропустить»:",
-    "admin_upload_tags": "🏷 Выберите теги:",
-    "admin_upload_diff": "🎯 Выберите уровень сложности:",
-    "admin_upload_cats": "📂 Выберите разделы:",
-    "admin_upload_publish": "✅ Опубликовать",
-    "admin_upload_published": "✅ Материал опубликован!\n📖 <b>{title}</b>\n📂 {cats}",
-    "admin_upload_stale": "Загрузка устарела.",
-    "admin_upload_no_cat": "Выберите хотя бы один раздел!",
-    "admin_upload_cat_missing": "Категория не найдена.",
-    "admin_upload_done_short": "Сохранено ✅",
-    "admin_diff_easy": "🟢 Easy (Базовый)",
-    "admin_diff_medium": "🟡 Medium (Регион)",
-    "admin_diff_hard": "🔴 Hard (Всерос / Финал)",
-    "admin_diff_imo": "🔥 IMO (Международный)",
-    "admin_task_photo": "📸 Отправьте фото задачи, либо напишите «пропустить».",
-    "admin_task_text": "✍️ Отправьте текст задачи (или «пропустить»):",
-    "admin_task_solution": "💡 Отправьте решение (текстом, фото или «пропустить»):",
-    "admin_task_date": "📅 На какую дату?\nФормат: <code>ГГГГ-ММ-ДД</code>, «сегодня» или «завтра»:",
-    "admin_task_added": "✅ Задача добавлена на <b>{date}</b> (№ {num}).",
-    "admin_task_bad_date": "⚠️ Неверный формат даты.",
-    "admin_task_photo_ask": "📸 Отправьте фото или «пропустить».",
-    "admin_task_sol_ask": "Отправьте текст, фото, документ или «пропустить».",
-    "admin_stats_title": "📊 <b>Статистика MathAm</b>\n\n👥 Пользователей: {users}\n📚 Файлов: {files}\n🏷 Тегов: {tags}\n🎯 Задач: {tasks}\n🧩 Решений: {pending}\n📥 Заявок: {subs}\n\n<b>Топ-5:</b>\n{top}",
-    "admin_subs_empty": "📥 Заявок нет.",
-    "admin_subs_title": "📥 <b>Заявки на файлы</b>\n",
-    "admin_subs_pick_cat": "📂 Выберите раздел:",
-    "admin_subs_published": "✅ Опубликовано в «{cat}».",
-    "admin_subs_user_notify": "✅ Ваш материал «{title}» одобрен и добавлен в каталог в раздел «{cat}»!",
-    "admin_subs_reject_notify": "❌ Ваша заявка на публикацию материала «{title}» была отклонена.",
-    "admin_subs_accept": "✅ Принять",
-    "admin_subs_reject": "❌ Отклонить",
-    "admin_subs_rejected": "❌ Отклонено.",
-    "admin_subs_already": "Уже обработано.",
-    "admin_subs_not_found": "Не найдено.",
-    "admin_subs_already_pub": "Уже опубликовано.",
-    "admin_pending_title": "🧩 <b>Решения на проверку</b>\n",
-    "admin_pending_empty": "\nНет решений на проверку. 🎉",
-    "admin_pending_shown": "\nПоказано: {n}",
-    "admin_bcast_ask": "📢 Отправьте сообщение для рассылки.\n/cancel — отмена.",
-    "admin_bcast_running": "⏳ Рассылка запущена...",
-    "admin_bcast_done": "✅ Рассылка завершена.\nДоставлено: {sent} · Ошибок: {failed}",
-    "admin_edit_title": "⚙️ <b>Редактирование</b>\n📖 {title}",
-    "admin_edit_replace": "📄 Заменить файл",
-    "admin_edit_rename": "✏️ Название",
-    "admin_edit_desc": "📝 Описание",
-    "admin_edit_tags": "🏷 Теги",
-    "admin_edit_back": "⬅️ Назад",
-    "admin_edit_ask_doc": "📄 Отправьте новый файл:",
-    "admin_edit_ask_title": "✏️ Отправьте новое название:",
-    "admin_edit_ask_desc": "📝 Отправьте новое описание (или «очистить»):",
-    "admin_edit_ask_tags": "🏷 Отправьте теги через запятую (или «очистить»):",
-    "admin_edit_doc_done": "✅ Файл заменён (записей: {n}).",
-    "admin_edit_title_done": "✅ Название обновлено (записей: {n}).",
-    "admin_edit_desc_done": "✅ Описание обновлено (записей: {n}).",
-    "admin_edit_tags_done": "✅ Теги обновлены (записей: {n}).",
-    "admin_del_confirm": "⚠️ Удалить «{title}»?",
-    "admin_del_yes": "🗑 Да, удалить",
-    "admin_del_done": "🗑 Удалено записей: {n}.",
-    "file_card_title": "📖 <b>{title}</b>",
-    "file_card_section": "📂 Раздел: {cats}",
-    "file_card_diff": "🎯 Уровень: {diff}",
-    "file_card_tags": "🏷 {tags}",
-    "file_card_summary": "\n📝 {summary}",
-    "unknown_text": "🤖 Команда не распознана. Откройте /start для меню.",
-    "expect_file": "📤 Ожидаю файл.",
-    "expect_doc": "📄 Ожидаю файл.",
-    "only_admin": "Недоступно.",
-    "choose_tags_n": "🏷 Выберите теги (выбрано: {n}):",
-    "rating_line": "{medal} {name} — {score} очк. · ✅ {solved} · 🔥 {streak} дн.",
-    "rating_medal_1": "🥇",
-    "rating_medal_2": "🥈",
-    "rating_medal_3": "🥉",
-    "download_all_zip": "📦 Скачать все материалы (ZIP)",
-    "zip_preparing": "⏳ Собираем ZIP-архив ({current}/{total})...",
-    "zip_empty": "⚠️ В каталоге пока нет файлов для скачивания.",
-    "zip_ready": "📦 <b>Архив библиотеки MathAm</b>\n📚 Файлов: {count}\n💾 Размер: {size_mb:.1f} МБ",
-    "zip_part": "📦 <b>Архив библиотеки MathAm (часть {part}/{total_parts})</b>\n📚 Файлов: {count}\n💾 Размер: {size_mb:.1f} МБ",
+    "ru": {
+        "welcome_back": "👋 С возвращением, {nick}!",
+        "hello_new": "👋 Привет, {name}!\n\nДобро пожаловать в <b>MathAm</b>!",
+        "choose_language": "🌐 <b>Выберите язык / Choose your language:</b>",
+        "lang_set": "✅ Язык установлен: <b>Русский</b> 🇷🇺",
+        "ask_nickname": "🪪 Напишите ваш <b>никнейм</b> — под ним вас будут видеть в рейтинге, решениях и заявках.",
+        "change_nickname": "🪪 Введите новый <b>никнейм</b>:\n/cancel — отмена.",
+        "nickname_bad_slash": "⚠️ Никнейм не может начинаться с «/». Напишите другой:",
+        "nickname_bad_len": "⚠️ Никнейм должен быть от 2 до 30 символов. Попробуйте ещё раз:",
+        "nickname_welcome": "✅ Приятно познакомиться, {nick}! 🎉",
+        "nickname_updated": "✅ Ваш никнейм успешно изменён на: {nick}",
+        "menu_title": "🏠 <b>Главное меню</b>\nВыберите раздел:",
+        "menu_catalog": "📚 Каталог",
+        "menu_search": "🏷 Поиск по тегам",
+        "menu_task": "🎯 Задача дня",
+        "menu_archive": "🗄 Архив задач",
+        "menu_task_tags": "🏷 Задачи по тегам",
+        "menu_mustread": "⭐ Must-read",
+        "menu_fav": "❤️ Избранное",
+        "menu_rating": "🏆 Рейтинг",
+        "menu_random": "🎲 Случайный материал",
+        "menu_links": "🔗 Полезные ссылки",
+        "menu_submit": "📤 Предложить файл",
+        "menu_name": "🪪 Сменить ник",
+        "menu_admin": "👑 Админ-панель",
+        "menu_lang": "🌐 Язык / Language",
+        "cancel_done": "❌ Отменено. /start — главное меню.",
+        "no_file": "Файл не найден.",
+        "file_sent": "Файл отправлен ✅",
+        "file_send_fail": "Не удалось отправить файл.",
+        "get_file": "📥 Получить файл",
+        "add_fav": "❤️ В избранное",
+        "remove_fav": "💔 Убрать из избранного",
+        "fav_added": "❤️ Добавлено в избранное",
+        "fav_removed": "💔 Удалено из избранного",
+        "edit": "✏️ Изменить",
+        "mustread_btn": "⭐ Must-read",
+        "delete": "🗑 Удалить",
+        "back_catalog": "⬅️ Каталог",
+        "back_menu": "⬅️ Главное меню",
+        "back_admin": "⬅️ Админ-панель",
+        "back_task": "⬅️ К задаче",
+        "catalog_title": "📚 <b>Каталог материалов по разделам:</b>",
+        "section_missing": "Раздел не найден.",
+        "task_missing": "🎯 Задача не найдена.",
+        "search_title": "🏷 <b>Поиск по тегам</b>\n\nВыберите один или несколько тегов и нажмите «🔎 Искать».\nИли просто напишите тег/слово текстом.",
+        "search_go": "🔎 Искать материалы",
+        "search_tasks_btn": "🎯 Искать задачи дня",
+        "search_reset": "♻️ Сброс",
+        "search_new": "🏷 Новый поиск",
+        "search_pick_one": "Выберите хотя бы один тег!",
+        "search_tagged": "🔎 <b>Результаты по тегам:</b> {tags}",
+        "search_query": "🔎 <b>Результаты по запросу:</b> <i>{q}</i>",
+        "search_found": "Найдено материалов: <b>{n}</b>",
+        "search_nothing": "😔 Ничего не найдено. Попробуйте другие теги.",
+        "search_tag_off": "Тег снят",
+        "search_tag_on": "Тег выбран",
+        "search_selected_n": "🏷 <b>Поиск по тегам</b>\nВыбрано тегов: {n}",
+        "search_reset_done": "🏷 <b>Поиск по тегам</b>\nВыбор сброшен.",
+        "tag_db_title": "🏷 <b>База тегов</b> (всего: {n})\n\nНажмите на тег, чтобы удалить, или выберите «Переименовать».",
+        "tag_add_btn": "➕ Добавить тег",
+        "tag_rename_btn": "✏️ Переименовать тег",
+        "tag_ask_new": "🏷 Отправьте новый тег (можно с # или без, можно несколько через запятую):",
+        "tag_added": "✅ Добавлены теги: {tags}",
+        "tag_nothing_added": "⚠️ Новых тегов нет (пусто или дубликаты).",
+        "tag_removed": "Удалён {tag}",
+        "tag_missing": "Тег не найден.",
+        "tag_rename_pick": "✏️ Какой тег переименовать?",
+        "tag_rename_ask": "✏️ Отправьте новое название для тега {tag} (текст без #):",
+        "tag_rename_done": "✅ Тег переименован: {old} → {new}. Обновлено файлов: {n}.",
+        "tag_rename_no_files": "✅ Тег переименован: {old} → {new}. Файлов с этим тегом не было.",
+        "tag_rename_conflict": "⚠️ Тег «{new}» уже существует.",
+        "favorites_title": "❤️ <b>Избранное</b>",
+        "favorites_empty": "\n\nПока пусто. Откройте материал в каталоге и нажмите «❤️ В избранное».",
+        "rating_title": "🏆 <b>Рейтинг MathAm</b>\n<i>Очки — за зачтённые решения задач дня</i>\n",
+        "rating_empty": "Пока никто не набрал очки. Решите задачу дня первым!",
+        "rating_you": "\n👤 Вы: {nick} — {score} очк. · ✅ {solved} · ❤️ {favs}",
+        "mustread_title": "⭐ <b>Must-read</b>\nМатериалы, которые стоит изучить каждому олимпиаднику:",
+        "mustread_empty": "⭐ <b>Must-read</b>\n\nСписок пока пуст.",
+        "mustread_added": "⭐ Добавлено в must-read",
+        "mustread_removed": "Убрано из must-read",
+        "mustread_remove_btn": "✩ Убрать из must-read",
+        "links_title": "🔗 <b>Полезные ресурсы</b>\nВыберите раздел:",
+        "links_empty_section": "🔗 <b>{title}</b>\n\nВ этом разделе пока нет ссылок.",
+        "links_add": "➕ Добавить ссылку",
+        "links_del": "🗑 Удалить #{n}",
+        "links_ask": "🔗 Отправьте ссылку в формате:\n<code>Название - https://example.com</code>",
+        "links_no_url": "⚠️ Не нашёл URL. Попробуйте ещё раз.",
+        "links_added": "✅ Ссылка добавлена в «{title}».",
+        "links_section_missing": "Раздел не найден.",
+        "links_item_removed": "Удалено: {name}",
+        "links_item_missing": "Элемент не найден.",
+        "links_only_admin": "Только администратор.",
+        "task_of_day": "🎯 <b>Задача дня</b> · {date}\n<i>№ {num} из {total}</i>\n\n{text}",
+        "task_text_on_photo": "Текст задачи — на фото.",
+        "task_solutions": "👥 Решения участников ({n})",
+        "task_send_solution": "📝 Отправить решение",
+        "task_solution_pending": "⏳ Решение на проверке",
+        "task_solution_ok": "✅ Зачтено · {grade}/10",
+        "task_solution_ok_no_grade": "✅ Зачтено",
+        "task_author_solution": "💡 Решение автора",
+        "task_bcast": "📢 Разослать задачу",
+        "task_archive_title": "🗄 <b>Архив задач</b>\nДней с задачами: {n}\nСтраница {page} из {total}",
+        "task_archive_empty": "🗄 <b>Архив задач</b>\n\nЗадач пока нет.",
+        "task_today": "🎯 Сегодня",
+        "task_no_tasks": "🎯 <b>Задача дня</b>\n\nЗадачи пока не опубликованы.",
+        "task_ask_solution": "✍️ Отправьте ваше решение (текстом, фото или файлом).\nОно уйдёт администраторам на проверку. /cancel — отмена.",
+        "task_solution_sent": "✅ <b>Решение отправлено!</b>\nАдминистраторы проверят его и поставят оценку.",
+        "task_solution_send_any": "⚠️ Отправьте решение текстом, фото или файлом.",
+        "task_sol_author_header": "💡 <b>Решение автора</b> (задача №{num}, {date})",
+        "task_sol_not_yet": "Решение пока не добавлено.",
+        "task_sols_header": "👥 <b>Решения участников</b> (задача №{num}, {date})\n",
+        "task_sols_empty": "Пока нет проверенных решений.",
+        "task_sol_grade": "⭐ {grade}/10",
+        "task_sol_grade_full": "{grade}/10",
+        "task_sol_ok_mark": "✓",
+        "task_sol_not_found": "Решение не найдено.",
+        "task_sol_pending_user": "Решение ещё на проверке.",
+        "task_sol_view": "👀 {nick} · {grade}",
+        "task_sol_empty_content": "Решение без содержимого.",
+        "task_sol_show_fail": "Не удалось показать решение.",
+        "task_sol_bcast_done": "✅ Задача опубликована.\n👥 Доставлено: {sent} · Ошибок: {failed}.",
+        "task_sol_bcast_channel_fail": "\n⚠️ Не удалось отправить в канал.",
+        "task_sol_bcast_running": "⏳ Рассылаю...",
+        "task_approved_notify": "✅ Ваше решение задачи {date} (№{num}) зачтено!",
+        "task_approved_notify_grade": "✅ Ваше решение задачи {date} (№{num}) зачтено!\n⭐ Оценка: {grade}/10",
+        "task_grade_updated": "⭐ Оценка обновлена: {grade}/10",
+        "task_rejected_notify": "❌ Ваше решение задачи {date} (№{num}) не зачтено.",
+        "task_admin_graded": "⭐ Оценка для {nick}: <b>{label}</b>.",
+        "task_admin_approved": "✅ Решение от {nick} зачтено.\n⭐ Поставьте оценку:",
+        "task_admin_grade_ask": "✓ Без оценки",
+        "task_admin_rejected": "❌ Отклонено.",
+        "task_admin_sol_rev_not_found": "Решение не найдено.",
+        "task_admin_sol_approved_short": "Засчитано",
+        "task_admin_sol_rejected_short": "Отклонено",
+        "task_grade_saved": "Оценка сохранена",
+        "task_grade_zero": "без оценки",
+        "submit_start": "📤 Отправьте файл (лучше PDF) для публикации в библиотеку.",
+        "submit_ask_title": "✏️ Как называется материал? Отправьте название:",
+        "submit_ask_tags": "🏷 Выберите теги:",
+        "submit_skip_tags": "⏭ Без тегов",
+        "submit_preview": "📋 <b>Заявка на публикацию</b>\n\n📖 Название: {title}\n📄 Файл: {file}\n🏷 Теги: {tags}",
+        "submit_send": "✅ Отправить",
+        "submit_cancel": "❌ Отмена",
+        "submit_sent": "✅ Заявка отправлена!",
+        "submit_cancelled": "❌ Отправка отменена.",
+        "submit_stale": "Заявка устарела.",
+        "submit_first_file": "Сначала отправьте файл!",
+        "admin_title": "👑 <b>Админ-панель MathAm</b>\nВыберите действие:",
+        "admin_upload": "➕ Загрузить материал",
+        "admin_add_task": "🎯 Добавить задачу дня",
+        "admin_cats": "📂 Управление разделами",
+        "admin_tags": "🏷 Управление тегами",
+        "admin_stats": "📊 Статистика",
+        "admin_subs": "📥 Заявки на файлы",
+        "admin_pending": "🧩 Решения на проверку",
+        "admin_bcast": "📢 Рассылка",
+        "admin_upload_ask": "📤 Отправьте файл (PDF):",
+        "admin_upload_title": "✏️ Отправьте название материала:",
+        "admin_upload_desc": "📝 Отправьте описание (необязательно) или «пропустить»:",
+        "admin_upload_tags": "🏷 Выберите теги:",
+        "admin_upload_diff": "🎯 Выберите уровень сложности:",
+        "admin_upload_cats": "📂 Выберите разделы:",
+        "admin_upload_publish": "✅ Опубликовать",
+        "admin_upload_published": "✅ Материал опубликован!\n📖 <b>{title}</b>\n📂 {cats}",
+        "admin_upload_stale": "Загрузка устарела.",
+        "admin_upload_no_cat": "Выберите хотя бы один раздел!",
+        "admin_upload_cat_missing": "Категория не найдена.",
+        "admin_upload_done_short": "Сохранено ✅",
+        "admin_diff_easy": "🟢 Easy (Базовый)",
+        "admin_diff_medium": "🟡 Medium (Регион)",
+        "admin_diff_hard": "🔴 Hard (Всерос / Финал)",
+        "admin_diff_imo": "🔥 IMO (Международный)",
+        "admin_task_photo": "📸 Отправьте фото задачи, либо напишите «пропустить».",
+        "admin_task_text": "✍️ Отправьте текст задачи (или «пропустить»):",
+        "admin_task_solution": "💡 Отправьте решение (текстом, фото или «пропустить»):",
+        "admin_task_date": "📅 На какую дату?\nФормат: <code>ГГГГ-ММ-ДД</code>, «сегодня» или «завтра»:",
+        "admin_task_added": "✅ Задача добавлена на <b>{date}</b> (№ {num}).",
+        "admin_task_bad_date": "⚠️ Неверный формат даты.",
+        "admin_task_photo_ask": "📸 Отправьте фото или «пропустить».",
+        "admin_task_sol_ask": "Отправьте текст, фото, документ или «пропустить».",
+        "admin_stats_title": "📊 <b>Статистика MathAm</b>\n\n👥 Пользователей: {users}\n📚 Файлов: {files}\n🏷 Тегов: {tags}\n🎯 Задач: {tasks}\n🧩 Решений: {pending}\n📥 Заявок: {subs}\n\n<b>Топ-5:</b>\n{top}",
+        "admin_subs_empty": "📥 Заявок нет.",
+        "admin_subs_title": "📥 <b>Заявки на файлы</b>\n",
+        "admin_subs_pick_cat": "📂 Выберите раздел:",
+        "admin_subs_published": "✅ Опубликовано в «{cat}».",
+        "admin_subs_user_notify": "✅ Ваш материал «{title}» одобрен и добавлен в каталог в раздел «{cat}»!",
+        "admin_subs_reject_notify": "❌ Ваша заявка на публикацию материала «{title}» была отклонена.",
+        "admin_subs_accept": "✅ Принять",
+        "admin_subs_reject": "❌ Отклонить",
+        "admin_subs_rejected": "❌ Отклонено.",
+        "admin_subs_already": "Уже обработано.",
+        "admin_subs_not_found": "Не найдено.",
+        "admin_subs_already_pub": "Уже опубликовано.",
+        "admin_pending_title": "🧩 <b>Решения на проверку</b>\n",
+        "admin_pending_empty": "\nНет решений на проверку. 🎉",
+        "admin_pending_shown": "\nПоказано: {n}",
+        "admin_bcast_ask": "📢 Отправьте сообщение для рассылки.\n/cancel — отмена.",
+        "admin_bcast_running": "⏳ Рассылка запущена...",
+        "admin_bcast_done": "✅ Рассылка завершена.\nДоставлено: {sent} · Ошибок: {failed}",
+        "admin_edit_title": "⚙️ <b>Редактирование</b>\n📖 {title}",
+        "admin_edit_replace": "📄 Заменить файл",
+        "admin_edit_rename": "✏️ Название",
+        "admin_edit_desc": "📝 Описание",
+        "admin_edit_tags": "🏷 Теги",
+        "admin_edit_back": "⬅️ Назад",
+        "admin_edit_ask_doc": "📄 Отправьте новый файл:",
+        "admin_edit_ask_title": "✏️ Отправьте новое название:",
+        "admin_edit_ask_desc": "📝 Отправьте новое описание (или «очистить»):",
+        "admin_edit_ask_tags": "🏷 Отправьте теги через запятую (или «очистить»):",
+        "admin_edit_doc_done": "✅ Файл заменён (записей: {n}).",
+        "admin_edit_title_done": "✅ Название обновлено (записей: {n}).",
+        "admin_edit_desc_done": "✅ Описание обновлено (записей: {n}).",
+        "admin_edit_tags_done": "✅ Теги обновлены (записей: {n}).",
+        "admin_del_confirm": "⚠️ Удалить «{title}»?",
+        "admin_del_yes": "🗑 Да, удалить",
+        "admin_del_done": "🗑 Удалено записей: {n}.",
+        "file_card_title": "📖 <b>{title}</b>",
+        "file_card_section": "📂 Раздел: {cats}",
+        "file_card_diff": "🎯 Уровень: {diff}",
+        "file_card_tags": "🏷 {tags}",
+        "file_card_summary": "\n📝 {summary}",
+        "new_material": "📚 <b>Новый материал в MathAm</b>",
+        "open_in_bot": "🤖 Открыть в боте",
+        "solve_in_bot": "🤖 Решить в боте",
+        "user_sol_new": "🧩 <b>Новое решение</b>\nЗадача: {date} · №{num}\n🪪 Ник: {nick}\n👤 TG: {tg}",
+        "unknown_text": "🤖 Не понял. Откройте /start.",
+        "expect_file": "📤 Ожидаю файл.",
+        "expect_doc": "📄 Ожидаю файл.",
+        "only_admin": "Недоступно.",
+        "choose_tags_n": "🏷 Выберите теги (выбрано: {n}):",
+        "rating_line": "{medal} {name} — {score} очк. · ✅ {solved} · 🔥 {streak} дн.",
+        "rating_medal_1": "🥇",
+        "rating_medal_2": "🥈",
+        "rating_medal_3": "🥉",
+        "download_all_zip": "📦 Скачать все материалы (ZIP)",
+        "download_cat_zip": "📦 Скачать раздел (ZIP)",
+        "zip_preparing": "⏳ Собираем ZIP-архив ({current}/{total})...",
+        "zip_empty": "⚠️ В каталоге пока нет файлов для скачивания.",
+        "zip_ready": "📦 <b>Архив библиотеки MathAm</b>\n📚 Файлов: {count}\n💾 Размер: {size_mb:.1f} МБ",
+        "zip_part": "📦 <b>Архив библиотеки MathAm (часть {part}/{total_parts})</b>\n📚 Файлов: {count}\n💾 Размер: {size_mb:.1f} МБ",
+        "zip_error": "⚠️ Произошла ошибка при сборке архива.",
+    },
+    "en": {
+        "welcome_back": "👋 Welcome back, {nick}!",
+        "hello_new": "👋 Hello, {name}!\n\nWelcome to <b>MathAm</b>!",
+        "choose_language": "🌐 <b>Choose your language / Выберите язык:</b>",
+        "lang_set": "✅ Language set: <b>English</b> 🇬🇧",
+        "ask_nickname": "🪪 Please enter your <b>nickname</b>:",
+        "change_nickname": "🪪 Enter new <b>nickname</b>:\n/cancel — cancel.",
+        "nickname_bad_slash": "⚠️ Nickname cannot start with «/». Try another:",
+        "nickname_bad_len": "⚠️ Nickname must be 2–30 chars:",
+        "nickname_welcome": "✅ Nice to meet you, {nick}! 🎉",
+        "nickname_updated": "✅ Your nickname has been updated to: {nick}",
+        "menu_title": "🏠 <b>Main menu</b>\nChoose a section:",
+        "menu_catalog": "📚 Catalog",
+        "menu_search": "🏷 Tag search",
+        "menu_task": "🎯 Task of the day",
+        "menu_archive": "🗄 Task archive",
+        "menu_task_tags": "🏷 Tasks by tags",
+        "menu_mustread": "⭐ Must-read",
+        "menu_fav": "❤️ Favorites",
+        "menu_rating": "🏆 Rating",
+        "menu_random": "🎲 Random material",
+        "menu_links": "🔗 Useful links",
+        "menu_submit": "📤 Submit a file",
+        "menu_name": "🪪 Change nickname",
+        "menu_admin": "👑 Admin panel",
+        "menu_lang": "🌐 Language / Язык",
+        "cancel_done": "❌ Cancelled. /start — main menu.",
+        "no_file": "File not found.",
+        "file_sent": "File sent ✅",
+        "file_send_fail": "Failed to send file.",
+        "get_file": "📥 Get file",
+        "add_fav": "❤️ Add to favorites",
+        "remove_fav": "💔 Remove from favorites",
+        "fav_added": "❤️ Added to favorites",
+        "fav_removed": "💔 Removed from favorites",
+        "edit": "✏️ Edit",
+        "mustread_btn": "⭐ Must-read",
+        "delete": "🗑 Delete",
+        "back_catalog": "⬅️ Catalog",
+        "back_menu": "⬅️ Main menu",
+        "back_admin": "⬅️ Admin panel",
+        "back_task": "⬅️ Back to task",
+        "catalog_title": "📚 <b>Catalog by sections:</b>",
+        "section_missing": "Section not found.",
+        "task_missing": "🎯 Task not found.",
+        "search_title": "🏷 <b>Tag search</b>\n\nPick tags and press «🔎 Search».",
+        "search_go": "🔎 Search materials",
+        "search_tasks_btn": "🎯 Search daily tasks",
+        "search_reset": "♻️ Reset",
+        "search_new": "🏷 New search",
+        "search_pick_one": "Pick at least one tag!",
+        "search_tagged": "🔎 <b>Results by tags:</b> {tags}",
+        "search_query": "🔎 <b>Results for:</b> <i>{q}</i>",
+        "search_found": "Materials found: <b>{n}</b>",
+        "search_nothing": "😔 Nothing found.",
+        "search_tag_off": "Tag removed",
+        "search_tag_on": "Tag selected",
+        "search_selected_n": "🏷 <b>Tag search</b>\nSelected: {n}",
+        "search_reset_done": "🏷 Selection cleared.",
+        "tag_db_title": "🏷 <b>Tag database</b> (total: {n})",
+        "tag_add_btn": "➕ Add tag",
+        "tag_rename_btn": "✏️ Rename tag",
+        "tag_ask_new": "🏷 Send new tag(s):",
+        "tag_added": "✅ Tags added: {tags}",
+        "tag_nothing_added": "⚠️ No new tags.",
+        "tag_removed": "Removed {tag}",
+        "tag_missing": "Tag not found.",
+        "tag_rename_pick": "✏️ Which tag?",
+        "tag_rename_ask": "✏️ New name for {tag}:",
+        "tag_rename_done": "✅ Renamed: {old} → {new}. Files: {n}.",
+        "tag_rename_no_files": "✅ Renamed: {old} → {new}.",
+        "tag_rename_conflict": "⚠️ Tag «{new}» exists.",
+        "favorites_title": "❤️ <b>Favorites</b>",
+        "favorites_empty": "\n\nEmpty.",
+        "rating_title": "🏆 <b>MathAm rating</b>\n",
+        "rating_empty": "Nobody has scored yet.",
+        "rating_you": "\n👤 You: {nick} — {score} pts · ✅ {solved} · ❤️ {favs}",
+        "mustread_title": "⭐ <b>Must-read</b>",
+        "mustread_empty": "⭐ <b>Must-read</b>\n\nEmpty.",
+        "mustread_added": "⭐ Added to must-read",
+        "mustread_removed": "Removed from must-read",
+        "mustread_remove_btn": "✩ Remove",
+        "links_title": "🔗 <b>Useful resources</b>",
+        "links_empty_section": "🔗 <b>{title}</b>\n\nNo links.",
+        "links_add": "➕ Add link",
+        "links_del": "🗑 Delete #{n}",
+        "links_ask": "🔗 Format: <code>Title - https://example.com</code>",
+        "links_no_url": "⚠️ No URL.",
+        "links_added": "✅ Added to «{title}».",
+        "links_section_missing": "Section not found.",
+        "links_item_removed": "Removed: {name}",
+        "links_item_missing": "Not found.",
+        "links_only_admin": "Admins only.",
+        "task_of_day": "🎯 <b>Task of the day</b> · {date}\n<i>№ {num} of {total}</i>\n\n{text}",
+        "task_text_on_photo": "Text is on the photo.",
+        "task_solutions": "👥 Solutions ({n})",
+        "task_send_solution": "📝 Submit solution",
+        "task_solution_pending": "⏳ Pending review",
+        "task_solution_ok": "✅ Approved · {grade}/10",
+        "task_solution_ok_no_grade": "✅ Approved",
+        "task_author_solution": "💡 Author's solution",
+        "task_bcast": "📢 Broadcast",
+        "task_archive_title": "🗄 <b>Archive</b>\nDays: {n}\nPage {page}/{total}",
+        "task_archive_empty": "🗄 <b>Archive</b>\n\nEmpty.",
+        "task_today": "🎯 Today",
+        "task_no_tasks": "🎯 <b>Task of the day</b>\n\nNo tasks yet.",
+        "task_ask_solution": "✍️ Send your solution (text/photo/file). /cancel to cancel.",
+        "task_solution_sent": "✅ <b>Solution sent!</b>",
+        "task_solution_send_any": "⚠️ Send text/photo/file.",
+        "task_sol_author_header": "💡 <b>Author's solution</b> (№{num}, {date})",
+        "task_sol_not_yet": "No solution yet.",
+        "task_sols_header": "👥 <b>Solutions</b> (№{num}, {date})\n",
+        "task_sols_empty": "No approved solutions yet.",
+        "task_sol_grade": "⭐ {grade}/10",
+        "task_sol_grade_full": "{grade}/10",
+        "task_sol_ok_mark": "✓",
+        "task_sol_not_found": "Not found.",
+        "task_sol_pending_user": "Pending review.",
+        "task_sol_view": "👀 {nick} · {grade}",
+        "task_sol_empty_content": "Empty solution.",
+        "task_sol_show_fail": "Failed to show.",
+        "task_sol_bcast_done": "✅ Published.\nDelivered: {sent} · Errors: {failed}.",
+        "task_sol_bcast_channel_fail": "\n⚠️ Channel post failed.",
+        "task_sol_bcast_running": "⏳ Broadcasting...",
+        "task_approved_notify": "✅ Your solution for {date} (№{num}) approved!",
+        "task_approved_notify_grade": "✅ Approved! ⭐ {grade}/10",
+        "task_grade_updated": "⭐ Grade updated: {grade}/10",
+        "task_rejected_notify": "❌ Not accepted.",
+        "task_admin_graded": "⭐ Grade for {nick}: <b>{label}</b>.",
+        "task_admin_approved": "✅ Approved.\n⭐ Assign grade:",
+        "task_admin_grade_ask": "✓ No grade",
+        "task_admin_rejected": "❌ Rejected.",
+        "task_admin_sol_rev_not_found": "Not found.",
+        "task_admin_sol_approved_short": "Approved",
+        "task_admin_sol_rejected_short": "Rejected",
+        "task_grade_saved": "Grade saved",
+        "task_grade_zero": "no grade",
+        "submit_start": "📤 Send a file (PDF):",
+        "submit_ask_title": "✏️ Title:",
+        "submit_ask_tags": "🏷 Pick tags:",
+        "submit_skip_tags": "⏭ No tags",
+        "submit_preview": "📋 <b>Preview</b>\n\n📖 {title}\n📄 {file}\n🏷 {tags}",
+        "submit_send": "✅ Submit",
+        "submit_cancel": "❌ Cancel",
+        "submit_sent": "✅ Sent!",
+        "submit_cancelled": "❌ Cancelled.",
+        "submit_stale": "Expired.",
+        "submit_first_file": "Send a file first!",
+        "admin_title": "👑 <b>Admin panel</b>",
+        "admin_upload": "➕ Upload material",
+        "admin_add_task": "🎯 Add task",
+        "admin_cats": "📂 Category management",
+        "admin_tags": "🏷 Tags",
+        "admin_stats": "📊 Stats",
+        "admin_subs": "📥 Submissions",
+        "admin_pending": "🧩 Solutions",
+        "admin_bcast": "📢 Broadcast",
+        "admin_upload_ask": "📤 Send a file:",
+        "admin_upload_title": "✏️ Title:",
+        "admin_upload_desc": "📝 Description (or «skip»):",
+        "admin_upload_tags": "🏷 Tags:",
+        "admin_upload_diff": "🎯 Difficulty:",
+        "admin_upload_cats": "📂 Sections:",
+        "admin_upload_publish": "✅ Publish",
+        "admin_upload_published": "✅ Published!\n📖 <b>{title}</b>\n📂 {cats}",
+        "admin_upload_stale": "Expired.",
+        "admin_upload_no_cat": "Pick at least one!",
+        "admin_upload_cat_missing": "Not found.",
+        "admin_upload_done_short": "Saved ✅",
+        "admin_diff_easy": "🟢 Easy",
+        "admin_diff_medium": "🟡 Medium",
+        "admin_diff_hard": "🔴 Hard",
+        "admin_diff_imo": "🔥 IMO",
+        "admin_task_photo": "📸 Photo of the task (or «skip»):",
+        "admin_task_text": "✍️ Task text (or «skip»):",
+        "admin_task_solution": "💡 Solution (or «skip»):",
+        "admin_task_date": "📅 Date: <code>YYYY-MM-DD</code>, «today» or «tomorrow»:",
+        "admin_task_added": "✅ Task added for <b>{date}</b> (№ {num}).",
+        "admin_task_bad_date": "⚠️ Wrong format.",
+        "admin_task_photo_ask": "📸 Photo or «skip».",
+        "admin_task_sol_ask": "Text/photo/document/«skip».",
+        "admin_stats_title": "📊 <b>Stats</b>\n\n👥 Users: {users}\n📚 Files: {files}\n🏷 Tags: {tags}\n🎯 Tasks: {tasks}\n🧩 Pending: {pending}\n📥 Subs: {subs}\n\n<b>Top-5:</b>\n{top}",
+        "admin_subs_empty": "📥 No submissions.",
+        "admin_subs_title": "📥 <b>Submissions</b>\n",
+        "admin_subs_pick_cat": "📂 Section:",
+        "admin_subs_published": "✅ Published to «{cat}».",
+        "admin_subs_user_notify": "✅ Your material «{title}» has been approved and added to «{cat}»!",
+        "admin_subs_reject_notify": "❌ Your material submission «{title}» was not accepted.",
+        "admin_subs_accept": "✅ Accept",
+        "admin_subs_reject": "❌ Reject",
+        "admin_subs_rejected": "❌ Rejected.",
+        "admin_subs_already": "Already processed.",
+        "admin_subs_not_found": "Not found.",
+        "admin_subs_already_pub": "Already published.",
+        "admin_pending_title": "🧩 <b>Pending solutions</b>\n",
+        "admin_pending_empty": "\nNo pending. 🎉",
+        "admin_pending_shown": "\nShown: {n}",
+        "admin_bcast_ask": "📢 Message to broadcast. /cancel to cancel.",
+        "admin_bcast_running": "⏳ Broadcasting...",
+        "admin_bcast_done": "✅ Done.\nDelivered: {sent} · Errors: {failed}",
+        "admin_edit_title": "⚙️ <b>Editing</b>\n📖 {title}",
+        "admin_edit_replace": "📄 Replace file",
+        "admin_edit_rename": "✏️ Title",
+        "admin_edit_desc": "📝 Description",
+        "admin_edit_tags": "🏷 Tags",
+        "admin_edit_back": "⬅️ Back",
+        "admin_edit_ask_doc": "📄 New file:",
+        "admin_edit_ask_title": "✏️ New title:",
+        "admin_edit_ask_desc": "📝 New description (or «clear»):",
+        "admin_edit_ask_tags": "🏷 Tags (or «clear»):",
+        "admin_edit_doc_done": "✅ File replaced ({n}).",
+        "admin_edit_title_done": "✅ Title updated ({n}).",
+        "admin_edit_desc_done": "✅ Description updated ({n}).",
+        "admin_edit_tags_done": "✅ Tags updated ({n}).",
+        "admin_del_confirm": "⚠️ Delete «{title}»?",
+        "admin_del_yes": "🗑 Yes",
+        "admin_del_done": "🗑 Deleted: {n}.",
+        "file_card_title": "📖 <b>{title}</b>",
+        "file_card_section": "📂 Section: {cats}",
+        "file_card_diff": "🎯 Level: {diff}",
+        "file_card_tags": "🏷 {tags}",
+        "file_card_summary": "\n📝 {summary}",
+        "new_material": "📚 <b>New material in MathAm</b>",
+        "open_in_bot": "🤖 Open in bot",
+        "solve_in_bot": "🤖 Solve in bot",
+        "user_sol_new": "🧩 <b>New solution</b>\nTask: {date} · №{num}\n🪪 {nick}\n👤 {tg}",
+        "unknown_text": "🤖 Use /start.",
+        "expect_file": "📤 Waiting for a file.",
+        "expect_doc": "📄 Waiting for a file.",
+        "only_admin": "Not available.",
+        "choose_tags_n": "🏷 Pick tags ({n}):",
+        "rating_line": "{medal} {name} — {score} pts · ✅ {solved} · 🔥 {streak} d.",
+        "rating_medal_1": "🥇",
+        "rating_medal_2": "🥈",
+        "rating_medal_3": "🥉",
+        "download_all_zip": "📦 Download all materials (ZIP)",
+        "download_cat_zip": "📦 Download section (ZIP)",
+        "zip_preparing": "⏳ Preparing ZIP archive ({current}/{total})...",
+        "zip_empty": "⚠️ No files available for download in the catalog.",
+        "zip_ready": "📦 <b>MathAm Library Archive</b>\n📚 Files: {count}\n💾 Size: {size_mb:.1f} MB",
+        "zip_part": "📦 <b>MathAm Library Archive (Part {part}/{total_parts})</b>\n📚 Files: {count}\n💾 Size: {size_mb:.1f} MB",
+        "zip_error": "⚠️ An error occurred while creating the archive.",
+    },
 }
 
+
+def get_user_lang(user_id: int) -> str:
+    uid_str = str(user_id)
+    u = DATABASE.get("users", {}).get(uid_str, {})
+    lang = u.get("language") or "ru"
+    return lang if lang in TEXTS else "ru"
+
+
 def t(user_id: int, key: str, **kwargs) -> str:
-    text = TEXTS.get(key, key)
+    lang = get_user_lang(user_id)
+    text = TEXTS.get(lang, TEXTS["ru"]).get(key) or TEXTS["ru"].get(key, key)
     try:
         return text.format(**kwargs)
     except Exception:
         return text
 
-async def localize(text: str, user_id: int = 0) -> str:
+
+# ============================================================
+# TRANSLATION & MATH PRESERVATION
+# ============================================================
+
+GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
+
+_MATH_PATTERNS = [
+    # 1. Display containers
+    re.compile(r"\$\$[\s\S]+?\$\$"),
+    re.compile(r"\\\[[\s\S]+?\\\]"),
+    # 2. LaTeX environments
+    re.compile(r"\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\1\}"),
+    # 3. Inline containers
+    re.compile(r"\\\([\s\S]+?\\\)"),
+    re.compile(r"\$[^\$\n]+?\$"),
+    # 4. Commands with nested curly braces, e.g. \frac{...}{...}, \sqrt[3]{...}, \pmod{...}
+    re.compile(r"\\([a-zA-Z]+)(?:\[[^\]]*\])?(?:\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})+"),
+    # 5. Standalone LaTeX commands/symbols, e.g. \alpha, \ge, \le, \ne, \infty, \pi, \cdot, \times, \pm
+    re.compile(r"\\[a-zA-Z]+"),
+    # 6. Variable sub/superscript, e.g. x_1, a^2, x_{i+1}, 2^{n-1}
+    re.compile(r"(?<![A-Za-zА-Яа-я0-9])[A-Za-z]\s*[\^_]\s*(?:\{[^{}]*\}|[A-Za-z0-9]+)"),
+]
+
+_translation_cache: dict = {}
+
+
+def _protect_math(text: str):
+    protected = []
+
+    def repl(m):
+        protected.append(m.group(0))
+        return f"_MTH_TOKEN_{len(protected) - 1}_"
+
+    for pat in _MATH_PATTERNS:
+        text = pat.sub(repl, text)
+    return text, protected
+
+
+def _restore_math(text: str, protected: list):
+    pattern = re.compile(
+        r"(?:_MTH_TOKEN_|<<\s*M\s*|«\s*M\s*|MTH_TOKEN_)\s*(\d+)(?:\s*(?:>>|»|_))?",
+        re.IGNORECASE
+    )
+
+    def repl(m):
+        idx = int(m.group(1))
+        if 0 <= idx < len(protected):
+            return protected[idx]
+        return m.group(0)
+
+    # Multi-pass restore to handle nested structures cleanly
+    for _ in range(5):
+        new_text = pattern.sub(repl, text)
+        if new_text == text:
+            break
+        text = new_text
     return text
 
-async def localize_list(items: list, user_id: int = 0) -> list:
-    return items
+
+def _chunk_text(text: str, max_chunk_len: int = 1200) -> list[str]:
+    if len(text) <= max_chunk_len:
+        return [text]
+    lines = text.split("\n")
+    chunks = []
+    curr = []
+    curr_len = 0
+    for line in lines:
+        if len(line) > max_chunk_len:
+            words = line.split(" ")
+            w_curr = []
+            w_len = 0
+            for w in words:
+                if w_len + len(w) + 1 > max_chunk_len and w_curr:
+                    if curr:
+                        chunks.append("\n".join(curr))
+                        curr = []
+                        curr_len = 0
+                    chunks.append(" ".join(w_curr))
+                    w_curr = [w]
+                    w_len = len(w)
+                else:
+                    w_curr.append(w)
+                    w_len += len(w) + 1
+            if w_curr:
+                curr.append(" ".join(w_curr))
+                curr_len += len(curr[-1]) + 1
+        elif curr_len + len(line) + 1 > max_chunk_len and curr:
+            chunks.append("\n".join(curr))
+            curr = [line]
+            curr_len = len(line)
+        else:
+            curr.append(line)
+            curr_len += len(line) + 1
+    if curr:
+        chunks.append("\n".join(curr))
+    return chunks
+
+
+async def _fetch_gt_segment(session: aiohttp.ClientSession, segment: str, target_lang: str) -> str:
+    if not segment.strip():
+        return segment
+    try:
+        params = {"client": "gtx", "sl": "auto", "tl": target_lang, "dt": "t", "q": segment}
+        async with session.get(GOOGLE_TRANSLATE_URL, params=params) as resp:
+            data = await resp.json()
+            parts = []
+            for seg in data[0]:
+                if seg and seg[0]:
+                    parts.append(seg[0])
+            return "".join(parts)
+    except Exception:
+        logger.exception("Google translate segment failed")
+        return segment
+
+
+async def translate_text(text: str, target_lang: str) -> str:
+    if not text or not text.strip():
+        return text
+    if target_lang not in ("ru", "en"):
+        return text
+
+    key = (text, target_lang)
+    if key in _translation_cache:
+        return _translation_cache[key]
+
+    working, protected = _protect_math(text)
+
+    # Check if remaining text contains actual words that need translation
+    stripped = re.sub(r"(?:_MTH_TOKEN_|<<\s*M\s*|«\s*M\s*|MTH_TOKEN_)\s*(\d+)(?:\s*(?:>>|»|_))?", "", working)
+    words = re.findall(r"[a-zA-Zа-яА-ЯёЁ]{2,}", stripped)
+    if not words:
+        return text
+
+    chunks = _chunk_text(working, 1200)
+    timeout = aiohttp.ClientTimeout(total=25)
+    translated_chunks = []
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for ch in chunks:
+                tr = await _fetch_gt_segment(session, ch, target_lang)
+                translated_chunks.append(tr)
+        raw_translated = "\n".join(translated_chunks)
+    except Exception:
+        logger.exception("Translation request failed")
+        raw_translated = working
+
+    translated = _restore_math(raw_translated, protected)
+    if len(_translation_cache) > 5000:
+        _translation_cache.clear()
+    _translation_cache[key] = translated
+    return translated
+
+
+def _needs_translation(text: str, target_lang: str) -> bool:
+    if not text or not text.strip():
+        return False
+    has_cyrillic = bool(re.search(r"[\u0400-\u04FF]", text))
+    has_latin = bool(re.search(r"[a-zA-Z]", text))
+    if target_lang == "en":
+        return has_cyrillic
+    elif target_lang == "ru":
+        return (not has_cyrillic) and has_latin
+    return False
+
+
+async def localize(text: str, user_id: int) -> str:
+    if not text or not text.strip():
+        return text
+    lang = get_user_lang(user_id)
+    if not _needs_translation(text, lang):
+        return text
+    return await translate_text(text, lang)
+
+
+async def localize_list(items: list, user_id: int) -> list:
+    out = []
+    for x in items:
+        out.append(await localize(x, user_id))
+    return out
+
 
 # ============================================================
 # DEFAULT STATE
@@ -356,6 +800,7 @@ DEFAULT_STATE = {
     "users": {},
 }
 
+
 # ============================================================
 # MIDDLEWARES
 # ============================================================
@@ -363,21 +808,18 @@ DEFAULT_STATE = {
 class UserActivityMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = getattr(event, "from_user", None)
-        if user and not user.is_bot:
-            asyncio.create_task(self._safe_track(user.id, user.username or "", user.first_name or ""))
+        if user:
+            try:
+                await track_user_activity(user.id, user.username or "", user.first_name or "")
+            except Exception:
+                logger.exception("Failed to track user activity")
         return await handler(event, data)
 
-    async def _safe_track(self, user_id: int, username: str, first_name: str):
-        try:
-            await track_user_activity(user_id, username, first_name)
-        except Exception:
-            pass
 
 class SimpleRateLimitMiddleware(BaseMiddleware):
-    def __init__(self, per_minute: int = 60):
+    def __init__(self, per_minute: int = 30):
         self.per_minute = per_minute
         self.buckets: dict = {}
-        self._lock = asyncio.Lock()
 
     async def __call__(self, handler, event, data):
         user = getattr(event, "from_user", None)
@@ -385,20 +827,22 @@ class SimpleRateLimitMiddleware(BaseMiddleware):
             now = datetime.now(timezone.utc)
             minute = now.strftime("%Y%m%d%H%M")
             key = f"{user.id}:{minute}"
-            async with self._lock:
-                cnt = self.buckets.get(key, 0)
-                if cnt >= self.per_minute:
-                    if isinstance(event, types.CallbackQuery):
-                        try:
-                            await event.answer("⏱ Слишком часто. Подождите пару секунд.", show_alert=True)
-                        except Exception:
-                            pass
-                    return
-                self.buckets[key] = cnt + 1
-                if len(self.buckets) > 3000:
-                    cutoff = (now - timedelta(minutes=3)).strftime("%Y%m%d%H%M")
-                    self.buckets = {k: v for k, v in self.buckets.items() if k.split(":")[1] >= cutoff}
+            cnt = self.buckets.get(key, 0)
+            if cnt >= self.per_minute:
+                if isinstance(event, types.CallbackQuery):
+                    try:
+                        await event.answer("⏱ Слишком часто. Подождите.", show_alert=False)
+                    except Exception:
+                        pass
+                return
+            self.buckets[key] = cnt + 1
+            if len(self.buckets) > 5000:
+                cutoff = (now - timedelta(minutes=3)).strftime("%Y%m%d%H%M")
+                for k in list(self.buckets.keys()):
+                    if k.split(":")[1] < cutoff:
+                        del self.buckets[k]
         return await handler(event, data)
+
 
 # ============================================================
 # HELPERS
@@ -407,8 +851,10 @@ class SimpleRateLimitMiddleware(BaseMiddleware):
 def get_yerevan_date() -> str:
     return datetime.now(YEREVAN_TZ).strftime("%Y-%m-%d")
 
+
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
+
 
 def get_file_by_uid(uid: str) -> dict:
     for cat_data in DATABASE.get("categories", {}).values():
@@ -416,6 +862,7 @@ def get_file_by_uid(uid: str) -> dict:
             if f.get("file_unique_id") == uid:
                 return f
     return {}
+
 
 def get_file_categories(uid: str) -> list:
     cats = []
@@ -425,6 +872,7 @@ def get_file_categories(uid: str) -> list:
                 cats.append(cat_data.get("title", cat_key))
                 break
     return cats
+
 
 def get_catalog_files_list() -> list:
     files_dict = {}
@@ -455,6 +903,7 @@ def get_catalog_files_list() -> list:
                         item["tags"].append(tag)
     return list(files_dict.values())
 
+
 def get_similar_files(uid: str, limit: int = 5) -> list:
     current = get_file_by_uid(uid)
     if not current:
@@ -471,7 +920,8 @@ def get_similar_files(uid: str, limit: int = 5) -> list:
     scored.sort(key=lambda x: -x[0])
     return [f for _, f in scored[:limit]]
 
-def _split_text(text: str, limit: int = TG_TEXT_LIMIT) -> list:
+
+def _split_text(text: str, limit: int) -> list:
     parts = []
     remaining = text
     while remaining:
@@ -485,39 +935,40 @@ def _split_text(text: str, limit: int = TG_TEXT_LIMIT) -> list:
         remaining = remaining[split:].lstrip("\n")
     return parts
 
+
 async def safe_send_or_edit(target, text: str, reply_markup=None, photo_id=None, parse_mode=ParseMode.HTML):
     is_message = isinstance(target, types.Message)
-    if not is_message:
-        try:
-            await target.answer()
-        except Exception:
-            pass
-    chat_id = target.chat.id if is_message else (target.message.chat.id if target.message else target.from_user.id)
+    chat_id = target.chat.id if is_message else target.message.chat.id
 
     if photo_id:
         if len(text) <= 1024:
             if is_message:
                 return await target.answer_photo(photo=photo_id, caption=text,
                                                  parse_mode=parse_mode, reply_markup=reply_markup)
+            msg = target.message
             try:
-                await target.message.delete()
+                await msg.delete()
             except Exception:
                 pass
-            return await target.message.answer_photo(photo=photo_id, caption=text,
-                                                     parse_mode=parse_mode, reply_markup=reply_markup)
+            return await msg.answer_photo(photo=photo_id, caption=text,
+                                          parse_mode=parse_mode, reply_markup=reply_markup)
         else:
             if is_message:
                 await target.answer_photo(photo=photo_id, caption="📄")
             else:
+                msg = target.message
                 try:
-                    await target.message.delete()
+                    await msg.delete()
                 except Exception:
                     pass
-                await target.message.answer_photo(photo=photo_id, caption="📄")
+                await msg.answer_photo(photo=photo_id, caption="📄")
             parts = _split_text(text, TG_TEXT_LIMIT)
             for i, part in enumerate(parts):
                 mk = reply_markup if i == len(parts) - 1 else None
-                await bot.send_message(chat_id, part, parse_mode=parse_mode, reply_markup=mk)
+                try:
+                    await bot.send_message(chat_id, part, parse_mode=parse_mode, reply_markup=mk)
+                except Exception:
+                    logger.exception("Failed to send long text part")
             return None
 
     if len(text) <= TG_TEXT_LIMIT:
@@ -532,10 +983,6 @@ async def safe_send_or_edit(target, text: str, reply_markup=None, photo_id=None,
             return await msg.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
         try:
             return await msg.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
-        except TelegramBadRequest as e:
-            if "message is not modified" in str(e).lower():
-                return msg
-            return await msg.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
         except Exception:
             return await msg.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
     else:
@@ -557,10 +1004,17 @@ async def safe_send_or_edit(target, text: str, reply_markup=None, photo_id=None,
                 except Exception:
                     await msg.answer(first, parse_mode=parse_mode)
         for part in rest:
-            await bot.send_message(chat_id, part, parse_mode=parse_mode)
+            try:
+                await bot.send_message(chat_id, part, parse_mode=parse_mode)
+            except Exception:
+                logger.exception("Failed to send long text part")
         if reply_markup:
-            return await bot.send_message(chat_id, "⬇️", reply_markup=reply_markup)
+            try:
+                return await bot.send_message(chat_id, "⬇️", reply_markup=reply_markup)
+            except Exception:
+                pass
         return None
+
 
 async def track_user_activity(user_id: int, username: str = "", first_name: str = ""):
     uid_str = str(user_id)
@@ -573,6 +1027,7 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
             "username": username,
             "first_name": first_name,
             "nickname": "",
+            "language": "",
             "created_at": datetime.now(YEREVAN_TZ).isoformat(),
             "streak": 1,
             "last_active": today,
@@ -581,20 +1036,25 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
             "notes": {},
         }
         DATABASE["users"][uid_str] = user_data
-        await save_db(DATABASE)
+        await db_collection.update_one(
+            {"_id": DB_DOC_ID},
+            {"$set": {f"data.users.{uid_str}": user_data}},
+            upsert=True,
+        )
         return
 
     user = DATABASE["users"][uid_str]
-    changed = False
+    updates = {}
     if username and user.get("username") != username:
         user["username"] = username
-        changed = True
+        updates[f"data.users.{uid_str}.username"] = username
     if first_name and user.get("first_name") != first_name:
         user["first_name"] = first_name
-        changed = True
+        updates[f"data.users.{uid_str}.first_name"] = first_name
 
     user.setdefault("favorites", [])
     user.setdefault("nickname", "")
+    user.setdefault("language", "")
     user.setdefault("notes", {})
 
     if user.get("last_active") != today:
@@ -603,10 +1063,12 @@ async def track_user_activity(user_id: int, username: str = "", first_name: str 
         else:
             user["streak"] = 1
         user["last_active"] = today
-        changed = True
+        updates[f"data.users.{uid_str}.streak"] = user["streak"]
+        updates[f"data.users.{uid_str}.last_active"] = today
 
-    if changed:
-        await save_db(DATABASE)
+    if updates:
+        await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": updates})
+
 
 async def award_points(user_id: int, points: int):
     uid_str = str(user_id)
@@ -614,14 +1076,20 @@ async def award_points(user_id: int, points: int):
         await track_user_activity(user_id, "", "")
     if uid_str not in DATABASE.get("users", {}):
         return
-    DATABASE["users"][uid_str]["score"] = max(0, DATABASE["users"][uid_str].get("score", 0) + points)
-    await save_db(DATABASE)
+    DATABASE["users"][uid_str]["score"] = DATABASE["users"][uid_str].get("score", 0) + points
+    await db_collection.update_one(
+        {"_id": DB_DOC_ID},
+        {"$set": {f"data.users.{uid_str}.score": DATABASE["users"][uid_str]["score"]}},
+    )
+
 
 def get_nickname(uid_str: str) -> str:
     u = DATABASE.get("users", {}).get(uid_str, {})
     return u.get("nickname") or u.get("username") or u.get("first_name") or f"id{uid_str}"
 
+
 def user_display(uid_str: str) -> str:
+    # No bold tags around nickname
     u = DATABASE.get("users", {}).get(uid_str, {})
     nick = u.get("nickname") or u.get("username") or f"id{uid_str}"
     tg = u.get("first_name") or ""
@@ -633,6 +1101,7 @@ def user_display(uid_str: str) -> str:
         parts.append("@" + html.escape(uname))
     suffix = f" <i>({', '.join(parts)})</i>" if parts else ""
     return f"{html.escape(nick)}{suffix}"
+
 
 def sol_display(s: dict, uid_str: str) -> str:
     u = DATABASE.get("users", {}).get(uid_str, {})
@@ -647,9 +1116,11 @@ def sol_display(s: dict, uid_str: str) -> str:
     suffix = f" <i>({', '.join(parts)})</i>" if parts else ""
     return f"{html.escape(nick)}{suffix}"
 
+
 def sol_button_name(s: dict, uid_str: str) -> str:
     u = DATABASE.get("users", {}).get(uid_str, {})
     return s.get("nickname") or u.get("nickname") or f"id{uid_str}"
+
 
 def get_task(date_str: str, idx: int) -> dict:
     group = DATABASE.get("daily_tasks", {}).get(date_str, {})
@@ -658,8 +1129,10 @@ def get_task(date_str: str, idx: int) -> dict:
         return tasks[idx]
     return {}
 
+
 def get_dates_sorted() -> list:
     return sorted(DATABASE.get("daily_tasks", {}).keys(), reverse=True)
+
 
 def count_solved(uid_str: str) -> int:
     n = 0
@@ -670,6 +1143,7 @@ def count_solved(uid_str: str) -> int:
                 n += 1
     return n
 
+
 def update_file_field(uid: str, field: str, value) -> int:
     count = 0
     for cat_data in DATABASE.get("categories", {}).values():
@@ -678,6 +1152,7 @@ def update_file_field(uid: str, field: str, value) -> int:
                 f[field] = value
                 count += 1
     return count
+
 
 def rename_tag_everywhere(old_tag: str, new_tag: str) -> int:
     tags = DATABASE.setdefault("tags", [])
@@ -697,6 +1172,7 @@ def rename_tag_everywhere(old_tag: str, new_tag: str) -> int:
                 task["tags"] = [new_tag if x == old_tag else x for x in task_tags]
     return count
 
+
 def normalize_tags_input(raw: str) -> list:
     tags = []
     for part in re.split(r"[,;\n]", raw):
@@ -707,21 +1183,19 @@ def normalize_tags_input(raw: str) -> list:
             tags.append(tag)
     return tags[:10]
 
+
 # ============================================================
-# DATABASE LOAD / SAVE (JSON LOCAL STORAGE)
+# DATABASE LOAD / SAVE
 # ============================================================
 
-async def load_db() -> dict:
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.error("Failed to load %s: %s", DB_FILE, e)
-            data = copy.deepcopy(DEFAULT_STATE)
-    else:
+async def load_db():
+    doc = await db_collection.find_one({"_id": DB_DOC_ID})
+    if doc is None:
         data = copy.deepcopy(DEFAULT_STATE)
+        await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {"data": data}}, upsert=True)
+        return data
 
+    data = doc.get("data", copy.deepcopy(DEFAULT_STATE))
     for key, value in DEFAULT_STATE.items():
         if key not in data:
             data[key] = copy.deepcopy(value)
@@ -750,15 +1224,17 @@ async def load_db() -> dict:
         data["links"][sec_key].setdefault("title", default_sec["title"])
         data["links"][sec_key].setdefault("items", [])
 
+    # Always ensure YouTube videos exist with working clean URLs: delete old and recreate cleanly
     data.setdefault("links", {})["useful_videos"] = copy.deepcopy(DEFAULT_STATE["links"]["useful_videos"])
 
     if not data.get("tags"):
         data["tags"] = list(DEFAULT_TAGS)
 
-    for uid, user in data.setdefault("users", {}).items():
+    for uid, user in data["users"].items():
         user.setdefault("username", "")
         user.setdefault("first_name", "")
         user.setdefault("nickname", "")
+        user.setdefault("language", "")
         user.setdefault("created_at", datetime.now(YEREVAN_TZ).isoformat())
         user.setdefault("streak", 1)
         user.setdefault("last_active", get_yerevan_date())
@@ -766,7 +1242,7 @@ async def load_db() -> dict:
         user.setdefault("favorites", [])
         user.setdefault("notes", {})
 
-    for date_str, group in list(data.setdefault("daily_tasks", {}).items()):
+    for date_str, group in list(data["daily_tasks"].items()):
         if isinstance(group, list) or (isinstance(group, dict) and "tasks" not in group):
             group = {"tasks": [group] if isinstance(group, dict) else group}
             data["daily_tasks"][date_str] = group
@@ -786,66 +1262,54 @@ async def load_db() -> dict:
             task.setdefault("user_solutions", {})
             task.setdefault("numeric_answer", None)
             task["number"] = i + 1
+            for uid_str, sol in task["user_solutions"].items():
+                sol.setdefault("text", "")
+                sol.setdefault("photo_file_id", None)
+                sol.setdefault("document_file_id", None)
+                sol.setdefault("username", "")
+                sol.setdefault("first_name", "")
+                sol.setdefault("nickname", "")
+                sol.setdefault("status", "approved")
+                sol.setdefault("grade", None)
+                sol.setdefault("submitted_at", get_yerevan_date())
 
-    await save_db(data)
+    await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {"data": data}}, upsert=True)
     return data
 
-async def save_db(db_data: dict = None):
-    global DATABASE
-    if db_data is None:
-        db_data = DATABASE
-    async with _db_lock:
-        temp_file = DB_FILE + ".tmp"
-        try:
-            with open(temp_file, "w", encoding="utf-8") as f:
-                json.dump(db_data, f, ensure_ascii=False, indent=2)
-            os.replace(temp_file, DB_FILE)
-        except Exception:
-            logger.exception("Failed to save database to %s", DB_FILE)
 
-async def load_submissions() -> dict:
-    if os.path.exists(SUBMISSIONS_FILE):
-        try:
-            with open(SUBMISSIONS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            logger.exception("Failed to load submissions")
-    return {}
+async def save_db(db_data):
+    await db_collection.update_one({"_id": DB_DOC_ID}, {"$set": {"data": db_data}}, upsert=True)
+
 
 async def save_submission(sub_id: str, data: dict):
-    subs = await load_submissions()
-    if sub_id in subs:
-        subs[sub_id].update(data)
-    else:
-        subs[sub_id] = data
-    temp_file = SUBMISSIONS_FILE + ".tmp"
-    async with _db_lock:
-        try:
-            with open(temp_file, "w", encoding="utf-8") as f:
-                json.dump(subs, f, ensure_ascii=False, indent=2)
-            os.replace(temp_file, SUBMISSIONS_FILE)
-        except Exception:
-            logger.exception("Failed to save submission")
+    await submissions_collection.update_one({"_id": sub_id}, {"$set": data}, upsert=True)
+
 
 async def get_submission(sub_id: str) -> dict:
-    subs = await load_submissions()
-    return subs.get(sub_id, {})
+    doc = await submissions_collection.find_one({"_id": sub_id})
+    return doc if doc else {}
+
 
 # ============================================================
 # FSM STATES
 # ============================================================
 
 class Registration(StatesGroup):
+    choosing_language = State()
     waiting_for_nickname = State()
+
 
 class ChangeNicknameState(StatesGroup):
     waiting_new_name = State()
 
+
 class TagSearch(StatesGroup):
     selecting = State()
 
+
 class TaskTagSearch(StatesGroup):
     selecting = State()
+
 
 class AdminUpload(StatesGroup):
     waiting_document = State()
@@ -855,29 +1319,36 @@ class AdminUpload(StatesGroup):
     choosing_difficulty = State()
     choosing_categories = State()
 
+
 class AdminAddCategory(StatesGroup):
     waiting_for_title = State()
+
 
 class UserSubmit(StatesGroup):
     waiting_file = State()
     waiting_title = State()
     choosing_tags = State()
 
+
 class AddTag(StatesGroup):
     waiting_for_text = State()
+
 
 class RenameTag(StatesGroup):
     choosing = State()
     waiting_for_new_name = State()
 
+
 class AddLink(StatesGroup):
     waiting_for_text = State()
+
 
 class EditFile(StatesGroup):
     waiting_for_document = State()
     waiting_for_title = State()
     waiting_for_desc = State()
     waiting_for_tags = State()
+
 
 class TaskOfDayAdmin(StatesGroup):
     waiting_for_photo = State()
@@ -888,28 +1359,36 @@ class TaskOfDayAdmin(StatesGroup):
     choosing_tags = State()
     waiting_for_date = State()
 
+
 class UserTaskSolution(StatesGroup):
     waiting_for_solution = State()
+
 
 class UserNumericAnswer(StatesGroup):
     waiting = State()
 
+
 class FileComment(StatesGroup):
     waiting = State()
+
 
 class FileNote(StatesGroup):
     waiting = State()
 
+
 class BroadcastAdmin(StatesGroup):
     waiting_for_message = State()
+
 
 class TaskEdit(StatesGroup):
     text = State()
     photo = State()
     solution = State()
 
+
 class TaskSchedule(StatesGroup):
     waiting_datetime = State()
+
 
 # ============================================================
 # KEYBOARDS
@@ -929,20 +1408,23 @@ def get_main_menu_keyboard(user_id: int):
          InlineKeyboardButton(text=t(user_id, "menu_links"), callback_data="links:main")],
         [InlineKeyboardButton(text=t(user_id, "menu_submit"), callback_data="submit:start"),
          InlineKeyboardButton(text=t(user_id, "menu_name"), callback_data="user:chname")],
+        [InlineKeyboardButton(text=t(user_id, "menu_lang"), callback_data="lang:menu")],
     ]
     if is_admin(user_id):
         builder.append([InlineKeyboardButton(text=t(user_id, "menu_admin"), callback_data="admin:main")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
+
 async def get_catalog_keyboard(user_id: int):
     builder = []
     for cat_key, cat_data in DATABASE.get("categories", {}).items():
         count = len(cat_data.get("files", []))
-        title = cat_data.get("title", cat_key)
+        title = await localize(cat_data.get("title", cat_key), user_id)
         builder.append([InlineKeyboardButton(
             text=f"{title} ({count})",
             callback_data=f"cat:{cat_key}",
         )])
+    # Button to download all PDFs in a ZIP archive
     builder.append([InlineKeyboardButton(
         text=t(user_id, "download_all_zip"),
         callback_data="catalog:zip_all"
@@ -951,6 +1433,7 @@ async def get_catalog_keyboard(user_id: int):
         builder.append([InlineKeyboardButton(text="➕ Добавить раздел", callback_data="admin:add_cat")])
     builder.append([InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
+
 
 def get_file_view_keyboard(uid: str, user_id: int):
     uid_str = str(user_id)
@@ -982,6 +1465,7 @@ def get_file_view_keyboard(uid: str, user_id: int):
         rows.append([InlineKeyboardButton(text=t(user_id, "delete"), callback_data=f"admin:del_file:{uid}")])
     rows.append([InlineKeyboardButton(text=t(user_id, "back_catalog"), callback_data="menu:catalog")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def get_task_keyboard(date_str: str, task_idx: int, user_id: int):
     task = get_task(date_str, task_idx)
@@ -1036,13 +1520,15 @@ def get_task_keyboard(date_str: str, task_idx: int, user_id: int):
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
 async def get_tag_toggle_keyboard(selected: list, prefix: str, done_cb: str,
                                   user_id: int, skip_text: str = None, skip_cb: str = None):
     tags = DATABASE.get("tags", [])
     rows, row = [], []
     for i, tag in enumerate(tags):
         mark = "✅ " if tag in selected else ""
-        row.append(InlineKeyboardButton(text=f"{mark}{tag}", callback_data=f"{prefix}:{i}"))
+        label = await localize(tag, user_id)
+        row.append(InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"{prefix}:{i}"))
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -1055,15 +1541,17 @@ async def get_tag_toggle_keyboard(selected: list, prefix: str, done_cb: str,
     rows.append([InlineKeyboardButton(text="❌", callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
 async def get_category_toggle_keyboard(selected: list, user_id: int, publish_cb: str = "upl:publish"):
     rows = []
     for cat_key, cat_data in DATABASE.get("categories", {}).items():
         mark = "✅ " if cat_key in selected else "▫️ "
-        title = cat_data.get("title", cat_key)
+        title = await localize(cat_data.get("title", cat_key), user_id)
         rows.append([InlineKeyboardButton(text=f"{mark}{title}", callback_data=f"upl:cat:{cat_key}")])
     rows.append([InlineKeyboardButton(text=t(user_id, "admin_upload_publish"), callback_data=publish_cb)])
     rows.append([InlineKeyboardButton(text="❌", callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 async def get_links_keyboard(user_id: int):
     builder = []
@@ -1071,15 +1559,16 @@ async def get_links_keyboard(user_id: int):
     for sec_key in ordered_keys:
         if sec_key in DATABASE.get("links", {}):
             sec_data = DATABASE["links"][sec_key]
-            title = sec_data.get("title", sec_key)
+            title = await localize(sec_data.get("title", sec_key), user_id)
             builder.append([InlineKeyboardButton(text=title, callback_data=f"links:sec:{sec_key}")])
     for sec_key, sec_data in DATABASE.get("links", {}).items():
         if sec_key in ordered_keys:
             continue
-        title = sec_data.get("title", sec_key)
+        title = await localize(sec_data.get("title", sec_key), user_id)
         builder.append([InlineKeyboardButton(text=title, callback_data=f"links:sec:{sec_key}")])
     builder.append([InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
+
 
 def get_links_section_keyboard(sec_key: str, user_id: int):
     sec = DATABASE.get("links", {}).get(sec_key, {})
@@ -1087,6 +1576,7 @@ def get_links_section_keyboard(sec_key: str, user_id: int):
     builder = []
     for idx, item in enumerate(items):
         url = (item.get("url") or "").strip()
+        # Ensure scheme is present so Telegram inline URL buttons work perfectly
         if not (url.startswith("http://") or url.startswith("https://")):
             url = f"https://{url}"
         title = item.get("title") or f"Link #{idx + 1}"
@@ -1099,6 +1589,7 @@ def get_links_section_keyboard(sec_key: str, user_id: int):
         builder.append([InlineKeyboardButton(text=t(user_id, "links_add"), callback_data=f"links:add:{sec_key}")])
     builder.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="links:main")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
+
 
 def get_admin_menu_keyboard(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -1115,10 +1606,20 @@ def get_admin_menu_keyboard(user_id: int):
         [InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")],
     ])
 
+
+def get_language_keyboard(user_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:set:ru")],
+        [InlineKeyboardButton(text="🇬🇧 English", callback_data="lang:set:en")],
+        [InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")],
+    ])
+
+
 def sanitize_filename(name: str) -> str:
     clean = re.sub(r'[\\/*?:"<>|]', "_", name).strip()
     clean = re.sub(r"\s+", " ", clean)
     return clean[:60] if clean else "material"
+
 
 async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: list, archive_title: str):
     if not files_to_download:
@@ -1226,6 +1727,7 @@ async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: lis
     except Exception:
         pass
 
+
 # ============================================================
 # RENDER HELPERS
 # ============================================================
@@ -1233,14 +1735,19 @@ async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: lis
 async def format_file_info(f: dict, cats: list, user_id: int) -> str:
     title = f.get("caption") or "—"
     summary = (f.get("summary") or "").strip()
+    title = await localize(title, user_id)
+    if summary:
+        summary = await localize(summary, user_id)
+    cats_tr = await localize_list(cats, user_id)
     lines = [t(user_id, "file_card_title", title=html.escape(title))]
-    if cats:
-        lines.append(t(user_id, "file_card_section", cats=html.escape(" · ".join(cats))))
+    if cats_tr:
+        lines.append(t(user_id, "file_card_section", cats=html.escape(" · ".join(cats_tr))))
     diff_key = f"admin_diff_{f.get('difficulty') or 'medium'}"
     lines.append(t(user_id, "file_card_diff", diff=t(user_id, diff_key)))
     tags = " ".join(f.get("tags") or [])
     if tags:
-        lines.append(t(user_id, "file_card_tags", tags=html.escape(tags)))
+        tags_tr = await localize(tags, user_id)
+        lines.append(t(user_id, "file_card_tags", tags=html.escape(tags_tr)))
     if summary:
         lines.append(t(user_id, "file_card_summary", summary=html.escape(summary)))
     uid_str = str(user_id)
@@ -1253,6 +1760,7 @@ async def format_file_info(f: dict, cats: list, user_id: int) -> str:
         lines.append(f"\n👍 {len(likes)} · 💬 {len(comments)}")
     return "\n".join(lines)
 
+
 async def show_file_card(target, uid: str, user_id: int) -> bool:
     f = get_file_by_uid(uid)
     if not f:
@@ -1260,6 +1768,7 @@ async def show_file_card(target, uid: str, user_id: int) -> bool:
     text = await format_file_info(f, get_file_categories(uid), user_id)
     await safe_send_or_edit(target, text, reply_markup=get_file_view_keyboard(uid, user_id))
     return True
+
 
 async def show_task(target, date_str: str, task_idx: int, user_id: int = None):
     if user_id is None:
@@ -1272,6 +1781,7 @@ async def show_task(target, date_str: str, task_idx: int, user_id: int = None):
         await safe_send_or_edit(target, t(user_id, "task_missing"), reply_markup=markup)
         return
     task_text = (task.get("text") or "").strip() or t(user_id, "task_text_on_photo")
+    task_text = await localize(task_text, user_id)
     text = t(user_id, "task_of_day",
              date=date_str, num=task_idx + 1, total=total,
              text=html.escape(task_text))
@@ -1281,12 +1791,14 @@ async def show_task(target, date_str: str, task_idx: int, user_id: int = None):
                             reply_markup=get_task_keyboard(date_str, task_idx, user_id),
                             photo_id=task.get("photo_file_id"))
 
+
 async def render_mustread(target, user_id: int):
     files = [f for f in get_catalog_files_list() if f.get("must_read")]
     builder = []
     if files:
         for f in files:
-            builder.append([InlineKeyboardButton(text=f"⭐ {f['caption'][:55]}",
+            caption = await localize(f['caption'], user_id)
+            builder.append([InlineKeyboardButton(text=f"⭐ {caption[:55]}",
                                                  callback_data=f"file:view:{f['uid']}")])
             if is_admin(user_id):
                 builder.append([InlineKeyboardButton(text=t(user_id, "mustread_remove_btn"),
@@ -1297,10 +1809,12 @@ async def render_mustread(target, user_id: int):
     builder.append([InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")])
     await safe_send_or_edit(target, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
 
+
 async def show_links_section(target, sec_key: str, user_id: int):
     sec = DATABASE.get("links", {}).get(sec_key, {})
     items = [it for it in sec.get("items", []) if (it.get("url") or "").strip()]
-    title = html.escape(sec.get("title", sec_key))
+    title_tr = await localize(sec.get("title", sec_key), user_id)
+    title = html.escape(title_tr)
     if items:
         lines = [f"🔗 <b>{title}</b>\n"]
         for i, item in enumerate(items, 1):
@@ -1309,7 +1823,8 @@ async def show_links_section(target, sec_key: str, user_id: int):
                 raw_url = f"https://{raw_url}"
             url = html.escape(raw_url, quote=True)
             item_title = item.get("title") or raw_url
-            lines.append(f'{i}. <a href="{url}">{html.escape(item_title)}</a>')
+            item_title_tr = await localize(item_title, user_id)
+            lines.append(f'{i}. <a href="{url}">{html.escape(item_title_tr)}</a>')
         text = "\n".join(lines)
     else:
         text = t(user_id, "links_empty_section", title=title)
@@ -1317,7 +1832,9 @@ async def show_links_section(target, sec_key: str, user_id: int):
             text += "\n\n<i>Секция пуста. Добавьте ссылку кнопкой ниже.</i>"
     await safe_send_or_edit(target, text, reply_markup=get_links_section_keyboard(sec_key, user_id))
 
+
 ARCHIVE_PAGE_SIZE = 8
+
 
 async def render_archive(target, page: int, user_id: int):
     dates = get_dates_sorted()
@@ -1344,6 +1861,7 @@ async def render_archive(target, page: int, user_id: int):
     rows.append([InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")])
     text = t(user_id, "task_archive_title", n=len(dates), page=page + 1, total=total_pages)
     await safe_send_or_edit(target, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
 
 # ============================================================
 # BROADCAST
@@ -1381,6 +1899,7 @@ async def broadcast_task(date_str: str, task_idx: int, report_msg: types.Message
         channel_ok = False
         logger.warning("Channel post failed: %s", e)
 
+    text_en_cache = {"value": None}
     sem = asyncio.Semaphore(15)
     sent = 0
     failed = 0
@@ -1388,8 +1907,27 @@ async def broadcast_task(date_str: str, task_idx: int, report_msg: types.Message
 
     async def _send_one(uid_str: str):
         nonlocal sent, failed
-        text = text_ru
-        markup = markup_ru
+        user_lang = DATABASE["users"].get(uid_str, {}).get("language", "ru")
+        if user_lang == "en":
+            if text_en_cache["value"] is None:
+                translated = await translate_text(task_text, "en")
+                text_en_cache["value"] = (
+                    f"🎯 <b>Task of the day</b> · {date_str}\n"
+                    f"<i>№ {task_idx + 1} of {tasks_total}</i>\n\n"
+                    f"{html.escape(translated)}"
+                )
+                if task.get("tags"):
+                    text_en_cache["value"] += f"\n\n🏷 " + " ".join(html.escape(x) for x in task["tags"])
+            text = text_en_cache["value"]
+            markup = None
+            if BOT_USERNAME:
+                markup = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="🤖 Solve in bot",
+                                         url=f"https://t.me/{BOT_USERNAME}?start=task_{date_str}_{task_idx}")
+                ]])
+        else:
+            text = text_ru
+            markup = markup_ru
 
         try:
             if task.get("photo_file_id"):
@@ -1415,7 +1953,7 @@ async def broadcast_task(date_str: str, task_idx: int, report_msg: types.Message
         except Exception:
             async with lock:
                 failed += 1
-        await asyncio.sleep(0.04)
+        await asyncio.sleep(0.05)
 
     async def _guarded(uid_str):
         async with sem:
@@ -1428,6 +1966,7 @@ async def broadcast_task(date_str: str, task_idx: int, report_msg: types.Message
         if not channel_ok:
             report += t(report_msg.from_user.id, "task_sol_bcast_channel_fail")
         await report_msg.answer(report)
+
 
 async def announce_file_to_channel(entry: dict, cat_titles: list):
     if not entry.get("file_id"):
@@ -1461,6 +2000,7 @@ async def announce_file_to_channel(entry: dict, cat_titles: list):
         except Exception:
             logger.warning("Channel file message also failed")
 
+
 # ============================================================
 # TAG TOGGLE
 # ============================================================
@@ -1487,8 +2027,9 @@ async def toggle_tag_by_index(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(selected_tags=selected)
     return selected, tag, removed
 
+
 # ============================================================
-# COMMANDS & REGISTRATION
+# COMMANDS
 # ============================================================
 
 @dp.message(Command("start"))
@@ -1516,13 +2057,23 @@ async def cmd_start(message: types.Message, command: CommandObject, state: FSMCo
     uid_str = str(message.from_user.id)
     user = DATABASE.get("users", {}).get(uid_str, {})
 
-    if not user.get("nickname"):
-        await state.set_state(Registration.waiting_for_nickname)
+    if not user.get("language"):
+        await state.set_state(Registration.choosing_language)
         await state.update_data(after_register=target)
         await message.answer(
             t(message.from_user.id, "hello_new", name=html.escape(message.from_user.first_name or "")) + "\n\n" +
-            t(message.from_user.id, "ask_nickname")
+            t(message.from_user.id, "choose_language"),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🇷🇺 Русский", callback_data="reg:lang:ru")],
+                [InlineKeyboardButton(text="🇬🇧 English", callback_data="reg:lang:en")],
+            ]),
         )
+        return
+
+    if not user.get("nickname"):
+        await state.set_state(Registration.waiting_for_nickname)
+        await state.update_data(after_register=target)
+        await message.answer(t(message.from_user.id, "ask_nickname"))
         return
 
     greeting = t(message.from_user.id, "welcome_back", nick=html.escape(user.get("nickname")))
@@ -1538,6 +2089,23 @@ async def cmd_start(message: types.Message, command: CommandObject, state: FSMCo
     await safe_send_or_edit(message, welcome_text,
                             reply_markup=get_main_menu_keyboard(message.from_user.id))
 
+
+@dp.callback_query(StateFilter(Registration.choosing_language), F.data.startswith("reg:lang:"))
+async def cb_reg_lang(callback: types.CallbackQuery, state: FSMContext):
+    lang = callback.data.split(":")[2]
+    if lang not in ("ru", "en"):
+        await callback.answer("Error", show_alert=True)
+        return
+    uid_str = str(callback.from_user.id)
+    DATABASE.setdefault("users", {}).setdefault(uid_str, {})
+    DATABASE["users"][uid_str]["language"] = lang
+    await db_collection.update_one({"_id": DB_DOC_ID},
+                                   {"$set": {f"data.users.{uid_str}.language": lang}}, upsert=True)
+    await callback.answer(t(callback.from_user.id, "lang_set"))
+    await state.set_state(Registration.waiting_for_nickname)
+    await safe_send_or_edit(callback, t(callback.from_user.id, "ask_nickname"))
+
+
 @dp.message(StateFilter(Registration.waiting_for_nickname), F.text)
 async def process_nickname(message: types.Message, state: FSMContext):
     nick = message.text.strip()
@@ -1550,7 +2118,8 @@ async def process_nickname(message: types.Message, state: FSMContext):
     uid_str = str(message.from_user.id)
     DATABASE.setdefault("users", {}).setdefault(uid_str, {})
     DATABASE["users"][uid_str]["nickname"] = nick
-    await save_db(DATABASE)
+    await db_collection.update_one({"_id": DB_DOC_ID},
+                                   {"$set": {f"data.users.{uid_str}.nickname": nick}}, upsert=True)
     data = await state.get_data()
     target = data.get("after_register")
     await state.clear()
@@ -1564,22 +2133,26 @@ async def process_nickname(message: types.Message, state: FSMContext):
     await message.answer(t(message.from_user.id, "menu_title"),
                          reply_markup=get_main_menu_keyboard(message.from_user.id))
 
+
 @dp.message(StateFilter(Registration.waiting_for_nickname))
 async def process_nickname_any(message: types.Message, state: FSMContext):
     if message.text:
         return
     await message.answer(t(message.from_user.id, "ask_nickname"))
 
+
 @dp.message(Command("nickname"))
 async def cmd_change_nickname(message: types.Message, state: FSMContext):
     await state.set_state(ChangeNicknameState.waiting_new_name)
     await message.answer(t(message.from_user.id, "change_nickname"))
+
 
 @dp.callback_query(F.data == "user:chname")
 async def cb_user_chname(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ChangeNicknameState.waiting_new_name)
     await callback.message.answer(t(callback.from_user.id, "change_nickname"))
     await callback.answer()
+
 
 @dp.message(StateFilter(ChangeNicknameState.waiting_new_name), F.text)
 async def process_new_nickname(message: types.Message, state: FSMContext):
@@ -1593,21 +2166,12 @@ async def process_new_nickname(message: types.Message, state: FSMContext):
     uid_str = str(message.from_user.id)
     DATABASE.setdefault("users", {}).setdefault(uid_str, {})
     DATABASE["users"][uid_str]["nickname"] = nick
-    await save_db(DATABASE)
+    await db_collection.update_one({"_id": DB_DOC_ID},
+                                   {"$set": {f"data.users.{uid_str}.nickname": nick}}, upsert=True)
     await state.clear()
     await message.answer(t(message.from_user.id, "nickname_updated", nick=html.escape(nick)),
                          reply_markup=get_main_menu_keyboard(message.from_user.id))
 
-@dp.message(Command("task"))
-async def cmd_task(message: types.Message, state: FSMContext):
-    await state.clear()
-    daily = DATABASE.get("daily_tasks", {})
-    today = get_yerevan_date()
-    date_str = today if (today in daily and daily[today].get("tasks")) else (get_dates_sorted()[0] if get_dates_sorted() else None)
-    if not date_str:
-        await safe_send_or_edit(message, t(message.from_user.id, "task_no_tasks"), reply_markup=get_main_menu_keyboard(message.from_user.id))
-        return
-    await show_task(message, date_str, 0, message.from_user.id)
 
 @dp.message(Command("catalog"))
 async def cmd_catalog(message: types.Message, state: FSMContext):
@@ -1617,15 +2181,49 @@ async def cmd_catalog(message: types.Message, state: FSMContext):
     await safe_send_or_edit(message, t(message.from_user.id, "catalog_title"),
                             reply_markup=await get_catalog_keyboard(message.from_user.id))
 
+
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(t(message.from_user.id, "cancel_done"),
                          reply_markup=get_main_menu_keyboard(message.from_user.id))
 
+
+@dp.message(Command("language", "lang"))
+async def cmd_language(message: types.Message, state: FSMContext):
+    await state.clear()
+    await safe_send_or_edit(message, t(message.from_user.id, "choose_language"),
+                            reply_markup=get_language_keyboard(message.from_user.id))
+
+
 # ============================================================
-# MAIN MENU CALLBACKS
+# LANGUAGE / MAIN MENU
 # ============================================================
+
+@dp.callback_query(F.data == "lang:menu")
+async def cb_lang_menu(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await safe_send_or_edit(callback, t(callback.from_user.id, "choose_language"),
+                            reply_markup=get_language_keyboard(callback.from_user.id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("lang:set:"))
+async def cb_lang_set(callback: types.CallbackQuery, state: FSMContext):
+    lang = callback.data.split(":")[2]
+    if lang not in ("ru", "en"):
+        await callback.answer("Error", show_alert=True)
+        return
+    uid_str = str(callback.from_user.id)
+    DATABASE.setdefault("users", {}).setdefault(uid_str, {})
+    DATABASE["users"][uid_str]["language"] = lang
+    await db_collection.update_one({"_id": DB_DOC_ID},
+                                   {"$set": {f"data.users.{uid_str}.language": lang}}, upsert=True)
+    await state.clear()
+    await callback.answer(t(callback.from_user.id, "lang_set"))
+    await safe_send_or_edit(callback, t(callback.from_user.id, "menu_title"),
+                            reply_markup=get_main_menu_keyboard(callback.from_user.id))
+
 
 @dp.callback_query(F.data == "menu:main")
 async def cb_main_menu(callback: types.CallbackQuery, state: FSMContext):
@@ -1634,9 +2232,11 @@ async def cb_main_menu(callback: types.CallbackQuery, state: FSMContext):
                             reply_markup=get_main_menu_keyboard(callback.from_user.id))
     await callback.answer()
 
+
 @dp.callback_query(F.data == "noop")
 async def cb_noop(callback: types.CallbackQuery):
     await callback.answer()
+
 
 @dp.callback_query(F.data == "menu:catalog")
 async def cb_catalog(callback: types.CallbackQuery):
@@ -1644,17 +2244,17 @@ async def cb_catalog(callback: types.CallbackQuery):
                             reply_markup=await get_catalog_keyboard(callback.from_user.id))
     await callback.answer()
 
+
 # ============================================================
 # CATALOG & CATEGORIES MANAGEMENT
 # ============================================================
 
 @dp.callback_query(F.data == "admin:cats")
-async def cb_admin_cats(callback: types.CallbackQuery, state: FSMContext = None):
+async def cb_admin_cats(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
         return
-    if state:
-        await state.clear()
+    await state.clear()
     cats = DATABASE.get("categories", {})
     lines = ["📂 <b>Управление разделами каталога</b>\n"]
     rows = []
@@ -1666,6 +2266,7 @@ async def cb_admin_cats(callback: types.CallbackQuery, state: FSMContext = None)
     rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_admin"), callback_data="admin:main")])
     await safe_send_or_edit(callback, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
+
 
 @dp.callback_query(F.data == "admin:add_cat")
 async def cb_admin_add_cat(callback: types.CallbackQuery, state: FSMContext):
@@ -1680,6 +2281,7 @@ async def cb_admin_add_cat(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
 @dp.message(StateFilter(AdminAddCategory.waiting_for_title), F.text)
 async def process_add_category_title(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -1688,6 +2290,7 @@ async def process_add_category_title(message: types.Message, state: FSMContext):
     if not title:
         await message.answer("⚠️ Введите название раздела:")
         return
+    # Generate clean unique key
     base_key = re.sub(r"[^a-zA-Z0-9_]", "", title.lower())[:20]
     if not base_key:
         base_key = f"cat_{uuid.uuid4().hex[:6]}"
@@ -1706,8 +2309,9 @@ async def process_add_category_title(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Раздел «{html.escape(title)}» успешно создан!",
                          reply_markup=await get_catalog_keyboard(message.from_user.id))
 
+
 @dp.callback_query(F.data.startswith("admin:delcat:"))
-async def cb_admin_delcat(callback: types.CallbackQuery, state: FSMContext = None):
+async def cb_admin_delcat(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
         return
@@ -1720,7 +2324,8 @@ async def cb_admin_delcat(callback: types.CallbackQuery, state: FSMContext = Non
     del cats[cat_key]
     await save_db(DATABASE)
     await callback.message.answer(f"🗑 Раздел «{html.escape(cat_title)}» удалён.")
-    await cb_admin_cats(callback)
+    await cb_admin_cats(callback, None)
+
 
 @dp.callback_query(F.data == "catalog:zip_all")
 async def cb_catalog_zip_all(callback: types.CallbackQuery):
@@ -1749,6 +2354,58 @@ async def cb_catalog_zip_all(callback: types.CallbackQuery):
         archive_title="Library"
     )
 
+
+@dp.callback_query(F.data.startswith("cat:zip:"))
+async def cb_cat_zip(callback: types.CallbackQuery):
+    cat_key = callback.data.split(":", 2)[2]
+    cat_data = DATABASE.get("categories", {}).get(cat_key, {})
+    files = cat_data.get("files", [])
+    files_to_download = []
+    cat_title = cat_data.get("title", cat_key)
+    for f in files:
+        if f.get("file_id"):
+            files_to_download.append({
+                "file_id": f["file_id"],
+                "category": cat_title,
+                "filename": f.get("caption") or "material",
+                "uid": f.get("file_unique_id"),
+            })
+    await callback.answer("⏳ Собираем раздел...")
+    await create_and_send_zip(
+        chat_id=callback.message.chat.id,
+        user_id=callback.from_user.id,
+        files_to_download=files_to_download,
+        archive_title=cat_key
+    )
+
+
+@dp.message(Command("zip", "download_all"))
+async def cmd_download_zip(message: types.Message):
+    all_files = []
+    seen = set()
+    for cat_key, cat_data in DATABASE.get("categories", {}).items():
+        cat_title = cat_data.get("title", cat_key)
+        for f in cat_data.get("files", []):
+            uid = f.get("file_unique_id")
+            if uid and uid in seen:
+                continue
+            if uid:
+                seen.add(uid)
+            if f.get("file_id"):
+                all_files.append({
+                    "file_id": f["file_id"],
+                    "category": cat_title,
+                    "filename": f.get("caption") or "material",
+                    "uid": uid,
+                })
+    await create_and_send_zip(
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        files_to_download=all_files,
+        archive_title="Library"
+    )
+
+
 @dp.callback_query(F.data.startswith("cat:"))
 async def cb_category(callback: types.CallbackQuery):
     cat_key = callback.data.split(":", 1)[1]
@@ -1761,14 +2418,17 @@ async def cb_category(callback: types.CallbackQuery):
     files = cat_data.get("files", [])
     builder = []
     for f in files:
+        cap = await localize(f.get("caption") or "—", callback.from_user.id)
         builder.append([InlineKeyboardButton(
-            text=f"📖 {f.get('caption') or '—'[:55]}",
+            text=f"📖 {cap[:55]}",
             callback_data=f"file:view:{f.get('file_unique_id')}",
         )])
     builder.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_catalog"), callback_data="menu:catalog")])
-    text = f"<b>{html.escape(cat_data.get('title', cat_key))}</b>\nМатериалов: {len(files)}"
+    cat_title_tr = await localize(cat_data.get('title', cat_key), callback.from_user.id)
+    text = f"<b>{html.escape(cat_title_tr)}</b>\nМатериалов: {len(files)}"
     await safe_send_or_edit(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("file:view:"))
 async def cb_file_view(callback: types.CallbackQuery):
@@ -1778,6 +2438,7 @@ async def cb_file_view(callback: types.CallbackQuery):
         return
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("file:get:"))
 async def cb_file_get(callback: types.CallbackQuery):
     uid = callback.data.split(":", 2)[2]
@@ -1786,15 +2447,17 @@ async def cb_file_get(callback: types.CallbackQuery):
         await callback.answer(t(callback.from_user.id, "no_file"), show_alert=True)
         return
     try:
+        cap = await localize(f.get("caption") or "—", callback.from_user.id)
         await callback.message.answer_document(
             document=f.get("file_id"),
-            caption=f"📖 <b>{html.escape(f.get('caption') or '—')}</b>",
+            caption=f"📖 <b>{html.escape(cap)}</b>",
             parse_mode=ParseMode.HTML,
         )
         await callback.answer(t(callback.from_user.id, "file_sent"))
     except Exception as e:
         logger.exception("Failed to send file %s: %s", uid, e)
         await callback.answer(t(callback.from_user.id, "file_send_fail"), show_alert=True)
+
 
 @dp.callback_query(F.data.startswith("file:share:"))
 async def cb_file_share(callback: types.CallbackQuery):
@@ -1818,6 +2481,7 @@ async def cb_file_share(callback: types.CallbackQuery):
         logger.exception("Share failed")
         await callback.answer("Ошибка", show_alert=True)
 
+
 @dp.callback_query(F.data.startswith("fav:toggle:"))
 async def cb_fav_toggle(callback: types.CallbackQuery):
     uid = callback.data.split(":", 2)[2]
@@ -1837,11 +2501,13 @@ async def cb_fav_toggle(callback: types.CallbackQuery):
     else:
         favs.append(uid)
         msg = t(callback.from_user.id, "fav_added")
-    await save_db(DATABASE)
+    await db_collection.update_one({"_id": DB_DOC_ID},
+                                   {"$set": {f"data.users.{uid_str}.favorites": favs}}, upsert=True)
     if await show_file_card(callback, uid, callback.from_user.id):
         await callback.answer(msg)
     else:
         await callback.answer(t(callback.from_user.id, "no_file"), show_alert=True)
+
 
 @dp.callback_query(F.data.startswith("file:like:"))
 async def cb_file_like(callback: types.CallbackQuery):
@@ -1861,6 +2527,7 @@ async def cb_file_like(callback: types.CallbackQuery):
     await show_file_card(callback, uid, callback.from_user.id)
     await callback.answer(f"👍 {new_count}")
 
+
 @dp.callback_query(F.data.startswith("file:similar:"))
 async def cb_file_similar(callback: types.CallbackQuery):
     uid = callback.data.split(":", 2)[2]
@@ -1870,12 +2537,14 @@ async def cb_file_similar(callback: types.CallbackQuery):
         return
     rows = []
     for f in similar:
-        rows.append([InlineKeyboardButton(text=f"📖 {f.get('caption') or '—'[:55]}",
+        cap = await localize(f.get("caption") or "—", callback.from_user.id)
+        rows.append([InlineKeyboardButton(text=f"📖 {cap[:55]}",
                                           callback_data=f"file:view:{f['uid']}")])
     rows.append([InlineKeyboardButton(text="⬅️ К материалу", callback_data=f"file:view:{uid}")])
     text = f"🔍 <b>Похожие материалы</b> ({len(similar)})"
     await safe_send_or_edit(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("file:comments:"))
 async def cb_file_comments(callback: types.CallbackQuery, state: FSMContext):
@@ -1900,6 +2569,7 @@ async def cb_file_comments(callback: types.CallbackQuery, state: FSMContext):
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("file:comment:"))
 async def cb_file_comment_start(callback: types.CallbackQuery, state: FSMContext):
     uid = callback.data.split(":", 2)[2]
@@ -1910,6 +2580,7 @@ async def cb_file_comment_start(callback: types.CallbackQuery, state: FSMContext
     await state.update_data(comment_uid=uid)
     await callback.message.answer("✍️ Отправьте ваш комментарий (до 500 символов):\n/cancel — отмена")
     await callback.answer()
+
 
 @dp.message(StateFilter(FileComment.waiting), F.text)
 async def process_file_comment(message: types.Message, state: FSMContext):
@@ -1940,6 +2611,7 @@ async def process_file_comment(message: types.Message, state: FSMContext):
     await message.answer("✅ Комментарий добавлен.")
     await show_file_card(message, uid, message.from_user.id)
 
+
 @dp.callback_query(F.data.startswith("file:note:"))
 async def cb_file_note(callback: types.CallbackQuery, state: FSMContext):
     uid = callback.data.split(":", 2)[2]
@@ -1959,6 +2631,7 @@ async def cb_file_note(callback: types.CallbackQuery, state: FSMContext):
     else:
         await callback.message.answer("📝 Отправьте заметку к этому материалу (видна только вам):")
     await callback.answer()
+
 
 @dp.message(StateFilter(FileNote.waiting), F.text)
 async def process_file_note(message: types.Message, state: FSMContext):
@@ -1982,8 +2655,9 @@ async def process_file_note(message: types.Message, state: FSMContext):
     await message.answer(msg)
     await show_file_card(message, uid, message.from_user.id)
 
+
 # ============================================================
-# TAG SEARCH
+# TAG SEARCH FOR MATERIALS & DAILY TASKS
 # ============================================================
 
 @dp.callback_query(F.data == "search:main")
@@ -1993,10 +2667,12 @@ async def cb_search_main(callback: types.CallbackQuery, state: FSMContext):
     markup = await get_tag_toggle_keyboard([], "search:tag", "search:go",
                                            callback.from_user.id,
                                            t(callback.from_user.id, "search_reset"), "search:reset")
+    # Add explicit button to search tasks as well
     markup.inline_keyboard.insert(-2, [InlineKeyboardButton(text=t(callback.from_user.id, "search_tasks_btn"),
                                                             callback_data="search:tasks")])
     await safe_send_or_edit(callback, t(callback.from_user.id, "search_title"), reply_markup=markup)
     await callback.answer()
+
 
 @dp.callback_query(StateFilter(TagSearch.selecting), F.data.startswith("search:tag:"))
 async def cb_search_tag(callback: types.CallbackQuery, state: FSMContext):
@@ -2013,6 +2689,7 @@ async def cb_search_tag(callback: types.CallbackQuery, state: FSMContext):
                             reply_markup=markup)
     await callback.answer(t(callback.from_user.id, "search_tag_off" if removed else "search_tag_on"))
 
+
 @dp.callback_query(F.data == "search:reset")
 async def cb_search_reset(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(selected_tags=[])
@@ -2024,12 +2701,14 @@ async def cb_search_reset(callback: types.CallbackQuery, state: FSMContext):
     await safe_send_or_edit(callback, t(callback.from_user.id, "search_reset_done"), reply_markup=markup)
     await callback.answer()
 
+
 async def show_search_results(target, results, header: str, user_id: int):
     if results:
         text = f"{header}\n\n" + t(user_id, "search_found", n=len(results))
         rows = []
         for f in results[:20]:
-            rows.append([InlineKeyboardButton(text=f"📖 {f['caption'][:55]}",
+            cap = await localize(f['caption'], user_id)
+            rows.append([InlineKeyboardButton(text=f"📖 {cap[:55]}",
                                               callback_data=f"file:view:{f['uid']}")])
     else:
         text = f"{header}\n\n" + t(user_id, "search_nothing")
@@ -2037,6 +2716,7 @@ async def show_search_results(target, results, header: str, user_id: int):
     rows.append([InlineKeyboardButton(text=t(user_id, "search_new"), callback_data="search:main")])
     rows.append([InlineKeyboardButton(text=t(user_id, "back_menu"), callback_data="menu:main")])
     await safe_send_or_edit(target, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
 
 @dp.callback_query(F.data == "search:go")
 async def cb_search_go(callback: types.CallbackQuery, state: FSMContext):
@@ -2054,9 +2734,11 @@ async def cb_search_go(callback: types.CallbackQuery, state: FSMContext):
             scored.append((matches, f))
     scored.sort(key=lambda x: -x[0])
     results = [f for _, f in scored]
-    header = t(callback.from_user.id, "search_tagged", tags=html.escape(' '.join(selected)))
+    tags_tr = await localize_list(selected, callback.from_user.id)
+    header = t(callback.from_user.id, "search_tagged", tags=html.escape(' '.join(tags_tr)))
     await show_search_results(callback, results, header, callback.from_user.id)
     await callback.answer()
+
 
 @dp.callback_query(F.data == "search:tasks")
 async def cb_search_tasks(callback: types.CallbackQuery, state: FSMContext):
@@ -2073,7 +2755,8 @@ async def cb_search_tasks(callback: types.CallbackQuery, state: FSMContext):
             task_tags = {x.lower() for x in task.get("tags", [])}
             if sel_lower & task_tags:
                 results.append((date_str, idx, task))
-    header = f"🎯 <b>Задачи дня по тегам:</b> {html.escape(' '.join(selected))}\n"
+    tags_tr = await localize_list(selected, callback.from_user.id)
+    header = f"🎯 <b>Задачи дня по тегам:</b> {html.escape(' '.join(tags_tr))}\n"
     rows = []
     if results:
         header += f"Найдено задач: <b>{len(results)}</b>"
@@ -2088,6 +2771,8 @@ async def cb_search_tasks(callback: types.CallbackQuery, state: FSMContext):
     await safe_send_or_edit(callback, header, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
+
+# Dedicated entry for tasks by tag
 @dp.callback_query(F.data == "tasktagsearch:main")
 async def cb_tasktagsearch_main(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(TaskTagSearch.selecting)
@@ -2098,6 +2783,7 @@ async def cb_tasktagsearch_main(callback: types.CallbackQuery, state: FSMContext
     text = "🎯 <b>Поиск задач дня по тегам</b>\n\nВыберите тег(и) и нажмите «💾 OK»:"
     await safe_send_or_edit(callback, text, reply_markup=markup)
     await callback.answer()
+
 
 @dp.callback_query(StateFilter(TaskTagSearch.selecting), F.data.startswith("tasksearchtag:"))
 async def cb_tasksearchtag_toggle(callback: types.CallbackQuery, state: FSMContext):
@@ -2125,7 +2811,8 @@ async def cb_tasksearchtag_toggle(callback: types.CallbackQuery, state: FSMConte
                 task_tags = {x.lower() for x in task.get("tags", [])}
                 if sel_lower & task_tags:
                     results.append((date_str, idx, task))
-        header = f"🎯 <b>Задачи дня по тегам:</b> {html.escape(' '.join(selected))}\n"
+        tags_tr = await localize_list(selected, callback.from_user.id)
+        header = f"🎯 <b>Задачи дня по тегам:</b> {html.escape(' '.join(tags_tr))}\n"
         rows = []
         if results:
             header += f"Найдено задач: <b>{len(results)}</b>"
@@ -2141,6 +2828,7 @@ async def cb_tasksearchtag_toggle(callback: types.CallbackQuery, state: FSMConte
         await callback.answer()
         return
 
+    # Toggle tag index
     res = await toggle_tag_by_index(callback, state)
     if not res:
         return
@@ -2151,6 +2839,7 @@ async def cb_tasksearchtag_toggle(callback: types.CallbackQuery, state: FSMConte
     await safe_send_or_edit(callback, f"🎯 Выбрано тегов: {len(selected)}", reply_markup=markup)
     await callback.answer(t(callback.from_user.id, "search_tag_off" if removed else "search_tag_on"))
 
+
 @dp.message(StateFilter(TagSearch.selecting), F.text)
 async def process_search_text(message: types.Message, state: FSMContext):
     raw_q = message.text.strip()
@@ -2158,15 +2847,23 @@ async def process_search_text(message: types.Message, state: FSMContext):
     if not q:
         await message.answer("?")
         return
+    translated_query = None
+    if get_user_lang(message.from_user.id) == "en":
+        try:
+            translated_query = (await translate_text(raw_q.lstrip("#"), "ru")).lower().lstrip("#")
+        except Exception:
+            translated_query = None
+
     files = get_catalog_files_list()
     results = []
     for f in files:
         hay = (f["caption"] + " " + " ".join(f.get("tags", [])) + " " + (f.get("summary") or "")).lower()
-        if q in hay:
+        if q in hay or (translated_query and translated_query in hay):
             results.append(f)
     await state.clear()
     header = t(message.from_user.id, "search_query", q=html.escape(raw_q))
     await show_search_results(message, results, header, message.from_user.id)
+
 
 # ============================================================
 # TAG DATABASE
@@ -2183,6 +2880,7 @@ async def render_tag_manager(target, user_id: int):
     text = t(user_id, "tag_db_title", n=len(tags))
     await safe_send_or_edit(target, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
+
 @dp.callback_query(F.data == "admin:tags")
 async def cb_admin_tags(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -2192,6 +2890,7 @@ async def cb_admin_tags(callback: types.CallbackQuery, state: FSMContext):
     await render_tag_manager(callback, callback.from_user.id)
     await callback.answer()
 
+
 @dp.callback_query(F.data == "tagadd")
 async def cb_tagadd(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -2200,6 +2899,7 @@ async def cb_tagadd(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(AddTag.waiting_for_text)
     await callback.message.answer(t(callback.from_user.id, "tag_ask_new"))
     await callback.answer()
+
 
 @dp.message(StateFilter(AddTag.waiting_for_text), F.text)
 async def process_add_tag(message: types.Message, state: FSMContext):
@@ -2215,6 +2915,7 @@ async def process_add_tag(message: types.Message, state: FSMContext):
         await message.answer(t(message.from_user.id, "tag_added", tags=html.escape(' '.join(added))))
     else:
         await message.answer(t(message.from_user.id, "tag_nothing_added"))
+
 
 @dp.callback_query(F.data.startswith("tagdel:"))
 async def cb_tagdel(callback: types.CallbackQuery):
@@ -2234,6 +2935,7 @@ async def cb_tagdel(callback: types.CallbackQuery):
         await callback.answer(t(callback.from_user.id, "tag_removed", tag=removed))
     else:
         await callback.answer(t(callback.from_user.id, "tag_missing"), show_alert=True)
+
 
 @dp.callback_query(F.data == "tagrename:start")
 async def cb_tagrename_start(callback: types.CallbackQuery, state: FSMContext):
@@ -2258,6 +2960,7 @@ async def cb_tagrename_start(callback: types.CallbackQuery, state: FSMContext):
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
+
 @dp.callback_query(StateFilter(RenameTag.choosing), F.data.startswith("tagren:"))
 async def cb_tagrename_pick(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -2277,6 +2980,7 @@ async def cb_tagrename_pick(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(RenameTag.waiting_for_new_name)
     await safe_send_or_edit(callback, t(callback.from_user.id, "tag_rename_ask", tag=html.escape(old_tag)))
     await callback.answer()
+
 
 @dp.message(StateFilter(RenameTag.waiting_for_new_name), F.text)
 async def process_tagrename(message: types.Message, state: FSMContext):
@@ -2309,8 +3013,9 @@ async def process_tagrename(message: types.Message, state: FSMContext):
     await message.answer(t(message.from_user.id, "menu_title"),
                          reply_markup=get_main_menu_keyboard(message.from_user.id))
 
+
 # ============================================================
-# FAVORITES / RATING / MUST-READ / CHALLENGE
+# FAVORITES / RATING / MUST-READ / RANDOM
 # ============================================================
 
 @dp.callback_query(F.data == "favorites:main")
@@ -2322,7 +3027,8 @@ async def cb_favorites(callback: types.CallbackQuery, state: FSMContext):
     for fuid in favs:
         f = get_file_by_uid(fuid)
         if f:
-            builder.append([InlineKeyboardButton(text=f"❤️ {f.get('caption') or '—'[:55]}",
+            cap = await localize(f.get('caption') or "—", callback.from_user.id)
+            builder.append([InlineKeyboardButton(text=f"❤️ {cap[:55]}",
                                                  callback_data=f"file:view:{fuid}")])
     text = t(callback.from_user.id, "favorites_title")
     if not builder:
@@ -2333,6 +3039,7 @@ async def cb_favorites(callback: types.CallbackQuery, state: FSMContext):
     builder.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_menu"), callback_data="menu:main")])
     await safe_send_or_edit(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
+
 
 @dp.callback_query(F.data == "favorites:export")
 async def cb_favorites_export(callback: types.CallbackQuery):
@@ -2356,6 +3063,7 @@ async def cb_favorites_export(callback: types.CallbackQuery):
                                    filename=f"favorites_{uid_str}.json")
     await callback.message.answer_document(file, caption=f"❤️ Ваше избранное ({len(items)})")
     await callback.answer("📤 Экспортировано")
+
 
 @dp.callback_query(F.data == "rating:main")
 async def cb_rating(callback: types.CallbackQuery, state: FSMContext):
@@ -2387,11 +3095,13 @@ async def cb_rating(callback: types.CallbackQuery, state: FSMContext):
     await safe_send_or_edit(callback, "\n".join(lines), reply_markup=markup)
     await callback.answer()
 
+
 @dp.callback_query(F.data == "mustread:main")
 async def cb_mustread(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await render_mustread(callback, callback.from_user.id)
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("mustread:toggle:"))
 async def cb_mustread_toggle(callback: types.CallbackQuery):
@@ -2418,6 +3128,7 @@ async def cb_mustread_toggle(callback: types.CallbackQuery):
         await render_mustread(callback, callback.from_user.id)
         await callback.answer(t(callback.from_user.id, "mustread_removed"))
 
+
 @dp.callback_query(F.data == "challenge:main")
 async def cb_challenge(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
@@ -2431,6 +3142,7 @@ async def cb_challenge(callback: types.CallbackQuery, state: FSMContext):
     chosen = random.choice(files)
     await show_file_card(callback, chosen["uid"], callback.from_user.id)
     await callback.answer("🎲")
+
 
 # ============================================================
 # DAILY TASKS
@@ -2455,6 +3167,7 @@ async def cb_task_show(callback: types.CallbackQuery, state: FSMContext):
     await show_task(callback, date_str, 0, callback.from_user.id)
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("task:view:"))
 async def cb_task_view(callback: types.CallbackQuery):
     parts = callback.data.split(":")
@@ -2469,11 +3182,13 @@ async def cb_task_view(callback: types.CallbackQuery):
     await show_task(callback, parts[2], idx, callback.from_user.id)
     await callback.answer()
 
+
 @dp.callback_query(F.data == "task:archive")
 async def cb_task_archive(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await render_archive(callback, 0, callback.from_user.id)
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("arch:page:"))
 async def cb_archive_page(callback: types.CallbackQuery):
@@ -2483,6 +3198,7 @@ async def cb_archive_page(callback: types.CallbackQuery):
         page = 0
     await render_archive(callback, page, callback.from_user.id)
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("task:bcast:"))
 async def cb_task_bcast(callback: types.CallbackQuery):
@@ -2496,6 +3212,7 @@ async def cb_task_bcast(callback: types.CallbackQuery):
     date_str, idx = parts[2], int(parts[3])
     await callback.answer(t(callback.from_user.id, "task_sol_bcast_running"))
     await broadcast_task(date_str, idx, report_msg=callback.message)
+
 
 @dp.callback_query(F.data.startswith("task:del:"))
 async def cb_task_del(callback: types.CallbackQuery):
@@ -2518,6 +3235,7 @@ async def cb_task_del(callback: types.CallbackQuery):
     await save_db(DATABASE)
     await callback.message.answer(f"🗑 Задача {date_str} #{idx+1} удалена.")
     await callback.answer("🗑")
+
 
 @dp.callback_query(F.data.startswith("task:edit:"))
 async def cb_task_edit(callback: types.CallbackQuery, state: FSMContext):
@@ -2551,6 +3269,7 @@ async def cb_task_edit(callback: types.CallbackQuery, state: FSMContext):
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("tedit:text:"))
 async def cb_tedit_text(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -2560,6 +3279,7 @@ async def cb_tedit_text(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(ed_date=date_str, ed_idx=int(idx_s))
     await callback.message.answer("✍️ Отправьте новый текст задачи (или «пропустить», чтобы очистить):")
     await callback.answer()
+
 
 @dp.message(StateFilter(TaskEdit.text), F.text)
 async def process_tedit_text(message: types.Message, state: FSMContext):
@@ -2575,6 +3295,7 @@ async def process_tedit_text(message: types.Message, state: FSMContext):
     await message.answer("✅ Текст обновлён")
     await show_task(message, date_str, idx, message.from_user.id)
 
+
 @dp.callback_query(F.data.startswith("tedit:photo:"))
 async def cb_tedit_photo(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -2584,6 +3305,7 @@ async def cb_tedit_photo(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(ed_date=date_str, ed_idx=int(idx_s))
     await callback.message.answer("🖼 Отправьте новое фото задачи (или «пропустить», чтобы удалить):")
     await callback.answer()
+
 
 @dp.message(StateFilter(TaskEdit.photo))
 async def process_tedit_photo(message: types.Message, state: FSMContext):
@@ -2604,6 +3326,7 @@ async def process_tedit_photo(message: types.Message, state: FSMContext):
     await message.answer("✅ Фото обновлено")
     await show_task(message, date_str, idx, message.from_user.id)
 
+
 @dp.callback_query(F.data.startswith("tedit:sol:"))
 async def cb_tedit_sol(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -2613,6 +3336,7 @@ async def cb_tedit_sol(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(ed_date=date_str, ed_idx=int(idx_s))
     await callback.message.answer("💡 Отправьте новое решение (текст/фото) или «пропустить»:")
     await callback.answer()
+
 
 @dp.message(StateFilter(TaskEdit.solution))
 async def process_tedit_sol(message: types.Message, state: FSMContext):
@@ -2641,6 +3365,7 @@ async def process_tedit_sol(message: types.Message, state: FSMContext):
     await message.answer("✅ Решение обновлено")
     await show_task(message, date_str, idx, message.from_user.id)
 
+
 @dp.callback_query(F.data.startswith("tedit:diff:"))
 async def cb_tedit_diff(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -2654,6 +3379,7 @@ async def cb_tedit_diff(callback: types.CallbackQuery, state: FSMContext):
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("tedit:setdiff:"))
 async def cb_tedit_setdiff(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -2666,6 +3392,7 @@ async def cb_tedit_setdiff(callback: types.CallbackQuery):
         await save_db(DATABASE)
     await callback.answer("✅ Сохранено")
     await show_task(callback, date_str, idx, callback.from_user.id)
+
 
 @dp.callback_query(F.data.startswith("task:show_sol:"))
 async def cb_task_show_sol(callback: types.CallbackQuery):
@@ -2684,6 +3411,8 @@ async def cb_task_show_sol(callback: types.CallbackQuery):
     if not sol_text and not photo_id and not doc_id:
         await callback.answer(t(callback.from_user.id, "task_sol_not_yet"), show_alert=True)
         return
+    if sol_text:
+        sol_text = await localize(sol_text, callback.from_user.id)
     text = t(callback.from_user.id, "task_sol_author_header", num=idx + 1, date=date_str)
     if sol_text:
         text += "\n\n" + html.escape(sol_text)
@@ -2694,18 +3423,22 @@ async def cb_task_show_sol(callback: types.CallbackQuery):
         try:
             await callback.message.answer_document(document=doc_id)
         except Exception:
+            logger.exception("Failed to send solution document, fallback")
             try:
                 await callback.message.answer("⚠️ Документ решения недоступен.")
             except Exception:
                 pass
     await callback.answer()
 
+
 _user_locks = {}
+
 
 def get_user_lock(user_id: int) -> asyncio.Lock:
     if user_id not in _user_locks:
         _user_locks[user_id] = asyncio.Lock()
     return _user_locks[user_id]
+
 
 @dp.callback_query(F.data.startswith("task:solve:"))
 async def cb_task_solve(callback: types.CallbackQuery, state: FSMContext):
@@ -2732,14 +3465,15 @@ async def cb_task_solve(callback: types.CallbackQuery, state: FSMContext):
     help_text = (
         "✍️ <b>Отправка решения задачи</b>\n\n"
         "Вы можете отправить:\n"
-        "• <b>Фотографии решения</b> — одно или несколько фото\n"
-        "• <b>Текст решения</b> — любого объёма\n"
+        "• <b>Фотографии решения</b> — одно или <b>несколько фото</b> (можно сразу альбомом или отдельными сообщениями)\n"
+        "• <b>Текст решения</b> — любого объёма, без ограничений (если текст очень длинный, можно отправить в двух или нескольких сообщениях)\n"
         "• Документы (PDF и др.)\n\n"
-        "После того как отправите все материалы, нажмите кнопку <b>«✅ Завершить и отправить решение»</b> ниже.\n\n"
+        "После того как отправите все материалы (фото/текст), нажмите кнопку <b>«✅ Завершить и отправить решение»</b> ниже.\n\n"
         "/cancel — отмена."
     )
     await callback.message.answer(help_text, parse_mode=ParseMode.HTML, reply_markup=markup)
     await callback.answer()
+
 
 @dp.callback_query(F.data == "task:solve_cancel")
 async def cb_task_solve_cancel(callback: types.CallbackQuery, state: FSMContext):
@@ -2752,9 +3486,11 @@ async def cb_task_solve_cancel(callback: types.CallbackQuery, state: FSMContext)
     if date_str:
         await show_task(callback.message, date_str, idx, callback.from_user.id)
 
+
 @dp.callback_query(F.data == "task:solve_finish")
 async def cb_task_solve_finish(callback: types.CallbackQuery, state: FSMContext):
     await finalize_user_solution(callback, state, callback.from_user.id)
+
 
 async def notify_admins_about_solution(date_str: str, idx: int, uid_str: str, entry: dict):
     u = DATABASE.get("users", {}).get(uid_str, {})
@@ -2776,18 +3512,17 @@ async def notify_admins_about_solution(date_str: str, idx: int, uid_str: str, en
 
     photos = entry.get("photo_file_ids") or ([entry["photo_file_id"]] if entry.get("photo_file_id") else [])
     docs = entry.get("document_file_ids") or ([entry["document_file_id"]] if entry.get("document_file_id") else [])
-    raw_text = (entry.get("text") or "").strip()
-    escaped_user_text = html.escape(raw_text)
+    text = (entry.get("text") or "").strip()
 
     for admin_id in ADMIN_IDS:
         try:
+            # 1. Photos
             if photos:
                 if len(photos) == 1:
-                    caption_body = f"{context}\n\n{escaped_user_text}" if raw_text else context
-                    if len(caption_body) <= 1000 and not docs:
+                    if text and len(context + "\n\n" + text) <= 1000 and not docs:
                         await bot.send_photo(
                             admin_id, photo=photos[0],
-                            caption=caption_body,
+                            caption=context + "\n\n" + html.escape(text),
                             parse_mode=ParseMode.HTML,
                             reply_markup=review_markup
                         )
@@ -2801,19 +3536,26 @@ async def notify_admins_about_solution(date_str: str, idx: int, uid_str: str, en
                         media.append(InputMediaPhoto(media=p, caption=cap, parse_mode=ParseMode.HTML))
                     await bot.send_media_group(admin_id, media=media)
 
+            # 2. Documents
             for d in docs:
                 await bot.send_document(admin_id, document=d)
 
-            full_body = f"{context}\n\n{escaped_user_text}" if (not photos and raw_text) else escaped_user_text
+            # 3. Unlimited text split across messages if long
+            full_body = text
+            if not photos:
+                full_body = context + ("\n\n" + text if text else "")
+
             if full_body:
                 parts = _split_text(full_body, TG_TEXT_LIMIT)
                 for i, part in enumerate(parts):
                     mk = review_markup if i == len(parts) - 1 else None
-                    await bot.send_message(admin_id, part, parse_mode=ParseMode.HTML, reply_markup=mk)
-            elif photos or docs:
-                await bot.send_message(admin_id, "⬇️ Управление решением выше:", reply_markup=review_markup)
+                    await bot.send_message(admin_id, html.escape(part) if photos else part,
+                                           parse_mode=ParseMode.HTML, reply_markup=mk)
+            else:
+                await bot.send_message(admin_id, "⬇️ Решение выше:", reply_markup=review_markup)
         except Exception:
             logger.exception("Failed to notify admin %s about solution", admin_id)
+
 
 async def finalize_user_solution(target, state: FSMContext, user_id: int):
     async with get_user_lock(user_id):
@@ -2825,7 +3567,7 @@ async def finalize_user_solution(target, state: FSMContext, user_id: int):
         text = (data.get("solution_text") or "").strip()
 
         if not photos and not docs and not text:
-            msg = "⚠️ Вы ещё не отправили ни фото, ни текст решения."
+            msg = "⚠️ Вы ещё не отправили ни фото, ни текст решения. Отправьте материалы перед завершением."
             if isinstance(target, types.CallbackQuery):
                 await target.answer(msg, show_alert=True)
             else:
@@ -2878,6 +3620,7 @@ async def finalize_user_solution(target, state: FSMContext, user_id: int):
             await show_task(target, date_str, idx, user_id)
 
         await notify_admins_about_solution(date_str, idx, uid_str, entry)
+
 
 @dp.message(StateFilter(UserTaskSolution.waiting_for_solution))
 async def process_user_solution(message: types.Message, state: FSMContext):
@@ -2934,10 +3677,11 @@ async def process_user_solution(message: types.Message, state: FSMContext):
             f"📷 Фото: <b>{len(photos)}</b> шт.\n"
             f"📄 Документов: <b>{len(docs)}</b> шт.\n"
             f"✍️ Текст: <b>{len(current_text)}</b> симв.\n\n"
-            "<i>Вы можете отправить ещё фото или текст.\n"
+            "<i>Вы можете отправить ещё фото или текст (если решение объёмное, можно несколькими сообщениями подряд без ограничений по длине).\n"
             "Когда закончите отправку, нажмите кнопку ниже:</i>"
         )
         await message.answer(status_msg, parse_mode=ParseMode.HTML, reply_markup=markup)
+
 
 @dp.callback_query(F.data.startswith("task:numans:"))
 async def cb_task_numans(callback: types.CallbackQuery, state: FSMContext):
@@ -2954,6 +3698,7 @@ async def cb_task_numans(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(numans_date=date_str, numans_idx=idx)
     await callback.message.answer("🔢 Введите ваш ответ числом (можно с точкой или запятой):")
     await callback.answer()
+
 
 @dp.message(StateFilter(UserNumericAnswer.waiting), F.text)
 async def process_numans(message: types.Message, state: FSMContext):
@@ -3004,6 +3749,7 @@ async def process_numans(message: types.Message, state: FSMContext):
     else:
         await message.answer("❌ Неверно. Попробуйте ещё раз или сдайте письменное решение.")
 
+
 @dp.callback_query(F.data.startswith("task:sols:"))
 async def cb_task_sols(callback: types.CallbackQuery):
     parts = callback.data.split(":")
@@ -3027,6 +3773,8 @@ async def cb_task_sols(callback: types.CallbackQuery):
             grade = s.get("grade")
             g = t(callback.from_user.id, "task_sol_grade_full", grade=grade) if grade else t(callback.from_user.id, "task_sol_ok_mark")
             snippet = (s.get("text") or "").strip()
+            if snippet:
+                snippet = await localize(snippet[:200], callback.from_user.id)
             s_photos = s.get("photo_file_ids") or ([s["photo_file_id"]] if s.get("photo_file_id") else [])
             if s_photos:
                 snippet = (snippet + (f" [📷 {len(s_photos)}]" if len(s_photos) > 1 else " [📷]")).strip()
@@ -3041,6 +3789,7 @@ async def cb_task_sols(callback: types.CallbackQuery):
     await safe_send_or_edit(callback, "\n".join(lines),
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("solfull:"))
 async def cb_solfull(callback: types.CallbackQuery):
@@ -3061,11 +3810,14 @@ async def cb_solfull(callback: types.CallbackQuery):
     header = f"🪪 {sol_display(sol, uid_str)}"
     header += f" — ⭐ {grade}/10" if grade else " — ✅"
     text = sol.get("text") or ""
+    if text:
+        text = await localize(text, callback.from_user.id)
 
     photos = sol.get("photo_file_ids") or ([sol["photo_file_id"]] if sol.get("photo_file_id") else [])
     docs = sol.get("document_file_ids") or ([sol["document_file_id"]] if sol.get("document_file_id") else [])
 
     try:
+        # If photos
         if photos:
             if len(photos) == 1:
                 if text and len(header + "\n\n" + text) <= 1000 and not docs:
@@ -3085,9 +3837,11 @@ async def cb_solfull(callback: types.CallbackQuery):
                     media.append(InputMediaPhoto(media=p, caption=cap, parse_mode=ParseMode.HTML))
                 await callback.message.answer_media_group(media=media)
 
+        # If docs
         for d in docs:
             await callback.message.answer_document(document=d)
 
+        # Text without limit: split into chunks of <= 4000 chars
         full_content = text
         if not photos:
             full_content = header + ("\n\n" + text if text else "")
@@ -3104,6 +3858,7 @@ async def cb_solfull(callback: types.CallbackQuery):
     except Exception:
         logger.exception("Failed to show solution")
         await callback.answer(t(callback.from_user.id, "task_sol_show_fail"), show_alert=True)
+
 
 @dp.callback_query(F.data.startswith("solrev:"))
 async def cb_solrev(callback: types.CallbackQuery):
@@ -3155,6 +3910,7 @@ async def cb_solrev(callback: types.CallbackQuery):
                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer(t(callback.from_user.id, "task_admin_sol_approved_short"))
 
+
 @dp.callback_query(F.data.startswith("grade:"))
 async def cb_grade(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -3191,6 +3947,7 @@ async def cb_grade(callback: types.CallbackQuery):
         await award_points(int(uid_str), delta)
 
     name = sol.get("nickname") or get_nickname(uid_str)
+    # Send notification message directly to user about approved solution & grade
     try:
         if new_grade > 0:
             if prev_grade:
@@ -3211,6 +3968,7 @@ async def cb_grade(callback: types.CallbackQuery):
                                   parse_mode=ParseMode.HTML)
     await callback.answer(t(callback.from_user.id, "task_grade_saved"))
 
+
 # ============================================================
 # LINKS
 # ============================================================
@@ -3221,6 +3979,7 @@ async def cb_links_main(callback: types.CallbackQuery, state: FSMContext):
     await safe_send_or_edit(callback, t(callback.from_user.id, "links_title"),
                             reply_markup=await get_links_keyboard(callback.from_user.id))
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("links:sec:"))
 async def cb_links_section(callback: types.CallbackQuery):
@@ -3234,12 +3993,14 @@ async def cb_links_section(callback: types.CallbackQuery):
     await show_links_section(callback, sec_key, callback.from_user.id)
     await callback.answer()
 
+
 @dp.callback_query(F.data.in_(["links:videos", "menu:videos"]))
 async def cb_links_videos_direct(callback: types.CallbackQuery):
     DATABASE.setdefault("links", {})["useful_videos"] = copy.deepcopy(DEFAULT_STATE["links"]["useful_videos"])
     await save_db(DATABASE)
     await show_links_section(callback, "useful_videos", callback.from_user.id)
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("links:del:"))
 async def cb_links_del(callback: types.CallbackQuery):
@@ -3261,6 +4022,7 @@ async def cb_links_del(callback: types.CallbackQuery):
     else:
         await callback.answer(t(callback.from_user.id, "links_item_missing"), show_alert=True)
 
+
 @dp.callback_query(F.data.startswith("links:add:"))
 async def cb_links_add(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -3271,6 +4033,7 @@ async def cb_links_add(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(section=sec_key)
     await callback.message.answer(t(callback.from_user.id, "links_ask"))
     await callback.answer()
+
 
 @dp.message(StateFilter(AddLink.waiting_for_text), F.text)
 async def process_add_link(message: types.Message, state: FSMContext):
@@ -3295,6 +4058,7 @@ async def process_add_link(message: types.Message, state: FSMContext):
     await message.answer(t(message.from_user.id, "links_added",
                            title=DATABASE['links'][sec_key].get('title', sec_key)))
 
+
 # ============================================================
 # USER FILE SUBMISSIONS
 # ============================================================
@@ -3305,6 +4069,7 @@ async def cb_submit_start(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(sub_file_id=None, sub_file_name=None, sub_title="", selected_tags=[])
     await callback.message.answer(t(callback.from_user.id, "submit_start"))
     await callback.answer()
+
 
 @dp.message(StateFilter(UserSubmit.waiting_file), F.document | F.photo)
 async def process_submit_file(message: types.Message, state: FSMContext):
@@ -3318,6 +4083,7 @@ async def process_submit_file(message: types.Message, state: FSMContext):
     await state.set_state(UserSubmit.waiting_title)
     await message.answer(t(message.from_user.id, "submit_ask_title"))
 
+
 @dp.message(StateFilter(UserSubmit.waiting_title), F.text)
 async def process_submit_title(message: types.Message, state: FSMContext):
     await state.update_data(sub_title=message.text.strip()[:200])
@@ -3327,6 +4093,7 @@ async def process_submit_title(message: types.Message, state: FSMContext):
                                                                     message.from_user.id,
                                                                     t(message.from_user.id, "submit_skip_tags"),
                                                                     "sub:tags_skip"))
+
 
 @dp.callback_query(StateFilter(UserSubmit.choosing_tags), F.data.startswith("sub:tag:"))
 async def cb_sub_tag(callback: types.CallbackQuery, state: FSMContext):
@@ -3341,6 +4108,7 @@ async def cb_sub_tag(callback: types.CallbackQuery, state: FSMContext):
                                                                        "sub:tags_skip"))
     await callback.answer(t(callback.from_user.id, "search_tag_off" if removed else "search_tag_on"))
 
+
 async def render_submit_preview(target, state: FSMContext, user_id: int):
     data = await state.get_data()
     text = t(user_id, "submit_preview",
@@ -3353,16 +4121,19 @@ async def render_submit_preview(target, state: FSMContext, user_id: int):
     ]])
     await safe_send_or_edit(target, text, reply_markup=markup)
 
+
 @dp.callback_query(F.data == "sub:tags_done", StateFilter(UserSubmit.choosing_tags))
 async def cb_sub_tags_done(callback: types.CallbackQuery, state: FSMContext):
     await render_submit_preview(callback, state, callback.from_user.id)
     await callback.answer()
+
 
 @dp.callback_query(F.data == "sub:tags_skip", StateFilter(UserSubmit.choosing_tags))
 async def cb_sub_tags_skip(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(selected_tags=[])
     await render_submit_preview(callback, state, callback.from_user.id)
     await callback.answer()
+
 
 @dp.callback_query(F.data == "submit:confirm", StateFilter(UserSubmit.choosing_tags))
 async def cb_submit_confirm(callback: types.CallbackQuery, state: FSMContext):
@@ -3374,7 +4145,6 @@ async def cb_submit_confirm(callback: types.CallbackQuery, state: FSMContext):
     u = DATABASE.get("users", {}).get(uid_str, {})
     sub_id = uuid.uuid4().hex[:12]
     payload = {
-        "_id": sub_id,
         "user_id": callback.from_user.id,
         "username": callback.from_user.username or "",
         "first_name": callback.from_user.first_name or "",
@@ -3411,9 +4181,11 @@ async def cb_submit_confirm(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(t(callback.from_user.id, "submit_sent"))
     await callback.answer()
 
+
 @dp.callback_query(F.data == "submit:confirm")
 async def cb_submit_confirm_stale(callback: types.CallbackQuery):
     await callback.answer(t(callback.from_user.id, "submit_stale"), show_alert=True)
+
 
 @dp.callback_query(F.data == "submit:cancel")
 async def cb_submit_cancel(callback: types.CallbackQuery, state: FSMContext):
@@ -3421,8 +4193,9 @@ async def cb_submit_cancel(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(t(callback.from_user.id, "submit_cancelled"))
     await callback.answer()
 
+
 # ============================================================
-# ADMIN: PANEL & MANUAL UPLOAD
+# ADMIN: PANEL
 # ============================================================
 
 @dp.callback_query(F.data == "admin:main")
@@ -3435,6 +4208,11 @@ async def cb_admin_main(callback: types.CallbackQuery, state: FSMContext):
                             reply_markup=get_admin_menu_keyboard(callback.from_user.id))
     await callback.answer()
 
+
+# ============================================================
+# ADMIN: MANUAL UPLOAD
+# ============================================================
+
 @dp.callback_query(F.data == "admin:upload")
 async def cb_admin_upload(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -3445,6 +4223,7 @@ async def cb_admin_upload(callback: types.CallbackQuery, state: FSMContext):
                             selected_tags=[], difficulty="medium", upl_cats=[])
     await callback.message.answer(t(callback.from_user.id, "admin_upload_ask"))
     await callback.answer()
+
 
 @dp.message(StateFilter(AdminUpload.waiting_document), F.document | F.photo)
 async def process_upl_document(message: types.Message, state: FSMContext):
@@ -3460,11 +4239,13 @@ async def process_upl_document(message: types.Message, state: FSMContext):
     await state.set_state(AdminUpload.waiting_title)
     await message.answer(t(message.from_user.id, "admin_upload_title"))
 
+
 @dp.message(StateFilter(AdminUpload.waiting_title), F.text)
 async def process_upl_title(message: types.Message, state: FSMContext):
     await state.update_data(title=message.text.strip()[:200])
     await state.set_state(AdminUpload.waiting_description)
     await message.answer(t(message.from_user.id, "admin_upload_desc"))
+
 
 @dp.message(StateFilter(AdminUpload.waiting_description), F.text)
 async def process_upl_description(message: types.Message, state: FSMContext):
@@ -3478,6 +4259,7 @@ async def process_upl_description(message: types.Message, state: FSMContext):
                                                                     message.from_user.id,
                                                                     "⏭", "upl:tags_skip"))
 
+
 @dp.callback_query(StateFilter(AdminUpload.choosing_tags), F.data.startswith("upl:tag:"))
 async def cb_upl_tag(callback: types.CallbackQuery, state: FSMContext):
     res = await toggle_tag_by_index(callback, state)
@@ -3490,6 +4272,7 @@ async def cb_upl_tag(callback: types.CallbackQuery, state: FSMContext):
                                                                        "⏭", "upl:tags_skip"))
     await callback.answer(t(callback.from_user.id, "search_tag_off" if removed else "search_tag_on"))
 
+
 @dp.callback_query(F.data == "upl:tags_done", StateFilter(AdminUpload.choosing_tags))
 async def cb_upl_tags_done(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminUpload.choosing_difficulty)
@@ -3500,6 +4283,7 @@ async def cb_upl_tags_done(callback: types.CallbackQuery, state: FSMContext):
     await safe_send_or_edit(callback, t(callback.from_user.id, "admin_upload_diff"),
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
+
 
 @dp.callback_query(F.data == "upl:tags_skip", StateFilter(AdminUpload.choosing_tags))
 async def cb_upl_tags_skip(callback: types.CallbackQuery, state: FSMContext):
@@ -3513,6 +4297,7 @@ async def cb_upl_tags_skip(callback: types.CallbackQuery, state: FSMContext):
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
+
 @dp.callback_query(StateFilter(AdminUpload.choosing_difficulty), F.data.startswith("upl:diff:"))
 async def cb_upl_diff(callback: types.CallbackQuery, state: FSMContext):
     level = callback.data.split(":", 2)[2]
@@ -3524,6 +4309,7 @@ async def cb_upl_diff(callback: types.CallbackQuery, state: FSMContext):
                             reply_markup=await get_category_toggle_keyboard(data.get("upl_cats", []),
                                                                             callback.from_user.id))
     await callback.answer()
+
 
 @dp.callback_query(StateFilter(AdminUpload.choosing_categories), F.data.startswith("upl:cat:"))
 async def cb_upl_cat(callback: types.CallbackQuery, state: FSMContext):
@@ -3543,6 +4329,7 @@ async def cb_upl_cat(callback: types.CallbackQuery, state: FSMContext):
     await safe_send_or_edit(callback, t(callback.from_user.id, "admin_upload_cats"),
                             reply_markup=await get_category_toggle_keyboard(cats, callback.from_user.id))
     await callback.answer("✅" if selected else "▫️")
+
 
 @dp.callback_query(F.data == "upl:publish", StateFilter(AdminUpload.choosing_categories))
 async def cb_upl_publish(callback: types.CallbackQuery, state: FSMContext):
@@ -3585,9 +4372,11 @@ async def cb_upl_publish(callback: types.CallbackQuery, state: FSMContext):
     await announce_file_to_channel(entry, titles)
     await callback.answer(t(callback.from_user.id, "admin_upload_done_short"))
 
+
 @dp.callback_query(F.data == "upl:publish")
 async def cb_upl_publish_stale(callback: types.CallbackQuery):
     await callback.answer(t(callback.from_user.id, "admin_upload_stale"), show_alert=True)
+
 
 # ============================================================
 # ADMIN: ADD DAILY TASK
@@ -3605,6 +4394,7 @@ async def cb_add_task(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(t(callback.from_user.id, "admin_task_photo"))
     await callback.answer()
 
+
 @dp.message(StateFilter(TaskOfDayAdmin.waiting_for_photo))
 async def process_task_photo(message: types.Message, state: FSMContext):
     if message.photo:
@@ -3617,6 +4407,7 @@ async def process_task_photo(message: types.Message, state: FSMContext):
     await state.set_state(TaskOfDayAdmin.waiting_for_task_text)
     await message.answer(t(message.from_user.id, "admin_task_text"))
 
+
 @dp.message(StateFilter(TaskOfDayAdmin.waiting_for_task_text), F.text)
 async def process_task_text(message: types.Message, state: FSMContext):
     raw = message.text.strip()
@@ -3625,6 +4416,7 @@ async def process_task_text(message: types.Message, state: FSMContext):
     await state.update_data(task_text=raw)
     await state.set_state(TaskOfDayAdmin.waiting_for_solution)
     await message.answer(t(message.from_user.id, "admin_task_solution"))
+
 
 @dp.message(StateFilter(TaskOfDayAdmin.waiting_for_solution))
 async def process_task_solution(message: types.Message, state: FSMContext):
@@ -3647,6 +4439,7 @@ async def process_task_solution(message: types.Message, state: FSMContext):
         "Или «пропустить» — тогда решение проверяется вручную.",
         parse_mode=ParseMode.HTML)
 
+
 @dp.message(StateFilter(TaskOfDayAdmin.waiting_numeric_answer), F.text)
 async def process_task_numeric(message: types.Message, state: FSMContext):
     raw = message.text.strip().replace(",", ".")
@@ -3667,6 +4460,7 @@ async def process_task_numeric(message: types.Message, state: FSMContext):
     await message.answer("🎯 Выберите сложность задачи (влияет на очки):",
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
 
+
 @dp.callback_query(StateFilter(TaskOfDayAdmin.choosing_difficulty),
                    F.data.startswith("taskdiff:"))
 async def cb_task_diff(callback: types.CallbackQuery, state: FSMContext):
@@ -3684,6 +4478,7 @@ async def cb_task_diff(callback: types.CallbackQuery, state: FSMContext):
             "⏭ Без тегов", "tasktag:skip"))
     await callback.answer()
 
+
 @dp.callback_query(StateFilter(TaskOfDayAdmin.choosing_tags),
                    F.data.regexp(r"^tasktag:\d+$"))
 async def cb_tasktag_toggle(callback: types.CallbackQuery, state: FSMContext):
@@ -3698,6 +4493,7 @@ async def cb_tasktag_toggle(callback: types.CallbackQuery, state: FSMContext):
             "⏭ Без тегов", "tasktag:skip"))
     await callback.answer("✅" if not removed else "▫️")
 
+
 @dp.callback_query(StateFilter(TaskOfDayAdmin.choosing_tags), F.data == "tasktag:skip")
 async def cb_tasktag_skip(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(selected_tags=[])
@@ -3705,11 +4501,13 @@ async def cb_tasktag_skip(callback: types.CallbackQuery, state: FSMContext):
     await safe_send_or_edit(callback, t(callback.from_user.id, "admin_task_date"))
     await callback.answer()
 
+
 @dp.callback_query(StateFilter(TaskOfDayAdmin.choosing_tags), F.data == "tasktag:done")
 async def cb_tasktag_done(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(TaskOfDayAdmin.waiting_for_date)
     await safe_send_or_edit(callback, t(callback.from_user.id, "admin_task_date"))
     await callback.answer()
+
 
 @dp.message(StateFilter(TaskOfDayAdmin.waiting_for_date), F.text)
 async def process_task_date(message: types.Message, state: FSMContext):
@@ -3762,6 +4560,7 @@ async def process_task_date(message: types.Message, state: FSMContext):
         parse_mode=ParseMode.HTML,
         reply_markup=markup)
 
+
 @dp.callback_query(F.data.startswith("tsched:now:"))
 async def cb_tsched_now(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -3774,6 +4573,7 @@ async def cb_tsched_now(callback: types.CallbackQuery):
         await save_db(DATABASE)
     await callback.answer("📢 Публикую...")
     await broadcast_task(date_str, idx, report_msg=callback.message)
+
 
 @dp.callback_query(F.data.startswith("tsched:later:"))
 async def cb_tsched_later(callback: types.CallbackQuery, state: FSMContext):
@@ -3789,6 +4589,7 @@ async def cb_tsched_later(callback: types.CallbackQuery, state: FSMContext):
         parse_mode=ParseMode.HTML)
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("tsched:draft:"))
 async def cb_tsched_draft(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -3803,6 +4604,7 @@ async def cb_tsched_draft(callback: types.CallbackQuery):
         f"📝 Черновик сохранён ({date_str} №{idx+1}).\n"
         "Открыть и опубликовать: «🎯 Задача дня» → «📢 Разослать задачу».")
     await callback.answer("📝")
+
 
 @dp.message(StateFilter(TaskSchedule.waiting_datetime), F.text)
 async def process_tsched_datetime(message: types.Message, state: FSMContext):
@@ -3833,6 +4635,7 @@ async def process_tsched_datetime(message: types.Message, state: FSMContext):
         parse_mode=ParseMode.HTML,
         reply_markup=get_main_menu_keyboard(message.from_user.id))
 
+
 async def _schedule_publish(date_str: str, idx: int, when: datetime):
     try:
         delay = (when - datetime.now(YEREVAN_TZ)).total_seconds()
@@ -3842,7 +4645,6 @@ async def _schedule_publish(date_str: str, idx: int, when: datetime):
         if not task:
             return
         task["status"] = "published"
-        task.pop("publish_at", None)
         await save_db(DATABASE)
         await broadcast_task(date_str, idx)
         for admin_id in ADMIN_IDS:
@@ -3853,6 +4655,7 @@ async def _schedule_publish(date_str: str, idx: int, when: datetime):
                 pass
     except Exception:
         logger.exception("Scheduled publish failed")
+
 
 # ============================================================
 # ADMIN: STATS / SUBMISSIONS / PENDING / BROADCAST
@@ -3872,8 +4675,7 @@ async def cb_admin_stats(callback: types.CallbackQuery, state: FSMContext):
         for task in group.get("tasks", []):
             pending_sols += sum(1 for s in (task.get("user_solutions") or {}).values()
                                 if s.get("status") == "pending")
-    subs_data = await load_submissions()
-    pending_subs = sum(1 for s in subs_data.values() if s.get("status") == "pending")
+    pending_subs = await submissions_collection.count_documents({"status": "pending"})
     top = sorted(users.items(), key=lambda kv: kv[1].get("score", 0), reverse=True)[:5]
     top_lines = "\n".join(
         f"  {i}. {html.escape(u.get('nickname') or u.get('username') or f'id{uid_str}')} — "
@@ -3888,6 +4690,7 @@ async def cb_admin_stats(callback: types.CallbackQuery, state: FSMContext):
     await safe_send_or_edit(callback, text, reply_markup=markup)
     await callback.answer()
 
+
 @dp.callback_query(F.data == "admin:stats_csv")
 async def cb_stats_csv(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -3896,7 +4699,7 @@ async def cb_stats_csv(callback: types.CallbackQuery):
     buf = io.StringIO()
     writer = csv.writer(buf, delimiter=",")
     writer.writerow(["nick", "tg_first_name", "tg_username", "score",
-                     "solved_count", "streak", "favorites", "created_at"])
+                     "solved_count", "streak", "favorites", "language", "created_at"])
     for uid_str, u in DATABASE.get("users", {}).items():
         writer.writerow([
             u.get("nickname", ""),
@@ -3906,6 +4709,7 @@ async def cb_stats_csv(callback: types.CallbackQuery):
             count_solved(uid_str),
             u.get("streak", 0),
             len(u.get("favorites", [])),
+            u.get("language", "ru"),
             u.get("created_at", ""),
         ])
     payload = buf.getvalue().encode("utf-8-sig")
@@ -3913,16 +4717,18 @@ async def cb_stats_csv(callback: types.CallbackQuery):
     await callback.message.answer_document(file, caption="📊 Экспорт пользователей")
     await callback.answer("📤 CSV отправлен")
 
+
 @dp.callback_query(F.data == "admin:submissions")
 async def cb_admin_submissions(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
         return
     await state.clear()
-    subs_dict = await load_submissions()
-    subs = [s for s in subs_dict.values() if s.get("status") == "pending"]
-    subs.sort(key=lambda s: s.get("created_at", ""), reverse=True)
-    subs = subs[:10]
+    subs = []
+    async for s in submissions_collection.find({"status": "pending"}).sort("created_at", -1):
+        subs.append(s)
+        if len(subs) >= 10:
+            break
     if not subs:
         markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
             text=t(callback.from_user.id, "back_admin"), callback_data="admin:main")]])
@@ -3948,6 +4754,7 @@ async def cb_admin_submissions(callback: types.CallbackQuery, state: FSMContext)
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("admin:sub_accept:"))
 async def cb_sub_accept(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -3962,11 +4769,13 @@ async def cb_sub_accept(callback: types.CallbackQuery):
                                    "processed_at": datetime.now(YEREVAN_TZ).isoformat()})
     rows = []
     for cat_key, cat_data in DATABASE.get("categories", {}).items():
-        rows.append([InlineKeyboardButton(text=cat_data.get("title", cat_key), callback_data=f"subcat:{sub_id}:{cat_key}")])
+        tr_title = await localize(cat_data.get("title", cat_key), callback.from_user.id)
+        rows.append([InlineKeyboardButton(text=tr_title, callback_data=f"subcat:{sub_id}:{cat_key}")])
     rows.append([InlineKeyboardButton(text=t(callback.from_user.id, "back_admin"), callback_data="admin:main")])
     await callback.message.answer(t(callback.from_user.id, "admin_subs_pick_cat"),
                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("subcat:"))
 async def cb_subcat(callback: types.CallbackQuery):
@@ -4005,6 +4814,7 @@ async def cb_subcat(callback: types.CallbackQuery):
     await save_db(DATABASE)
     await save_submission(sub_id, {"status": "published"})
     cat_title = DATABASE["categories"][cat_key].get("title", cat_key)
+    # Notify user that submitted material was approved and published
     try:
         user_uid = sub.get("user_id")
         if user_uid:
@@ -4019,6 +4829,7 @@ async def cb_subcat(callback: types.CallbackQuery):
     await announce_file_to_channel(entry, [cat_title])
     await callback.answer("✅")
 
+
 @dp.callback_query(F.data.startswith("admin:sub_reject:"))
 async def cb_sub_reject(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -4031,6 +4842,7 @@ async def cb_sub_reject(callback: types.CallbackQuery):
         return
     await save_submission(sub_id, {"status": "rejected",
                                    "processed_at": datetime.now(YEREVAN_TZ).isoformat()})
+    # Notify user that submitted material was rejected
     try:
         user_uid = sub.get("user_id")
         if user_uid:
@@ -4041,6 +4853,7 @@ async def cb_sub_reject(callback: types.CallbackQuery):
         pass
     await callback.message.answer(t(callback.from_user.id, "admin_subs_rejected"))
     await callback.answer("❌")
+
 
 @dp.callback_query(F.data == "admin:pending_sols")
 async def cb_pending_sols(callback: types.CallbackQuery, state: FSMContext):
@@ -4083,6 +4896,7 @@ async def cb_pending_sols(callback: types.CallbackQuery, state: FSMContext):
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
     await callback.answer()
 
+
 @dp.callback_query(F.data == "admin:broadcast")
 async def cb_admin_broadcast(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -4091,6 +4905,7 @@ async def cb_admin_broadcast(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(BroadcastAdmin.waiting_for_message)
     await callback.message.answer(t(callback.from_user.id, "admin_bcast_ask"))
     await callback.answer()
+
 
 @dp.message(StateFilter(BroadcastAdmin.waiting_for_message))
 async def process_broadcast(message: types.Message, state: FSMContext):
@@ -4119,7 +4934,7 @@ async def process_broadcast(message: types.Message, state: FSMContext):
         except Exception:
             async with lock:
                 failed += 1
-        await asyncio.sleep(0.04)
+        await asyncio.sleep(0.05)
 
     async def _guarded(uid_str):
         async with sem:
@@ -4128,6 +4943,7 @@ async def process_broadcast(message: types.Message, state: FSMContext):
     await asyncio.gather(*[_guarded(u) for u in list(users.keys())])
     await state.clear()
     await message.answer(t(message.from_user.id, "admin_bcast_done", sent=sent, failed=failed))
+
 
 # ============================================================
 # ADMIN: EDIT / DELETE FILE & DESCRIPTION
@@ -4157,6 +4973,7 @@ async def cb_edit_file(callback: types.CallbackQuery, state: FSMContext):
                             reply_markup=markup)
     await callback.answer()
 
+
 @dp.callback_query(F.data == "admin:efile:doc")
 async def cb_efile_doc(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -4165,6 +4982,7 @@ async def cb_efile_doc(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(EditFile.waiting_for_document)
     await callback.message.answer(t(callback.from_user.id, "admin_edit_ask_doc"))
     await callback.answer()
+
 
 @dp.message(StateFilter(EditFile.waiting_for_document), F.document | F.photo)
 async def process_efile_doc(message: types.Message, state: FSMContext):
@@ -4179,6 +4997,7 @@ async def process_efile_doc(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(t(message.from_user.id, "admin_edit_doc_done", n=n))
 
+
 @dp.callback_query(F.data == "admin:efile:title")
 async def cb_efile_title(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -4187,6 +5006,7 @@ async def cb_efile_title(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(EditFile.waiting_for_title)
     await callback.message.answer(t(callback.from_user.id, "admin_edit_ask_title"))
     await callback.answer()
+
 
 @dp.message(StateFilter(EditFile.waiting_for_title), F.text)
 async def process_efile_title(message: types.Message, state: FSMContext):
@@ -4201,6 +5021,7 @@ async def process_efile_title(message: types.Message, state: FSMContext):
     await message.answer(t(message.from_user.id, "admin_edit_title_done", n=n))
     await show_file_card(message, uid, message.from_user.id)
 
+
 @dp.callback_query(F.data == "admin:efile:desc")
 async def cb_efile_desc(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -4209,6 +5030,7 @@ async def cb_efile_desc(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(EditFile.waiting_for_desc)
     await callback.message.answer(t(callback.from_user.id, "admin_edit_ask_desc"))
     await callback.answer()
+
 
 @dp.message(StateFilter(EditFile.waiting_for_desc), F.text)
 async def process_efile_desc(message: types.Message, state: FSMContext):
@@ -4225,6 +5047,7 @@ async def process_efile_desc(message: types.Message, state: FSMContext):
     await message.answer(t(message.from_user.id, "admin_edit_desc_done", n=n))
     await show_file_card(message, uid, message.from_user.id)
 
+
 @dp.callback_query(F.data == "admin:efile:tags")
 async def cb_efile_tags(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -4233,6 +5056,7 @@ async def cb_efile_tags(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(EditFile.waiting_for_tags)
     await callback.message.answer(t(callback.from_user.id, "admin_edit_ask_tags"))
     await callback.answer()
+
 
 @dp.message(StateFilter(EditFile.waiting_for_tags), F.text)
 async def process_efile_tags(message: types.Message, state: FSMContext):
@@ -4255,6 +5079,7 @@ async def process_efile_tags(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(t(message.from_user.id, "admin_edit_tags_done", n=n))
     await show_file_card(message, uid, message.from_user.id)
+
 
 @dp.callback_query(F.data.startswith("admin:del_file:"))
 async def cb_del_file(callback: types.CallbackQuery, state: FSMContext):
@@ -4279,6 +5104,7 @@ async def cb_del_file(callback: types.CallbackQuery, state: FSMContext):
                             reply_markup=markup)
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("admin:del_file_yes:"))
 async def cb_del_file_yes(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -4298,6 +5124,7 @@ async def cb_del_file_yes(callback: types.CallbackQuery):
     await save_db(DATABASE)
     await callback.message.answer(t(callback.from_user.id, "admin_del_done", n=removed))
     await callback.answer("🗑")
+
 
 # ============================================================
 # INLINE MODE
@@ -4329,8 +5156,8 @@ async def inline_catalog_search(query: InlineQuery):
     if not results:
         results = [InlineQueryResultArticle(
             id="not_found",
-            title="🔎 Ничего не найдено",
-            description="Откройте бота для поиска по тегам",
+            title="🔎 Nothing found",
+            description="Open the bot to search by tags",
             input_message_content=InputTextMessageContent(
                 message_text="🤖 MathAm: /start"
             ),
@@ -4339,6 +5166,7 @@ async def inline_catalog_search(query: InlineQuery):
         await query.answer(results, is_personal=True, cache_time=30)
     except Exception:
         logger.exception("Inline answer failed")
+
 
 # ============================================================
 # FALLBACK
@@ -4354,12 +5182,11 @@ async def fallback_text(message: types.Message, state: FSMContext):
     else:
         await message.answer(t(message.from_user.id, "unknown_text"))
 
+
 @dp.callback_query()
 async def cb_unhandled(callback: types.CallbackQuery):
-    try:
-        await callback.answer("⚠️ Действие устарело.", show_alert=False)
-    except Exception:
-        pass
+    await callback.answer()
+
 
 # ============================================================
 # STARTUP & ENTRY POINT
@@ -4371,18 +5198,20 @@ async def on_startup(bot: Bot):
     me = await bot.get_me()
     BOT_USERNAME = me.username or ""
     commands = [
-        BotCommand(command="start", description="🏠 Меню"),
-        BotCommand(command="catalog", description="📚 Каталог"),
-        BotCommand(command="task", description="🎯 Задача дня"),
-        BotCommand(command="zip", description="📦 Скачать PDF (ZIP)"),
-        BotCommand(command="nickname", description="🪪 Никнейм"),
-        BotCommand(command="cancel", description="❌ Отмена"),
+        BotCommand(command="start", description="🏠 Menu / Меню"),
+        BotCommand(command="catalog", description="📚 Catalog / Каталог"),
+        BotCommand(command="task", description="🎯 Task of day / Задача дня"),
+        BotCommand(command="zip", description="📦 Download all PDFs / Скачать PDF (ZIP)"),
+        BotCommand(command="language", description="🌐 Language / Язык"),
+        BotCommand(command="nickname", description="🪪 Nickname / Никнейм"),
+        BotCommand(command="cancel", description="❌ Cancel / Отмена"),
     ]
     await bot.set_my_commands(commands)
     total_files = sum(len(c.get("files", [])) for c in DATABASE.get("categories", {}).values())
     logger.info("Startup: %s users, %s files, %s tags, channel=%s",
                 len(DATABASE.get("users", {})), total_files,
                 len(DATABASE.get("tags", [])), CHANNEL_ID)
+
 
 def register_middlewares():
     dp.message.outer_middleware(SimpleRateLimitMiddleware(RATE_LIMIT_PER_MIN))
@@ -4391,8 +5220,10 @@ def register_middlewares():
     dp.callback_query.outer_middleware(UserActivityMiddleware())
     dp.inline_query.outer_middleware(UserActivityMiddleware())
 
+
 async def health_endpoint(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "bot": BOT_USERNAME})
+
 
 async def run_polling():
     register_middlewares()
@@ -4412,6 +5243,7 @@ async def run_polling():
 
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
+
 def run_webhook():
     webhook_url = os.environ.get("WEBHOOK_URL", "").strip().rstrip("/")
     webhook_path = os.environ.get("WEBHOOK_PATH", "/tgbot").strip() or "/tgbot"
@@ -4427,6 +5259,7 @@ def run_webhook():
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=webhook_path)
     setup_application(app, dp, bot=bot)
     web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
+
 
 if __name__ == "__main__":
     if os.environ.get("WEBHOOK_URL", "").strip():
