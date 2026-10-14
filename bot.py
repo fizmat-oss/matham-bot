@@ -1,3 +1,5 @@
+import tempfile
+import shutil
 import asyncio
 import copy
 import html
@@ -59,7 +61,9 @@ db_collection = mongo_db["catalog"]
 submissions_collection = mongo_db["submissions"]
 DB_DOC_ID = "catalog_main"
 
-bot = Bot(token=TOKEN)
+from aiogram.client.session.aiohttp import AiohttpSession
+session = AiohttpSession(timeout=300)
+bot = Bot(token=TOKEN, session=session)
 dp = Dispatcher()
 DATABASE = {}
 BOT_USERNAME = ""
@@ -1597,12 +1601,13 @@ async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: lis
     total = len(files_to_download)
     status_msg = await bot.send_message(chat_id, t(user_id, "zip_preparing", current=0, total=total))
 
-    sem = asyncio.Semaphore(3)
-    downloaded_files = []
+    temp_dir = tempfile.mkdtemp(prefix="matham_zip_")
+    downloaded_items = []
     completed_count = 0
     lock = asyncio.Lock()
+    sem = asyncio.Semaphore(2)
 
-    async def _fetch_file(item):
+    async def _fetch_to_disk(idx, item):
         nonlocal completed_count
         file_id = item.get("file_id")
         if not file_id:
@@ -1610,20 +1615,24 @@ async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: lis
                 completed_count += 1
             return
 
+        dest_path = os.path.join(temp_dir, f"dl_{idx}.tmp")
         async with sem:
-            for attempt in range(4):
+            for attempt in range(5):
                 try:
                     tg_file = await bot.get_file(file_id)
-                    buf = io.BytesIO()
-                    await bot.download_file(tg_file.file_path, destination=buf)
-                    content = buf.getvalue()
-                    if content:
+                    await bot.download_file(tg_file.file_path, destination=dest_path)
+                    fsize = os.path.getsize(dest_path)
+                    if fsize > 0:
                         folder = sanitize_filename(item.get("category", "General"))
                         fname = sanitize_filename(item.get("filename", "material"))
                         if not fname.lower().endswith(".pdf"):
                             fname += ".pdf"
                         async with lock:
-                            downloaded_files.append((f"{folder}/{fname}", content))
+                            downloaded_items.append({
+                                "tmp_path": dest_path,
+                                "arc_name": f"{folder}/{fname}",
+                                "size": fsize
+                            })
                             completed_count += 1
                             if completed_count % 3 == 0 or completed_count == total:
                                 try:
@@ -1634,84 +1643,94 @@ async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: lis
                 except TelegramRetryAfter as e:
                     await asyncio.sleep(e.retry_after + 1)
                 except Exception as e:
-                    if attempt == 3:
-                        logger.warning("Failed to download file %s after retries: %s", file_id, e)
+                    if attempt == 4:
+                        logger.warning("Failed downloading %s: %s", file_id, e)
                         async with lock:
                             completed_count += 1
                     else:
                         await asyncio.sleep(1.5 * (attempt + 1))
 
-    await asyncio.gather(*[_fetch_file(item) for item in files_to_download])
-
-    if not downloaded_files:
-        try:
-            await status_msg.edit_text(t(user_id, "zip_empty"))
-        except Exception:
-            await bot.send_message(chat_id, t(user_id, "zip_empty"))
-        return
-
-    used_names = set()
-    unique_files = []
-    for path, content in downloaded_files:
-        cand = path
-        counter = 1
-        folder, fname = path.split("/", 1) if "/" in path else ("General", path)
-        base_name, ext = os.path.splitext(fname)
-        while cand.lower() in used_names:
-            cand = f"{folder}/{base_name}_{counter}{ext}"
-            counter += 1
-        used_names.add(cand.lower())
-        unique_files.append((cand, content))
-
-    MAX_VOLUME_BYTES = 45 * 1024 * 1024
-    volumes = []
-    curr_vol = []
-    curr_size = 0
-    for path, content in unique_files:
-        if curr_size + len(content) > MAX_VOLUME_BYTES and curr_vol:
-            volumes.append(curr_vol)
-            curr_vol = [(path, content)]
-            curr_size = len(content)
-        else:
-            curr_vol.append((path, content))
-            curr_size += len(content)
-    if curr_vol:
-        volumes.append(curr_vol)
-
-    total_vols = len(volumes)
-    date_str = datetime.now().strftime("%Y%m%d")
-
-    for part_idx, vol in enumerate(volumes, 1):
-        zip_buf = io.BytesIO()
-        with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            for path, content in vol:
-                zf.writestr(path, content)
-        zip_bytes = zip_buf.getvalue()
-        size_mb = len(zip_bytes) / (1024 * 1024)
-
-        safe_title = sanitize_filename(archive_title)
-        if total_vols > 1:
-            fname = f"MathAm_{safe_title}_part{part_idx}_of_{total_vols}_{date_str}.zip"
-            caption = t(user_id, "zip_part", part=part_idx, total_parts=total_vols, count=len(vol), size_mb=size_mb)
-        else:
-            fname = f"MathAm_{safe_title}_{date_str}.zip"
-            caption = t(user_id, "zip_ready", count=len(vol), size_mb=size_mb)
-
-        doc = types.BufferedInputFile(zip_bytes, filename=fname)
-        for send_att in range(3):
-            try:
-                await bot.send_document(chat_id, document=doc, caption=caption, parse_mode=ParseMode.HTML)
-                break
-            except TelegramRetryAfter as e:
-                await asyncio.sleep(e.retry_after + 1)
-            except Exception:
-                if send_att == 2:
-                    logger.exception("Failed to send ZIP volume %s", part_idx)
-
     try:
-        await status_msg.delete()
-    except Exception:
-        pass
+        await asyncio.gather(*[_fetch_to_disk(i, it) for i, it in enumerate(files_to_download)])
+
+        if not downloaded_items:
+            try:
+                await status_msg.edit_text(t(user_id, "zip_empty"))
+            except Exception:
+                await bot.send_message(chat_id, t(user_id, "zip_empty"))
+            return
+
+        used_names = set()
+        for item in downloaded_items:
+            path = item["arc_name"]
+            folder, fname = path.split("/", 1) if "/" in path else ("General", path)
+            base_name, ext = os.path.splitext(fname)
+            cand = path
+            counter = 1
+            while cand.lower() in used_names:
+                cand = f"{folder}/{base_name}_{counter}{ext}"
+                counter += 1
+            used_names.add(cand.lower())
+            item["arc_name"] = cand
+
+        MAX_VOLUME_BYTES = 40 * 1024 * 1024
+        volumes = []
+        curr_vol = []
+        curr_size = 0
+        for item in downloaded_items:
+            if curr_size + item["size"] > MAX_VOLUME_BYTES and curr_vol:
+                volumes.append(curr_vol)
+                curr_vol = [item]
+                curr_size = item["size"]
+            else:
+                curr_vol.append(item)
+                curr_size += item["size"]
+        if curr_vol:
+            volumes.append(curr_vol)
+
+        total_vols = len(volumes)
+        date_str = datetime.now().strftime("%Y%m%d")
+        safe_title = sanitize_filename(archive_title)
+
+        for part_idx, vol in enumerate(volumes, 1):
+            part_zip_path = os.path.join(temp_dir, f"part_{part_idx}.zip")
+            with zipfile.ZipFile(part_zip_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+                for it in vol:
+                    zf.write(it["tmp_path"], arcname=it["arc_name"])
+
+            size_mb = os.path.getsize(part_zip_path) / (1024 * 1024)
+            if total_vols > 1:
+                fname = f"MathAm_{safe_title}_part{part_idx}_of_{total_vols}_{date_str}.zip"
+                caption = t(user_id, "zip_part", part=part_idx, total_parts=total_vols, count=len(vol), size_mb=size_mb)
+            else:
+                fname = f"MathAm_{safe_title}_{date_str}.zip"
+                caption = t(user_id, "zip_ready", count=len(vol), size_mb=size_mb)
+
+            doc = types.FSInputFile(path=part_zip_path, filename=fname)
+            for send_att in range(5):
+                try:
+                    await bot.send_document(chat_id, document=doc, caption=caption, parse_mode=ParseMode.HTML)
+                    await asyncio.sleep(1.0)
+                    break
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 1)
+                except Exception as e:
+                    logger.warning("Error sending zip part %s (attempt %s): %s", part_idx, send_att, e)
+                    if send_att == 4:
+                        await bot.send_message(chat_id, f"⚠️ Не удалось отправить часть {part_idx}/{total_vols}.")
+                    else:
+                        await asyncio.sleep(2.0 * (send_att + 1))
+
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+    finally:
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 # ============================================================
