@@ -64,9 +64,6 @@ dp = Dispatcher()
 DATABASE = {}
 BOT_USERNAME = ""
 
-DIFF_KEYS = ("easy", "medium", "hard", "imo")
-DIFF_MULT = {"easy": 1, "medium": 2, "hard": 3, "imo": 5}
-
 # ============================================================
 # LOCALIZATION
 # ============================================================
@@ -233,7 +230,6 @@ TEXTS = {
         "admin_upload_title": "✏️ Отправьте название материала:",
         "admin_upload_desc": "📝 Отправьте описание (необязательно) или «пропустить»:",
         "admin_upload_tags": "🏷 Выберите теги:",
-        "admin_upload_diff": "🎯 Выберите уровень сложности:",
         "admin_upload_cats": "📂 Выберите разделы:",
         "admin_upload_publish": "✅ Опубликовать",
         "admin_upload_published": "✅ Материал опубликован!\n📖 <b>{title}</b>\n📂 {cats}",
@@ -241,10 +237,6 @@ TEXTS = {
         "admin_upload_no_cat": "Выберите хотя бы один раздел!",
         "admin_upload_cat_missing": "Категория не найдена.",
         "admin_upload_done_short": "Сохранено ✅",
-        "admin_diff_easy": "🟢 Easy (Базовый)",
-        "admin_diff_medium": "🟡 Medium (Регион)",
-        "admin_diff_hard": "🔴 Hard (Всерос / Финал)",
-        "admin_diff_imo": "🔥 IMO (Международный)",
         "admin_task_photo": "📸 Отправьте фото задачи, либо напишите «пропустить».",
         "admin_task_text": "✍️ Отправьте текст задачи (или «пропустить»):",
         "admin_task_solution": "💡 Отправьте решение (текстом, фото или «пропустить»):",
@@ -291,7 +283,6 @@ TEXTS = {
         "admin_del_done": "🗑 Удалено записей: {n}.",
         "file_card_title": "📖 <b>{title}</b>",
         "file_card_section": "📂 Раздел: {cats}",
-        "file_card_diff": "🎯 Уровень: {diff}",
         "file_card_tags": "🏷 {tags}",
         "file_card_summary": "\n📝 {summary}",
         "new_material": "📚 <b>Новый материал в MathAm</b>",
@@ -476,7 +467,6 @@ TEXTS = {
         "admin_upload_title": "✏️ Title:",
         "admin_upload_desc": "📝 Description (or «skip»):",
         "admin_upload_tags": "🏷 Tags:",
-        "admin_upload_diff": "🎯 Difficulty:",
         "admin_upload_cats": "📂 Sections:",
         "admin_upload_publish": "✅ Publish",
         "admin_upload_published": "✅ Published!\n📖 <b>{title}</b>\n📂 {cats}",
@@ -484,10 +474,6 @@ TEXTS = {
         "admin_upload_no_cat": "Pick at least one!",
         "admin_upload_cat_missing": "Not found.",
         "admin_upload_done_short": "Saved ✅",
-        "admin_diff_easy": "🟢 Easy",
-        "admin_diff_medium": "🟡 Medium",
-        "admin_diff_hard": "🔴 Hard",
-        "admin_diff_imo": "🔥 IMO",
         "admin_task_photo": "📸 Photo of the task (or «skip»):",
         "admin_task_text": "✍️ Task text (or «skip»):",
         "admin_task_solution": "💡 Solution (or «skip»):",
@@ -534,7 +520,6 @@ TEXTS = {
         "admin_del_done": "🗑 Deleted: {n}.",
         "file_card_title": "📖 <b>{title}</b>",
         "file_card_section": "📂 Section: {cats}",
-        "file_card_diff": "🎯 Level: {diff}",
         "file_card_tags": "🏷 {tags}",
         "file_card_summary": "\n📝 {summary}",
         "new_material": "📚 <b>New material in MathAm</b>",
@@ -550,8 +535,8 @@ TEXTS = {
         "rating_medal_1": "🥇",
         "rating_medal_2": "🥈",
         "rating_medal_3": "🥉",
-        "download_all_zip": "📦 Download all materials (ZIP)",
-        "download_cat_zip": "📦 Download section (ZIP)",
+        "download_all_zip": "📦 Скачать все материалы (ZIP)",
+        "download_cat_zip": "📦 Скачать раздел (ZIP)",
         "zip_preparing": "⏳ Preparing ZIP archive ({current}/{total})...",
         "zip_empty": "⚠️ No files available for download in the catalog.",
         "zip_ready": "📦 <b>MathAm Library Archive</b>\n📚 Files: {count}\n💾 Size: {size_mb:.1f} MB",
@@ -584,19 +569,13 @@ def t(user_id: int, key: str, **kwargs) -> str:
 GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
 
 _MATH_PATTERNS = [
-    # 1. Display containers
     re.compile(r"\$\$[\s\S]+?\$\$"),
     re.compile(r"\\\[[\s\S]+?\\\]"),
-    # 2. LaTeX environments
     re.compile(r"\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\1\}"),
-    # 3. Inline containers
     re.compile(r"\\\([\s\S]+?\\\)"),
     re.compile(r"\$[^\$\n]+?\$"),
-    # 4. Commands with nested curly braces, e.g. \frac{...}{...}, \sqrt[3]{...}, \pmod{...}
     re.compile(r"\\([a-zA-Z]+)(?:\[[^\]]*\])?(?:\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})+"),
-    # 5. Standalone LaTeX commands/symbols, e.g. \alpha, \ge, \le, \ne, \infty, \pi, \cdot, \times, \pm
     re.compile(r"\\[a-zA-Z]+"),
-    # 6. Variable sub/superscript, e.g. x_1, a^2, x_{i+1}, 2^{n-1}
     re.compile(r"(?<![A-Za-zА-Яа-я0-9])[A-Za-z]\s*[\^_]\s*(?:\{[^{}]*\}|[A-Za-z0-9]+)"),
 ]
 
@@ -627,7 +606,6 @@ def _restore_math(text: str, protected: list):
             return protected[idx]
         return m.group(0)
 
-    # Multi-pass restore to handle nested structures cleanly
     for _ in range(5):
         new_text = pattern.sub(repl, text)
         if new_text == text:
@@ -704,7 +682,6 @@ async def translate_text(text: str, target_lang: str) -> str:
 
     working, protected = _protect_math(text)
 
-    # Check if remaining text contains actual words that need translation
     stripped = re.sub(r"(?:_MTH_TOKEN_|<<\s*M\s*|«\s*M\s*|MTH_TOKEN_)\s*(\d+)(?:\s*(?:>>|»|_))?", "", working)
     words = re.findall(r"[a-zA-Zа-яА-ЯёЁ]{2,}", stripped)
     if not words:
@@ -890,7 +867,6 @@ def get_catalog_files_list() -> list:
                     "categories": [cat_data.get("title", cat_key)],
                     "summary": f.get("summary", ""),
                     "tags": list(f.get("tags", [])),
-                    "difficulty": f.get("difficulty") or "medium",
                     "must_read": f.get("must_read", False),
                 }
             else:
@@ -1089,7 +1065,6 @@ def get_nickname(uid_str: str) -> str:
 
 
 def user_display(uid_str: str) -> str:
-    # No bold tags around nickname
     u = DATABASE.get("users", {}).get(uid_str, {})
     nick = u.get("nickname") or u.get("username") or f"id{uid_str}"
     tg = u.get("first_name") or ""
@@ -1212,7 +1187,6 @@ async def load_db():
             f.setdefault("caption", "—")
             f.setdefault("summary", "")
             f.setdefault("tags", [])
-            f.setdefault("difficulty", "medium")
             f.setdefault("must_read", False)
             f.setdefault("added_at", get_yerevan_date())
             f.setdefault("likes", [])
@@ -1224,7 +1198,6 @@ async def load_db():
         data["links"][sec_key].setdefault("title", default_sec["title"])
         data["links"][sec_key].setdefault("items", [])
 
-    # Always ensure YouTube videos exist with working clean URLs: delete old and recreate cleanly
     data.setdefault("links", {})["useful_videos"] = copy.deepcopy(DEFAULT_STATE["links"]["useful_videos"])
 
     if not data.get("tags"):
@@ -1254,7 +1227,6 @@ async def load_db():
             task.setdefault("solution", "")
             task.setdefault("solution_photo_file_id", None)
             task.setdefault("solution_document_file_id", None)
-            task.setdefault("difficulty", "medium")
             task.setdefault("tags", [])
             task.setdefault("status", "published")
             task.setdefault("source", "admin")
@@ -1316,7 +1288,6 @@ class AdminUpload(StatesGroup):
     waiting_title = State()
     waiting_description = State()
     choosing_tags = State()
-    choosing_difficulty = State()
     choosing_categories = State()
 
 
@@ -1355,7 +1326,6 @@ class TaskOfDayAdmin(StatesGroup):
     waiting_for_task_text = State()
     waiting_for_solution = State()
     waiting_numeric_answer = State()
-    choosing_difficulty = State()
     choosing_tags = State()
     waiting_for_date = State()
 
@@ -1424,7 +1394,6 @@ async def get_catalog_keyboard(user_id: int):
             text=f"{title} ({count})",
             callback_data=f"cat:{cat_key}",
         )])
-    # Button to download all PDFs in a ZIP archive
     builder.append([InlineKeyboardButton(
         text=t(user_id, "download_all_zip"),
         callback_data="catalog:zip_all"
@@ -1576,7 +1545,6 @@ def get_links_section_keyboard(sec_key: str, user_id: int):
     builder = []
     for idx, item in enumerate(items):
         url = (item.get("url") or "").strip()
-        # Ensure scheme is present so Telegram inline URL buttons work perfectly
         if not (url.startswith("http://") or url.startswith("https://")):
             url = f"https://{url}"
         title = item.get("title") or f"Link #{idx + 1}"
@@ -1629,7 +1597,7 @@ async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: lis
     total = len(files_to_download)
     status_msg = await bot.send_message(chat_id, t(user_id, "zip_preparing", current=0, total=total))
 
-    sem = asyncio.Semaphore(4)
+    sem = asyncio.Semaphore(3)
     downloaded_files = []
     completed_count = 0
     lock = asyncio.Lock()
@@ -1638,30 +1606,40 @@ async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: lis
         nonlocal completed_count
         file_id = item.get("file_id")
         if not file_id:
+            async with lock:
+                completed_count += 1
             return
+
         async with sem:
-            try:
-                tg_file = await bot.get_file(file_id)
-                buf = io.BytesIO()
-                await bot.download_file(tg_file.file_path, destination=buf)
-                content = buf.getvalue()
-                if content:
-                    folder = sanitize_filename(item.get("category", "General"))
-                    fname = sanitize_filename(item.get("filename", "material"))
-                    if not fname.lower().endswith(".pdf"):
-                        fname += ".pdf"
-                    async with lock:
-                        downloaded_files.append((f"{folder}/{fname}", content))
-                        completed_count += 1
-                        if completed_count % 5 == 0 or completed_count == total:
-                            try:
-                                await status_msg.edit_text(t(user_id, "zip_preparing", current=completed_count, total=total))
-                            except Exception:
-                                pass
-            except Exception as e:
-                logger.warning("Failed to download file %s for zip: %s", file_id, e)
-                async with lock:
-                    completed_count += 1
+            for attempt in range(4):
+                try:
+                    tg_file = await bot.get_file(file_id)
+                    buf = io.BytesIO()
+                    await bot.download_file(tg_file.file_path, destination=buf)
+                    content = buf.getvalue()
+                    if content:
+                        folder = sanitize_filename(item.get("category", "General"))
+                        fname = sanitize_filename(item.get("filename", "material"))
+                        if not fname.lower().endswith(".pdf"):
+                            fname += ".pdf"
+                        async with lock:
+                            downloaded_files.append((f"{folder}/{fname}", content))
+                            completed_count += 1
+                            if completed_count % 3 == 0 or completed_count == total:
+                                try:
+                                    await status_msg.edit_text(t(user_id, "zip_preparing", current=completed_count, total=total))
+                                except Exception:
+                                    pass
+                        return
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 1)
+                except Exception as e:
+                    if attempt == 3:
+                        logger.warning("Failed to download file %s after retries: %s", file_id, e)
+                        async with lock:
+                            completed_count += 1
+                    else:
+                        await asyncio.sleep(1.5 * (attempt + 1))
 
     await asyncio.gather(*[_fetch_file(item) for item in files_to_download])
 
@@ -1720,7 +1698,15 @@ async def create_and_send_zip(chat_id: int, user_id: int, files_to_download: lis
             caption = t(user_id, "zip_ready", count=len(vol), size_mb=size_mb)
 
         doc = types.BufferedInputFile(zip_bytes, filename=fname)
-        await bot.send_document(chat_id, document=doc, caption=caption, parse_mode=ParseMode.HTML)
+        for send_att in range(3):
+            try:
+                await bot.send_document(chat_id, document=doc, caption=caption, parse_mode=ParseMode.HTML)
+                break
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
+            except Exception:
+                if send_att == 2:
+                    logger.exception("Failed to send ZIP volume %s", part_idx)
 
     try:
         await status_msg.delete()
@@ -1742,8 +1728,6 @@ async def format_file_info(f: dict, cats: list, user_id: int) -> str:
     lines = [t(user_id, "file_card_title", title=html.escape(title))]
     if cats_tr:
         lines.append(t(user_id, "file_card_section", cats=html.escape(" · ".join(cats_tr))))
-    diff_key = f"admin_diff_{f.get('difficulty') or 'medium'}"
-    lines.append(t(user_id, "file_card_diff", diff=t(user_id, diff_key)))
     tags = " ".join(f.get("tags") or [])
     if tags:
         tags_tr = await localize(tags, user_id)
@@ -2290,7 +2274,6 @@ async def process_add_category_title(message: types.Message, state: FSMContext):
     if not title:
         await message.answer("⚠️ Введите название раздела:")
         return
-    # Generate clean unique key
     base_key = re.sub(r"[^a-zA-Z0-9_]", "", title.lower())[:20]
     if not base_key:
         base_key = f"cat_{uuid.uuid4().hex[:6]}"
@@ -2346,7 +2329,7 @@ async def cb_catalog_zip_all(callback: types.CallbackQuery):
                     "filename": f.get("caption") or "material",
                     "uid": uid,
                 })
-    await callback.answer("⏳ Собираем архив...")
+    await callback.answer("⏳ Собираем полный архив библиотеки...")
     await create_and_send_zip(
         chat_id=callback.message.chat.id,
         user_id=callback.from_user.id,
@@ -2667,7 +2650,6 @@ async def cb_search_main(callback: types.CallbackQuery, state: FSMContext):
     markup = await get_tag_toggle_keyboard([], "search:tag", "search:go",
                                            callback.from_user.id,
                                            t(callback.from_user.id, "search_reset"), "search:reset")
-    # Add explicit button to search tasks as well
     markup.inline_keyboard.insert(-2, [InlineKeyboardButton(text=t(callback.from_user.id, "search_tasks_btn"),
                                                             callback_data="search:tasks")])
     await safe_send_or_edit(callback, t(callback.from_user.id, "search_title"), reply_markup=markup)
@@ -2772,7 +2754,6 @@ async def cb_search_tasks(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# Dedicated entry for tasks by tag
 @dp.callback_query(F.data == "tasktagsearch:main")
 async def cb_tasktagsearch_main(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(TaskTagSearch.selecting)
@@ -2828,7 +2809,6 @@ async def cb_tasksearchtag_toggle(callback: types.CallbackQuery, state: FSMConte
         await callback.answer()
         return
 
-    # Toggle tag index
     res = await toggle_tag_by_index(callback, state)
     if not res:
         return
@@ -3259,8 +3239,6 @@ async def cb_task_edit(callback: types.CallbackQuery, state: FSMContext):
                               callback_data=f"tedit:photo:{date_str}:{idx}")],
         [InlineKeyboardButton(text="💡 Изменить решение",
                               callback_data=f"tedit:sol:{date_str}:{idx}")],
-        [InlineKeyboardButton(text="🎯 Сложность",
-                              callback_data=f"tedit:diff:{date_str}:{idx}")],
         [InlineKeyboardButton(text="⬅️ Назад",
                               callback_data=f"task:view:{date_str}:{idx}")],
     ]
@@ -3366,34 +3344,6 @@ async def process_tedit_sol(message: types.Message, state: FSMContext):
     await show_task(message, date_str, idx, message.from_user.id)
 
 
-@dp.callback_query(F.data.startswith("tedit:diff:"))
-async def cb_tedit_diff(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Недоступно", show_alert=True); return
-    _, _, date_str, idx = callback.data.split(":", 3)
-    rows = [[InlineKeyboardButton(text=t(callback.from_user.id, f"admin_diff_{lvl}"),
-                                  callback_data=f"tedit:setdiff:{date_str}:{idx}:{lvl}")]
-            for lvl in DIFF_KEYS]
-    rows.append([InlineKeyboardButton(text="⬅️", callback_data=f"task:edit:{date_str}:{idx}")])
-    await safe_send_or_edit(callback, "🎯 Выберите сложность:",
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("tedit:setdiff:"))
-async def cb_tedit_setdiff(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Недоступно", show_alert=True); return
-    _, _, date_str, idx_s, lvl = callback.data.split(":", 4)
-    idx = int(idx_s)
-    task = get_task(date_str, idx)
-    if task and lvl in DIFF_KEYS:
-        task["difficulty"] = lvl
-        await save_db(DATABASE)
-    await callback.answer("✅ Сохранено")
-    await show_task(callback, date_str, idx, callback.from_user.id)
-
-
 @dp.callback_query(F.data.startswith("task:show_sol:"))
 async def cb_task_show_sol(callback: types.CallbackQuery):
     parts = callback.data.split(":")
@@ -3465,10 +3415,10 @@ async def cb_task_solve(callback: types.CallbackQuery, state: FSMContext):
     help_text = (
         "✍️ <b>Отправка решения задачи</b>\n\n"
         "Вы можете отправить:\n"
-        "• <b>Фотографии решения</b> — одно или <b>несколько фото</b> (можно сразу альбомом или отдельными сообщениями)\n"
-        "• <b>Текст решения</b> — любого объёма, без ограничений (если текст очень длинный, можно отправить в двух или нескольких сообщениях)\n"
+        "• <b>Фотографии решения</b> — одно или <b>несколько фото</b>\n"
+        "• <b>Текст решения</b> — любого объёма\n"
         "• Документы (PDF и др.)\n\n"
-        "После того как отправите все материалы (фото/текст), нажмите кнопку <b>«✅ Завершить и отправить решение»</b> ниже.\n\n"
+        "После отправки всех материалов нажмите кнопку <b>«✅ Завершить и отправить решение»</b> ниже.\n\n"
         "/cancel — отмена."
     )
     await callback.message.answer(help_text, parse_mode=ParseMode.HTML, reply_markup=markup)
@@ -3516,7 +3466,6 @@ async def notify_admins_about_solution(date_str: str, idx: int, uid_str: str, en
 
     for admin_id in ADMIN_IDS:
         try:
-            # 1. Photos
             if photos:
                 if len(photos) == 1:
                     if text and len(context + "\n\n" + text) <= 1000 and not docs:
@@ -3536,11 +3485,9 @@ async def notify_admins_about_solution(date_str: str, idx: int, uid_str: str, en
                         media.append(InputMediaPhoto(media=p, caption=cap, parse_mode=ParseMode.HTML))
                     await bot.send_media_group(admin_id, media=media)
 
-            # 2. Documents
             for d in docs:
                 await bot.send_document(admin_id, document=d)
 
-            # 3. Unlimited text split across messages if long
             full_body = text
             if not photos:
                 full_body = context + ("\n\n" + text if text else "")
@@ -3677,7 +3624,7 @@ async def process_user_solution(message: types.Message, state: FSMContext):
             f"📷 Фото: <b>{len(photos)}</b> шт.\n"
             f"📄 Документов: <b>{len(docs)}</b> шт.\n"
             f"✍️ Текст: <b>{len(current_text)}</b> симв.\n\n"
-            "<i>Вы можете отправить ещё фото или текст (если решение объёмное, можно несколькими сообщениями подряд без ограничений по длине).\n"
+            "<i>Вы можете отправить ещё фото или текст без ограничений по длине.\n"
             "Когда закончите отправку, нажмите кнопку ниже:</i>"
         )
         await message.answer(status_msg, parse_mode=ParseMode.HTML, reply_markup=markup)
@@ -3739,8 +3686,7 @@ async def process_numans(message: types.Message, state: FSMContext):
             "submitted_at": datetime.now(YEREVAN_TZ).isoformat(),
         }
         task.setdefault("user_solutions", {})[uid_str] = entry
-        mult = DIFF_MULT.get(task.get("difficulty", "medium"), 2)
-        add_pts = 10 * mult
+        add_pts = 10
         u["score"] = u.get("score", 0) + add_pts
         await save_db(DATABASE)
         await message.answer(f"✅ <b>Верно!</b> +{add_pts} очков.", parse_mode=ParseMode.HTML)
@@ -3817,7 +3763,6 @@ async def cb_solfull(callback: types.CallbackQuery):
     docs = sol.get("document_file_ids") or ([sol["document_file_id"]] if sol.get("document_file_id") else [])
 
     try:
-        # If photos
         if photos:
             if len(photos) == 1:
                 if text and len(header + "\n\n" + text) <= 1000 and not docs:
@@ -3837,11 +3782,9 @@ async def cb_solfull(callback: types.CallbackQuery):
                     media.append(InputMediaPhoto(media=p, caption=cap, parse_mode=ParseMode.HTML))
                 await callback.message.answer_media_group(media=media)
 
-        # If docs
         for d in docs:
             await callback.message.answer_document(document=d)
 
-        # Text without limit: split into chunks of <= 4000 chars
         full_content = text
         if not photos:
             full_content = header + ("\n\n" + text if text else "")
@@ -3941,13 +3884,11 @@ async def cb_grade(callback: types.CallbackQuery):
     sol["grade"] = new_grade if new_grade > 0 else None
     await save_db(DATABASE)
 
-    mult = DIFF_MULT.get(task.get("difficulty", "medium"), 2)
-    delta = (new_grade - prev_grade) * mult
+    delta = new_grade - prev_grade
     if delta != 0:
         await award_points(int(uid_str), delta)
 
     name = sol.get("nickname") or get_nickname(uid_str)
-    # Send notification message directly to user about approved solution & grade
     try:
         if new_grade > 0:
             if prev_grade:
@@ -4220,7 +4161,7 @@ async def cb_admin_upload(callback: types.CallbackQuery, state: FSMContext):
         return
     await state.set_state(AdminUpload.waiting_document)
     await state.update_data(file_id=None, file_name="", title="", description="",
-                            selected_tags=[], difficulty="medium", upl_cats=[])
+                            selected_tags=[], upl_cats=[])
     await callback.message.answer(t(callback.from_user.id, "admin_upload_ask"))
     await callback.answer()
 
@@ -4275,34 +4216,17 @@ async def cb_upl_tag(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "upl:tags_done", StateFilter(AdminUpload.choosing_tags))
 async def cb_upl_tags_done(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(AdminUpload.choosing_difficulty)
-    builder = [[InlineKeyboardButton(text=t(callback.from_user.id, f"admin_diff_{lvl}"),
-                                     callback_data=f"upl:diff:{lvl}")]
-               for lvl in DIFF_KEYS]
-    builder.append([InlineKeyboardButton(text="❌", callback_data="menu:main")])
-    await safe_send_or_edit(callback, t(callback.from_user.id, "admin_upload_diff"),
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
+    await state.set_state(AdminUpload.choosing_categories)
+    data = await state.get_data()
+    await safe_send_or_edit(callback, t(callback.from_user.id, "admin_upload_cats"),
+                            reply_markup=await get_category_toggle_keyboard(data.get("upl_cats", []),
+                                                                            callback.from_user.id))
     await callback.answer()
 
 
 @dp.callback_query(F.data == "upl:tags_skip", StateFilter(AdminUpload.choosing_tags))
 async def cb_upl_tags_skip(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(selected_tags=[])
-    await state.set_state(AdminUpload.choosing_difficulty)
-    builder = [[InlineKeyboardButton(text=t(callback.from_user.id, f"admin_diff_{lvl}"),
-                                     callback_data=f"upl:diff:{lvl}")]
-               for lvl in DIFF_KEYS]
-    builder.append([InlineKeyboardButton(text="❌", callback_data="menu:main")])
-    await safe_send_or_edit(callback, t(callback.from_user.id, "admin_upload_diff"),
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
-    await callback.answer()
-
-
-@dp.callback_query(StateFilter(AdminUpload.choosing_difficulty), F.data.startswith("upl:diff:"))
-async def cb_upl_diff(callback: types.CallbackQuery, state: FSMContext):
-    level = callback.data.split(":", 2)[2]
-    if level in DIFF_KEYS:
-        await state.update_data(difficulty=level)
     await state.set_state(AdminUpload.choosing_categories)
     data = await state.get_data()
     await safe_send_or_edit(callback, t(callback.from_user.id, "admin_upload_cats"),
@@ -4351,7 +4275,6 @@ async def cb_upl_publish(callback: types.CallbackQuery, state: FSMContext):
         "caption": data.get("title") or "—",
         "summary": data.get("description", ""),
         "tags": data.get("selected_tags", []),
-        "difficulty": data.get("difficulty", "medium"),
         "must_read": False,
         "added_at": get_yerevan_date(),
         "likes": [],
@@ -4452,31 +4375,13 @@ async def process_task_numeric(message: types.Message, state: FSMContext):
         except ValueError:
             await message.answer("⚠️ Не число. Введите число или «пропустить».")
             return
-    await state.set_state(TaskOfDayAdmin.choosing_difficulty)
-    builder = [[InlineKeyboardButton(text=t(message.from_user.id, f"admin_diff_{lvl}"),
-                                     callback_data=f"taskdiff:{lvl}")]
-               for lvl in DIFF_KEYS]
-    builder.append([InlineKeyboardButton(text="❌", callback_data="menu:main")])
-    await message.answer("🎯 Выберите сложность задачи (влияет на очки):",
-                         reply_markup=InlineKeyboardMarkup(inline_keyboard=builder))
-
-
-@dp.callback_query(StateFilter(TaskOfDayAdmin.choosing_difficulty),
-                   F.data.startswith("taskdiff:"))
-async def cb_task_diff(callback: types.CallbackQuery, state: FSMContext):
-    lvl = callback.data.split(":", 1)[1]
-    if lvl not in DIFF_KEYS:
-        await callback.answer("Error", show_alert=True)
-        return
-    await state.update_data(task_difficulty=lvl)
     await state.update_data(selected_tags=[])
     await state.set_state(TaskOfDayAdmin.choosing_tags)
-    await safe_send_or_edit(
-        callback, "🏷 Выберите теги задачи (или пропустите):",
+    await message.answer(
+        "🏷 Выберите теги задачи (или пропустите):",
         reply_markup=await get_tag_toggle_keyboard(
-            [], "tasktag", "tasktag:done", callback.from_user.id,
+            [], "tasktag", "tasktag:done", message.from_user.id,
             "⏭ Без тегов", "tasktag:skip"))
-    await callback.answer()
 
 
 @dp.callback_query(StateFilter(TaskOfDayAdmin.choosing_tags),
@@ -4532,7 +4437,6 @@ async def process_task_date(message: types.Message, state: FSMContext):
         "solution": data.get("solution_text", ""),
         "solution_photo_file_id": data.get("solution_photo"),
         "solution_document_file_id": data.get("solution_document"),
-        "difficulty": data.get("task_difficulty", "medium"),
         "tags": data.get("selected_tags", []),
         "numeric_answer": data.get("task_numeric"),
         "source": "admin",
@@ -4804,7 +4708,6 @@ async def cb_subcat(callback: types.CallbackQuery):
         "caption": sub.get("title") or "—",
         "summary": "",
         "tags": sub.get("tags", []),
-        "difficulty": "medium",
         "must_read": False,
         "added_at": get_yerevan_date(),
         "likes": [],
@@ -4814,7 +4717,6 @@ async def cb_subcat(callback: types.CallbackQuery):
     await save_db(DATABASE)
     await save_submission(sub_id, {"status": "published"})
     cat_title = DATABASE["categories"][cat_key].get("title", cat_key)
-    # Notify user that submitted material was approved and published
     try:
         user_uid = sub.get("user_id")
         if user_uid:
@@ -4842,7 +4744,6 @@ async def cb_sub_reject(callback: types.CallbackQuery):
         return
     await save_submission(sub_id, {"status": "rejected",
                                    "processed_at": datetime.now(YEREVAN_TZ).isoformat()})
-    # Notify user that submitted material was rejected
     try:
         user_uid = sub.get("user_id")
         if user_uid:
@@ -4996,6 +4897,7 @@ async def process_efile_doc(message: types.Message, state: FSMContext):
     await save_db(DATABASE)
     await state.clear()
     await message.answer(t(message.from_user.id, "admin_edit_doc_done", n=n))
+
 
 
 @dp.callback_query(F.data == "admin:efile:title")
@@ -5202,8 +5104,7 @@ async def on_startup(bot: Bot):
         BotCommand(command="catalog", description="📚 Catalog / Каталог"),
         BotCommand(command="task", description="🎯 Task of day / Задача дня"),
         BotCommand(command="zip", description="📦 Download all PDFs / Скачать PDF (ZIP)"),
-        BotCommand(command="language", description="🌐 Language / Язык"),
-        BotCommand(command="nickname", description="🪪 Nickname / Никнейм"),
+                BotCommand(command="nickname", description="🪪 Nickname / Никнейм"),
         BotCommand(command="cancel", description="❌ Cancel / Отмена"),
     ]
     await bot.set_my_commands(commands)
