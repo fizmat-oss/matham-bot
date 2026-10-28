@@ -55,17 +55,6 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID", "@matham123456").strip() or "@matham12
 TG_TEXT_LIMIT = 4000
 RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "30"))
 
-# ============================================================
-# GOOGLE DRIVE CONFIG
-# ============================================================
-DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "").strip()
-DRIVE_SERVICE_ACCOUNT_FILE = os.environ.get("DRIVE_SERVICE_ACCOUNT_FILE", "").strip()
-DRIVE_SERVICE_ACCOUNT_JSON = os.environ.get("DRIVE_SERVICE_ACCOUNT_JSON", "").strip()
-DRIVE_SYNC_CHAT_ID_RAW = os.environ.get("DRIVE_SYNC_CHAT_ID", "").strip()
-DRIVE_SYNC_CHAT_ID = (
-    int(DRIVE_SYNC_CHAT_ID_RAW) if DRIVE_SYNC_CHAT_ID_RAW.lstrip("-").isdigit() else None
-)
-
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 mongo_db = mongo_client[MONGO_DB_NAME]
 db_collection = mongo_db["catalog"]
@@ -1277,196 +1266,6 @@ async def get_submission(sub_id: str) -> dict:
     return doc if doc else {}
 
 
-# ============================================================
-# GOOGLE DRIVE HELPERS
-# ============================================================
-
-_drive_service = None
-
-
-def get_drive_service():
-    global _drive_service
-    if _drive_service is not None:
-        return _drive_service
-    try:
-        from google.oauth2.service_account import Credentials
-        from googleapiclient.discovery import build
-    except Exception as e:
-        logger.warning("Google Drive libraries not installed: %s", e)
-        return None
-    creds = None
-    if DRIVE_SERVICE_ACCOUNT_JSON:
-        import json
-        info = json.loads(DRIVE_SERVICE_ACCOUNT_JSON)
-        creds = Credentials.from_service_account_info(
-            info, scopes=["https://www.googleapis.com/auth/drive.file"]
-        )
-    elif DRIVE_SERVICE_ACCOUNT_FILE and os.path.exists(DRIVE_SERVICE_ACCOUNT_FILE):
-        creds = Credentials.from_service_account_file(
-            DRIVE_SERVICE_ACCOUNT_FILE, scopes=["https://www.googleapis.com/auth/drive.file"]
-        )
-    if creds is None:
-        logger.warning("No Drive service account credentials configured")
-        return None
-    _drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
-    return _drive_service
-
-
-async def list_drive_files(folder_id=None):
-    """List PDF/ebook/zip files in a Drive folder."""
-    service = get_drive_service()
-    if service is None:
-        return []
-    folder_id = folder_id or DRIVE_FOLDER_ID
-    if not folder_id:
-        return []
-    query = (
-        f"'{folder_id}' in parents and trashed = false and "
-        f"(mimeType contains 'pdf' or mimeType contains 'epub' or "
-        f"mimeType contains 'application/zip' or mimeType contains 'application/x-zip-compressed')"
-    )
-    files = []
-    page_token = None
-    while True:
-        try:
-            resp = service.files().list(
-                q=query,
-                fields="nextPageToken, files(id, name, mimeType, size, modifiedTime)",
-                pageSize=100,
-                pageToken=page_token,
-            ).execute()
-        except Exception:
-            logger.exception("Drive list failed")
-            break
-        files.extend(resp.get("files", []))
-        page_token = resp.get("nextPageToken")
-        if not page_token:
-            break
-    return files
-
-
-async def download_drive_file(file_id):
-    """Download a file from Drive. Returns (bytes, name, mimeType) or None."""
-    service = get_drive_service()
-    if service is None:
-        return None
-    try:
-        meta = service.files().get(fileId=file_id, fields="name, mimeType").execute()
-        request = service.files().get_media(fileId=file_id)
-        import io
-        fh = io.BytesIO()
-        from googleapiclient.http import MediaIoBaseDownload
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        return fh.getvalue(), meta.get("name", "file"), meta.get("mimeType", "application/octet-stream")
-    except Exception:
-        logger.exception("Drive download failed for %s", file_id)
-        return None
-
-
-async def upload_to_drive(filename, data_bytes, mime_type="application/octet-stream", folder_id=None):
-    """Upload bytes to Drive folder. Returns Drive file id or None."""
-    service = get_drive_service()
-    if service is None:
-        return None
-    folder_id = folder_id or DRIVE_FOLDER_ID
-    try:
-        import io
-        from googleapiclient.http import MediaIoBaseUpload
-        media = MediaIoBaseUpload(io.BytesIO(data_bytes), mimetype=mime_type, resumable=True)
-        metadata = {"name": filename}
-        if folder_id:
-            metadata["parents"] = [folder_id]
-        file = service.files().create(body=metadata, media_body=media, fields="id").execute()
-        return file.get("id")
-    except Exception:
-        logger.exception("Drive upload failed for %s", filename)
-        return None
-
-
-async def sync_drive_to_catalog(user_id: int):
-    """Import files from Drive folder into the catalog."""
-    drive_files = await list_drive_files()
-    if not drive_files:
-        return 0, "No files found in Drive folder."
-    imported = 0
-    target_chat = DRIVE_SYNC_CHAT_ID or user_id
-    for df in drive_files:
-        name = df.get("name", "material")
-        already = any(
-            f.get("caption") == name or f.get("file_name") == name
-            for cat in DATABASE.get("categories", {}).values()
-            for f in cat.get("files", [])
-        )
-        if already:
-            continue
-        res = await download_drive_file(df["id"])
-        if res is None:
-            continue
-        data_bytes, dname, dmime = res
-        try:
-            msg = await bot.send_document(
-                target_chat,
-                document=types.BufferedInputFile(data_bytes, filename=dname),
-                caption=f"📥 Drive import: {dname}",
-            )
-            tg_file_id = msg.document.file_id
-        except Exception:
-            logger.exception("Failed to upload Drive file %s to Telegram", dname)
-            continue
-        entry = {
-            "file_unique_id": str(uuid.uuid4()),
-            "file_id": tg_file_id,
-            "file_name": dname,
-            "caption": dname,
-            "summary": "Imported from Google Drive",
-            "tags": [],
-            "must_read": False,
-            "added_at": get_yerevan_date(),
-            "likes": [],
-            "comments": [],
-        }
-        cat_key = "drive_imports"
-        DATABASE.setdefault("categories", {}).setdefault(
-            cat_key, {"title": "📥 Import from Drive", "files": []}
-        )
-        DATABASE["categories"][cat_key]["files"].append(entry)
-        imported += 1
-    await save_db(DATABASE)
-    return imported, f"Imported {imported} file(s) from Drive."
-
-
-async def sync_catalog_to_drive(user_id: int):
-    """Export catalog files to Drive folder."""
-    files = get_catalog_files_list()
-    if not files:
-        return 0, "No files in catalog."
-    exported = 0
-    import io
-    for f in files:
-        tg_file_id = f.get("file_id")
-        if not tg_file_id:
-            continue
-        try:
-            tg_file = await bot.get_file(tg_file_id)
-            buf = io.BytesIO()
-            await bot.download_file(tg_file.file_path, destination=buf)
-            data_bytes = buf.getvalue()
-        except Exception:
-            logger.exception("Failed to download catalog file %s", tg_file_id)
-            continue
-        fname = f.get("caption") or f.get("file_name") or "material"
-        if not fname.lower().endswith((".pdf", ".epub", ".zip")):
-            fname += ".pdf"
-        try:
-            await upload_to_drive(fname, data_bytes)
-            exported += 1
-        except Exception:
-            logger.exception("Failed to upload %s to Drive", fname)
-    return exported, f"Exported {exported} file(s) to Drive."
-
 
 # ============================================================
 # FSM STATES
@@ -1564,10 +1363,6 @@ class TaskEdit(StatesGroup):
 
 class TaskSchedule(StatesGroup):
     waiting_datetime = State()
-
-
-class AdminDriveSync(StatesGroup):
-    waiting_folder_id = State()
 
 
 # ============================================================
@@ -1772,8 +1567,6 @@ def get_links_section_keyboard(sec_key: str, user_id: int):
 def get_admin_menu_keyboard(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t(user_id, "admin_upload"), callback_data="admin:upload")],
-        [InlineKeyboardButton(text="📥 Синхр. с Drive (в каталог)", callback_data="admin:drive_import")],
-        [InlineKeyboardButton(text="📤 Экспорт каталога в Drive", callback_data="admin:drive_export")],
         [InlineKeyboardButton(text=t(user_id, "admin_add_task"), callback_data="admin:add_task")],
         [InlineKeyboardButton(text=t(user_id, "admin_cats"), callback_data="admin:cats")],
         [InlineKeyboardButton(text=t(user_id, "admin_tags"), callback_data="admin:tags")],
@@ -4342,43 +4135,6 @@ async def cb_admin_main(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await safe_send_or_edit(callback, t(callback.from_user.id, "admin_title"),
                             reply_markup=get_admin_menu_keyboard(callback.from_user.id))
-    await callback.answer()
-
-
-# ============================================================
-# ADMIN: GOOGLE DRIVE SYNC
-# ============================================================
-
-@dp.callback_query(F.data == "admin:drive_import")
-async def cb_admin_drive_import(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    if not DRIVE_FOLDER_ID and not DRIVE_SERVICE_ACCOUNT_JSON and not DRIVE_SERVICE_ACCOUNT_FILE:
-        await callback.answer("Drive not configured (set DRIVE_FOLDER_ID + credentials)", show_alert=True)
-        return
-    await state.clear()
-    await callback.message.answer(
-        "📥 Начинаю импорт файлов из папки Google Drive в каталог...\n"
-        "Каждый файл будет загружен в Telegram и добавлен в раздел «Импорт из Drive»."
-    )
-    count, msg = await sync_drive_to_catalog(callback.from_user.id)
-    await callback.message.answer(msg)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin:drive_export")
-async def cb_admin_drive_export(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer(t(callback.from_user.id, "only_admin"), show_alert=True)
-        return
-    if not DRIVE_FOLDER_ID and not DRIVE_SERVICE_ACCOUNT_JSON and not DRIVE_SERVICE_ACCOUNT_FILE:
-        await callback.answer("Drive not configured (set DRIVE_FOLDER_ID + credentials)", show_alert=True)
-        return
-    await state.clear()
-    await callback.message.answer("📤 Начинаю экспорт файлов из каталога в Google Drive...")
-    count, msg = await sync_catalog_to_drive(callback.from_user.id)
-    await callback.message.answer(msg)
     await callback.answer()
 
 
